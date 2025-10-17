@@ -1,0 +1,66 @@
+package common
+
+import (
+	"encoding/binary"
+	"fmt"
+	"math"
+	"testing"
+)
+
+func TestFloat64Conversions(t *testing.T) {
+	cases := []float64{
+		0,
+		math.Copysign(0, -1),
+		1.5,
+		-2.75,
+		math.Pi,
+		math.Inf(1),
+		math.Inf(-1),
+		math.NaN(),
+	}
+
+	for idx, val := range cases {
+		val := val
+		t.Run(fmt.Sprintf("case_%d", idx), func(t *testing.T) {
+			expectedBits := math.Float64bits(val)
+
+			stringified := Float64ToString(val)
+			if stringified != fmt.Sprint(expectedBits) {
+				t.Fatalf("Float64ToString(%v) = %s, want %d", val, stringified, expectedBits)
+			}
+
+			asBytes := Float64ToBytes(val)
+			if len(asBytes) != 8 {
+				t.Fatalf("Float64ToBytes returned %d bytes, want 8", len(asBytes))
+			}
+			decoded := binary.BigEndian.Uint64(asBytes)
+			if decoded != expectedBits {
+				t.Fatalf("Float64ToBytes roundtrip mismatch, got %d want %d", decoded, expectedBits)
+			}
+		})
+	}
+}
+
+func TestHashItDeterministicPerSeed(t *testing.T) {
+	key := []byte("hyperloglog")
+	expected := [...]uint64{
+		6717797301830851112,
+		1162927780928237913,
+		3396633771800918801,
+		13352178645068512765,
+		14365077450608780626,
+		15202844717277464039,
+	}
+
+	for seedIdx, want := range expected {
+		got := HashIt(seedIdx, key)
+		if got != want {
+			t.Fatalf("HashIt(%d) = %d, want %d", seedIdx, got, want)
+		}
+
+		again := HashIt(seedIdx, key)
+		if got != again {
+			t.Fatalf("HashIt(%d) inconsistent: first %d, second %d", seedIdx, got, again)
+		}
+	}
+}
