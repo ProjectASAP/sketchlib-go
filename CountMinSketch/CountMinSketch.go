@@ -9,7 +9,7 @@ import (
 	"github.com/spaolacci/murmur3"
 )
 
-// FIX: Semua field diawali Huruf Besar agar bisa di-serialize oleh Gob
+// FIX: All fields are capitalized (exported) to allow Gob serialization
 type CountMinSketch struct {
 	Rows   int
 	Cols   int
@@ -90,7 +90,7 @@ func NewCountMinSketch(row, col int, seed1 []uint32) (s CountMinSketch, err erro
 	return s, nil
 }
 
-// Accessor methods untuk kompatibilitas
+// Accessor methods for compatibility
 func (s CountMinSketch) Row() int { return s.Rows }
 func (s CountMinSketch) Col() int { return s.Cols }
 
@@ -147,4 +147,34 @@ func (s CountMinSketch) EstimateStringSum2(key string) float64 {
 		}
 	}
 	return res
+}
+
+func (s CountMinSketch) CM_L1() float64 {
+	var res float64 = math.MaxFloat64
+	var tmp_sum float64
+	for i := 0; i < s.Rows; i++ {
+		tmp_sum = 0
+		for j := 0; j < s.Cols; j++ {
+			tmp_sum += s.Count[i][j]
+		}
+		if res > tmp_sum {
+			res = tmp_sum
+		}
+	}
+	return res
+}
+
+func (s CountMinSketch) CM_L2() float64 {
+	var res float64 = math.MaxFloat64
+	var tmp_sq_sum float64
+	for i := 0; i < s.Rows; i++ {
+		tmp_sq_sum = 0
+		for j := 0; j < s.Cols; j++ {
+			tmp_sq_sum += s.Count[i][j] * s.Count[i][j]
+		}
+		if res > tmp_sq_sum {
+			res = tmp_sq_sum
+		}
+	}
+	return math.Sqrt(res)
 }

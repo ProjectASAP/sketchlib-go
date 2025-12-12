@@ -24,39 +24,6 @@ func almostEq(a, b, tol float64) bool {
 	return math.Abs(a-b) <= tol
 }
 
-// Helper: Hitung L1 Norm secara manual dari Public Field s.Count
-// Menggantikan s.cm_l1()
-func calculateL1(s CountMinSketch) float64 {
-	var minSum float64 = math.MaxFloat64
-	for r := 0; r < s.Rows; r++ {
-		var rowSum float64
-		for c := 0; c < s.Cols; c++ {
-			rowSum += s.Count[r][c]
-		}
-		if rowSum < minSum {
-			minSum = rowSum
-		}
-	}
-	return minSum
-}
-
-// Helper: Hitung L2 Norm secara manual dari Public Field s.Count
-// Menggantikan s.cm_l2()
-func calculateL2(s CountMinSketch) float64 {
-	var minSqSum float64 = math.MaxFloat64
-	for r := 0; r < s.Rows; r++ {
-		var rowSqSum float64
-		for c := 0; c < s.Cols; c++ {
-			val := s.Count[r][c]
-			rowSqSum += val * val
-		}
-		if rowSqSum < minSqSum {
-			minSqSum = rowSqSum
-		}
-	}
-	return math.Sqrt(minSqSum)
-}
-
 // Test core aggregations: Count, Sum, Sum2, L1/L2 norms.
 func TestCMS_Aggregations(t *testing.T) {
 	s := newTestCMS(t, CM_ROW_NO, CM_COL_NO)
@@ -113,13 +80,12 @@ func TestCMS_Aggregations(t *testing.T) {
 		}
 	}
 
-	// Gunakan helper lokal calculateL1/L2 agar tidak error jika method internal dihapus
-	l1 := calculateL1(s)
+	l1 := s.CM_L1()
 	if !almostEq(l1, float64(totalInserts), 1e-9) {
 		t.Fatalf("cm_l1 expected %.0f, got %.2f", float64(totalInserts), l1)
 	}
 
-	l2 := calculateL2(s)
+	l2 := s.CM_L2()
 	lower := math.Sqrt(float64(totalInserts))
 	upper := float64(totalInserts)
 	if l2+1e-9 < lower || l2-1e-9 > upper {
@@ -243,14 +209,14 @@ func TestCMS_L1L2_AccountingMany(t *testing.T) {
 		s.CMProcessing(k, v)
 	}
 
-	// Gunakan helper lokal
-	l1 := calculateL1(s)
+	// Use struct method
+	l1 := s.CM_L1()
 	if math.Abs(l1-float64(N)) > 1e-9 {
 		t.Fatalf("cm_l1 expected %d, got %.2f", N, l1)
 	}
 
 	// cm_l2 bounds: sqrt(N) <= l2 <= N.
-	l2 := calculateL2(s)
+	l2 := s.CM_L2()
 	if l2+1e-9 < math.Sqrt(float64(N)) || l2-1e-9 > float64(N) {
 		t.Fatalf("cm_l2 out of bounds: got=%.4f, expected in [%.4f, %.4f]",
 			l2, math.Sqrt(float64(N)), float64(N))
