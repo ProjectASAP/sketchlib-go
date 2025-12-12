@@ -80,12 +80,12 @@ func TestCMS_Aggregations(t *testing.T) {
 		}
 	}
 
-	l1 := s.cm_l1()
+	l1 := s.CM_L1()
 	if !almostEq(l1, float64(totalInserts), 1e-9) {
 		t.Fatalf("cm_l1 expected %.0f, got %.2f", float64(totalInserts), l1)
 	}
 
-	l2 := s.cm_l2()
+	l2 := s.CM_L2()
 	lower := math.Sqrt(float64(totalInserts))
 	upper := float64(totalInserts)
 	if l2+1e-9 < lower || l2-1e-9 > upper {
@@ -209,14 +209,14 @@ func TestCMS_L1L2_AccountingMany(t *testing.T) {
 		s.CMProcessing(k, v)
 	}
 
-	// cm_l1 = total inserts per row → minimum across rows equals N.
-	l1 := s.cm_l1()
+	// Use struct method
+	l1 := s.CM_L1()
 	if math.Abs(l1-float64(N)) > 1e-9 {
 		t.Fatalf("cm_l1 expected %d, got %.2f", N, l1)
 	}
 
 	// cm_l2 bounds: sqrt(N) <= l2 <= N.
-	l2 := s.cm_l2()
+	l2 := s.CM_L2()
 	if l2+1e-9 < math.Sqrt(float64(N)) || l2-1e-9 > float64(N) {
 		t.Fatalf("cm_l2 out of bounds: got=%.4f, expected in [%.4f, %.4f]",
 			l2, math.Sqrt(float64(N)), float64(N))

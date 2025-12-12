@@ -1,26 +1,25 @@
 package countminsketch
 
 import (
-	"math"
-	// "math/rand"
 	"errors"
 	"hash"
 	"hash/fnv"
+	"math"
 
-	// "time"
 	"github.com/spaolacci/murmur3"
 )
 
+// FIX: All fields are capitalized (exported) to allow Gob serialization
 type CountMinSketch struct {
-	row      int
-	col      int
-	seed1    []uint32
-	count    [][]float64
-	sum      [][]float64
-	sum2     [][]float64
-	l1       []float64
-	l2       []float64
-	hasher   hash.Hash64
+	Rows   int
+	Cols   int
+	Seed1  []uint32
+	Count  [][]float64
+	Sum    [][]float64
+	Sum2   [][]float64
+	L1     []float64
+	L2     []float64
+	Hasher hash.Hash64
 }
 
 /* sketch configurations */
@@ -59,72 +58,59 @@ func NewCountMinSketch(row, col int, seed1 []uint32) (s CountMinSketch, err erro
 	}
 
 	s = CountMinSketch{
-		row:    row,
-		col:    col,
-		hasher: fnv.New64(),
+		Rows:   row,
+		Cols:   col,
+		Hasher: fnv.New64(),
 	}
 
-	s.count = make([][]float64, row)
-	s.sum = make([][]float64, row)
-	s.sum2 = make([][]float64, row)
-	s.l1 = make([]float64, row)
-	s.l2 = make([]float64, row)
+	s.Count = make([][]float64, row)
+	s.Sum = make([][]float64, row)
+	s.Sum2 = make([][]float64, row)
+	s.L1 = make([]float64, row)
+	s.L2 = make([]float64, row)
 
 	for r := 0; r < row; r++ {
-		s.count[r] = make([]float64, col)
-		s.sum[r] = make([]float64, col)
-		s.sum2[r] = make([]float64, col)
+		s.Count[r] = make([]float64, col)
+		s.Sum[r] = make([]float64, col)
+		s.Sum2[r] = make([]float64, col)
 		for c := 0; c < col; c++ {
-			s.count[r][c] = 0
-			s.sum[r][c] = 0
-			s.sum2[r][c] = 0
+			s.Count[r][c] = 0
+			s.Sum[r][c] = 0
+			s.Sum2[r][c] = 0
 		}
-		s.l1[r] = 0
-		s.l2[r] = 0
+		s.L1[r] = 0
+		s.L2[r] = 0
 	}
 
-	s.seed1 = make([]uint32, row)
+	s.Seed1 = make([]uint32, row)
 	for r := 0; r < row; r++ {
-		s.seed1[r] = seed1[r]
+		s.Seed1[r] = seed1[r]
 	}
-	/*
-		rand.Seed(time.Now().UnixNano())
-		for r := 0; r < row; r++ {
-			s.seed1[r] = rand.Uint32()
-		}
-	*/
 
 	return s, nil
 }
 
-func (s CountMinSketch) FreeCountSketch() error { return nil }
-
-// Row returns the number of rows (hash functions)
-func (s CountMinSketch) Row() int { return s.row }
-
-// Col returns the number of columns
-func (s CountMinSketch) Col() int { return s.col }
+// Accessor methods for compatibility
+func (s CountMinSketch) Row() int { return s.Rows }
+func (s CountMinSketch) Col() int { return s.Cols }
 
 func (s CountMinSketch) position(key []byte) (pos []int) {
-	pos = make([]int, s.row)
-	for i := 0; i < s.row; i++ {
-		pos[i] = int(murmur3.Sum32WithSeed(key, s.seed1[i]) % uint32(s.col))
+	pos = make([]int, s.Rows)
+	for i := 0; i < s.Rows; i++ {
+		pos[i] = int(murmur3.Sum32WithSeed(key, s.Seed1[i]) % uint32(s.Cols))
 	}
 	return pos
 }
 
 func (s CountMinSketch) CMProcessing(key string, value float64) {
-	// line_to_update := s.line_to_update
-	// col_loc := xxhash.Sum64String(key) % uint64(CM_COL_NO)
-	// s.count[line_to_update][col_loc] += value // value is 1 for frequency
 	pos := s.position([]byte(key))
 	for r, c := range pos {
-		cur_count := s.count[r][c]
-		s.count[r][c] += 1
-		s.sum[r][c] += value
-		s.sum2[r][c] += value * value
-		s.l2[r] += s.count[r][c]*s.count[r][c] - cur_count*cur_count
-		s.l1[r] += s.count[r][c] - cur_count
+		cur_count := s.Count[r][c]
+		s.Count[r][c] += 1
+		s.Sum[r][c] += value
+		s.Sum2[r][c] += value * value
+		s.L2[r] += s.Count[r][c]*s.Count[r][c] - cur_count*cur_count
+		s.L1[r] += s.Count[r][c] - cur_count
 	}
 }
 
@@ -132,8 +118,8 @@ func (s CountMinSketch) EstimateStringCount(key string) float64 {
 	pos := s.position([]byte(key))
 	var res float64 = math.MaxFloat64
 	for r, c := range pos {
-		if res > s.count[r][c] {
-			res = s.count[r][c]
+		if res > s.Count[r][c] {
+			res = s.Count[r][c]
 		}
 	}
 	return res
@@ -144,32 +130,32 @@ func (s CountMinSketch) EstimateStringSum(key string) float64 {
 	idx := 0
 	var res float64 = math.MaxFloat64
 	for r, c := range pos {
-		if res > AbsFloat64(s.sum[r][c]) {
-			res = AbsFloat64(s.sum[r][c])
+		if res > AbsFloat64(s.Sum[r][c]) {
+			res = AbsFloat64(s.Sum[r][c])
 			idx = r
 		}
 	}
-	return s.sum[idx][pos[idx]]
+	return s.Sum[idx][pos[idx]]
 }
 
 func (s CountMinSketch) EstimateStringSum2(key string) float64 {
 	pos := s.position([]byte(key))
 	var res float64 = math.MaxFloat64
 	for r, c := range pos {
-		if res > s.sum2[r][c] {
-			res = s.sum2[r][c]
+		if res > s.Sum2[r][c] {
+			res = s.Sum2[r][c]
 		}
 	}
 	return res
 }
 
-func (s CountMinSketch) cm_l1() float64 {
+func (s CountMinSketch) CM_L1() float64 {
 	var res float64 = math.MaxFloat64
 	var tmp_sum float64
-	for i := 0; i < s.row; i++ {
+	for i := 0; i < s.Rows; i++ {
 		tmp_sum = 0
-		for j := 0; j < CM_COL_NO; j++ {
-			tmp_sum += s.count[i][j]
+		for j := 0; j < s.Cols; j++ {
+			tmp_sum += s.Count[i][j]
 		}
 		if res > tmp_sum {
 			res = tmp_sum
@@ -178,13 +164,13 @@ func (s CountMinSketch) cm_l1() float64 {
 	return res
 }
 
-func (s CountMinSketch) cm_l2() float64 {
+func (s CountMinSketch) CM_L2() float64 {
 	var res float64 = math.MaxFloat64
 	var tmp_sq_sum float64
-	for i := 0; i < CM_ROW_NO; i++ {
+	for i := 0; i < s.Rows; i++ {
 		tmp_sq_sum = 0
-		for j := 0; j < CM_COL_NO; j++ {
-			tmp_sq_sum += s.count[i][j] * s.count[i][j]
+		for j := 0; j < s.Cols; j++ {
+			tmp_sq_sum += s.Count[i][j] * s.Count[i][j]
 		}
 		if res > tmp_sq_sum {
 			res = tmp_sq_sum
