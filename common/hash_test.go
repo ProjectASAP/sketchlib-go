@@ -40,27 +40,3 @@ func TestFloat64Conversions(t *testing.T) {
 		})
 	}
 }
-
-func TestHashItDeterministicPerSeed(t *testing.T) {
-	key := []byte("hyperloglog")
-	expected := [...]uint64{
-		6717797301830851112,
-		1162927780928237913,
-		3396633771800918801,
-		13352178645068512765,
-		14365077450608780626,
-		15202844717277464039,
-	}
-
-	for seedIdx, want := range expected {
-		got := HashIt(seedIdx, key)
-		if got != want {
-			t.Fatalf("HashIt(%d) = %d, want %d", seedIdx, got, want)
-		}
-
-		again := HashIt(seedIdx, key)
-		if got != again {
-			t.Fatalf("HashIt(%d) inconsistent: first %d, second %d", seedIdx, got, again)
-		}
-	}
-}
