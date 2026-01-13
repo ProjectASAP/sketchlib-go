@@ -53,3 +53,21 @@ func Float64ToBytes(f float64) []byte {
 	binary.BigEndian.PutUint64(buf, math.Float64bits(f))
 	return buf
 }
+
+// DeriveIndex derives column index for a given row
+// width MUST be power-of-two
+func DeriveIndex(hash uint64, row int, width uint32) uint32 {
+	// kebutuhan bit per row
+	shift := uint(row * 11) // cukup untuk width ≤ 2048
+	mask := uint64(width - 1)
+	return uint32((hash >> shift) & mask)
+}
+
+// DeriveSign derives +1 / -1 for CountSketch
+func DeriveSign(hash uint64, row int) int64 {
+	bit := (hash >> uint(63-row)) & 1
+	if bit == 0 {
+		return -1
+	}
+	return 1
+}
