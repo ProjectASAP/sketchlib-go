@@ -1,45 +1,16 @@
 package countsketch
 
 import (
-	"hash"
-	"hash/fnv"
-
-	// "bytes"
-	// "encoding/binary"
-	// "encoding/json"
-	// "io"
-	"math"
-	// "os"
 	"errors"
-	// "fmt"
-	"math/rand"
+	"math"
+	"math/bits"
 	"sort"
-	"time"
 
-	"github.com/prometheus/prometheus/util/zeropool"
-	"github.com/spaolacci/murmur3"
+	"github.com/approx-telemetry/sketchlib-go/common"
 )
 
-// CountSketch struct. row is the number of hashing functions.
-// col is the size of every hash table
-// count, a matrix, is used to store the count.
-// int is used to store the count, the maximum count is  (1<<32)-1 in 32-bit OS, and (1<<64)-1 in 64-bit OS.
-type CountSketch struct {
-	row        int
-	col        int
-	count      [][]float64
-	hasher     hash.Hash64
-	topK       *TopKHeap
-	seeds      []uint32
-	sign_seeds []uint32
-	bucketsize int   // for size-based sliding window model; per sketch
-	min_time   int64 // for time-based sliding window model; per sketch
-	max_time   int64 // for time-based sliding window model; per sketch
-	l2         []float64
-}
-
-const CS_ROW_NO_Univ_ELEPHANT int = 3
-const CS_COL_NO_Univ_ELEPHANT int = 2048
+const CS_ROW_NO_Univ_ELEPHANT int = 5
+const CS_COL_NO_Univ_ELEPHANT int = 4096
 const CS_ROW_NO_Univ_MICE int = 3
 const CS_COL_NO_Univ_MICE int = 512
 
@@ -47,324 +18,188 @@ const TOPK_SIZE int = 100
 const TOPK_SIZE_MICE int = 100
 const TOPK_SIZE2 int = 200
 
-var (
-	farr2Pool = zeropool.New(func() [][]float64 {
-		tmp := make([][]float64, CS_ROW_NO_Univ_ELEPHANT)
-		for r := 0; r < CS_ROW_NO_Univ_ELEPHANT; r++ {
-			tmp[r] = make([]float64, CS_COL_NO_Univ_ELEPHANT)
-			tmp[r][0] = 0
-			for c := 1; c < CS_COL_NO_Univ_ELEPHANT; c *= 2 {
-				copy(tmp[r][c:], tmp[r][:c])
-			}
-		}
-		return tmp
-	})
+type CountSketch struct {
+	Rows int
+	Cols int
 
-	iarr2Pool_ele = zeropool.New(func() [][]int64 {
-		tmp := make([][]int64, CS_ROW_NO_Univ_ELEPHANT)
-		for r := 0; r < CS_ROW_NO_Univ_ELEPHANT; r++ {
-			tmp[r] = make([]int64, CS_COL_NO_Univ_ELEPHANT)
-			tmp[r][0] = 0
-			for c := 1; c < CS_COL_NO_Univ_ELEPHANT; c *= 2 {
-				copy(tmp[r][c:], tmp[r][:c])
-			}
-		}
-		return tmp
-	})
+	Count [][]float64
+	L2    []float64
 
-	iarrPool_ele = zeropool.New(func() []int64 {
-		tmp := make([]int64, CS_ROW_NO_Univ_ELEPHANT)
-		for r := 0; r < CS_ROW_NO_Univ_ELEPHANT; r++ {
-			tmp[r] = 0
-		}
-		return tmp
-	})
+	// TopK Heap from common package
+	TopK *common.TopKHeap
 
-	iarr2Pool_mice = zeropool.New(func() [][]int64 {
-		tmp := make([][]int64, CS_ROW_NO_Univ_MICE)
-		for r := 0; r < CS_ROW_NO_Univ_MICE; r++ {
-			tmp[r] = make([]int64, CS_COL_NO_Univ_MICE)
-			tmp[r][0] = 0
-			for c := 1; c < CS_COL_NO_Univ_MICE; c *= 2 {
-				copy(tmp[r][c:], tmp[r][:c])
-			}
-		}
-		return tmp
-	})
-
-	iarrPool_mice = zeropool.New(func() []int64 {
-		tmp := make([]int64, CS_ROW_NO_Univ_MICE)
-		for r := 0; r < CS_ROW_NO_Univ_MICE; r++ {
-			tmp[r] = 0
-		}
-		return tmp
-	})
-
-	farrPool = zeropool.New(func() []float64 {
-		tmp := make([]float64, CS_ROW_NO_Univ_ELEPHANT)
-		for r := 0; r < CS_ROW_NO_Univ_ELEPHANT; r++ {
-			tmp[r] = 0
-		}
-		return tmp
-	})
-)
-
-func AbsFloat64(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
+	// Bit manipulation for fast index/sign derivation
+	bitsPerRow uint
+	mask       uint64
 }
 
-// New create a new Count Sketch with row hasing funtions and col counters per row.
-func NewCountSketch(row int, col int, seed1, seed2 []uint32) (s *CountSketch, err error) {
-	if row <= 0 || col <= 0 {
-		return nil, errors.New("CountSketch New: values of row and col should be positive.")
+// NewCountSketch creates a new CountSketch.
+// Rows and Cols are configurable, but constants are provided for standard sizes.
+func NewCountSketch(rows, cols int) (*CountSketch, error) {
+	if rows <= 0 || cols <= 0 {
+		return nil, errors.New("rows and cols must be positive")
 	}
 
-	if row > CS_ROW_NO_Univ_ELEPHANT {
-		row = CS_ROW_NO_Univ_ELEPHANT
+	// Ensure cols is power of two for bitwise masking
+	if cols&(cols-1) != 0 {
+		return nil, errors.New("cols must be a power of two")
 	}
 
-	if col > CS_COL_NO_Univ_ELEPHANT {
-		col = CS_COL_NO_Univ_ELEPHANT
+	count := make([][]float64, rows)
+	for r := 0; r < rows; r++ {
+		count[r] = make([]float64, cols)
 	}
 
-	s = &CountSketch{
-		row:    row,
-		col:    col,
-		hasher: fnv.New64(),
-		topK:   NewTopKHeap(TOPK_SIZE),
+	// Calculate bits needed per row to derive column index
+	bitsPerRow := uint(bits.TrailingZeros(uint(cols)))
+
+	// Check if 64-bit hash is sufficient
+	// Need: rows * (bitsPerRow + 1_sign_bit)
+	totalBitsNeeded := uint(rows) * (bitsPerRow + 1)
+	if totalBitsNeeded > 64 {
+		return nil, errors.New("parameters too large for single 64-bit hash derivation")
 	}
 
-	// Create matrix
-	/*
-		s.count = make([][]float64, row)
-		s.sum = make([][]float64, row)
-		s.sum2 = make([][]float64, row)
-		s.l1 = make([]float64, row)
-		s.l2 = make([]float64, row)
-		for r := 0; r < row; r++ {
-			s.count[r] = make([]float64, col)
-			s.sum[r] = make([]float64, col)
-			s.sum2[r] = make([]float64, col)
-			for c := 0; c < col; c++ {
-				s.count[r][c] = 0
-				s.sum[r][c] = 0
-				s.sum2[r][c] = 0
-			}
-			s.l1[r] = 0
-			s.l2[r] = 0
-		}
-	*/
-
-	s.count = farr2Pool.Get()
-	s.l2 = farrPool.Get()
-
-	// Generate seeds for positions and signs
-	/*
-		rand.Seed(time.Now().UnixNano())
-		for r := 0; r < row; r++ {
-			s.seeds[r] = rand.Uint32()
-			s.sign_seeds[r] = rand.Uint32()
-		}
-	*/
-	s.seeds = make([]uint32, row)
-	s.sign_seeds = make([]uint32, row)
-	for r := 0; r < row; r++ {
-		s.seeds[r] = seed1[r]
-		s.sign_seeds[r] = seed2[r]
-	}
-
-	return s, nil
+	return &CountSketch{
+		Rows:       rows,
+		Cols:       cols,
+		Count:      count,
+		L2:         make([]float64, rows),
+		TopK:       common.NewTopKHeap(TOPK_SIZE), // Default to standard size
+		bitsPerRow: bitsPerRow,
+		mask:       uint64(cols - 1),
+	}, nil
 }
 
-func (s *CountSketch) FreeCountSketch() error {
-	for r := 0; r < s.row; r++ {
-		for c := 0; c < s.col; c++ {
-			s.count[r][c] = 0
-		}
-		s.l2[r] = 0
+// derivePosAndSign computes row index and sign (+1/-1) from the base hash.
+func (s *CountSketch) derivePosAndSign(hash uint64, row int) (int, float64) {
+	// 1. Derive Index (Column)
+	shiftIdx := uint(row) * s.bitsPerRow
+	col := int((hash >> shiftIdx) & s.mask)
+
+	// 2. Derive Sign
+	// Use high bits for sign to avoid overlap with index bits
+	// (63 - row) ensures we use unique bits for each row's sign
+	shiftSign := uint(63 - row)
+	signBit := (hash >> shiftSign) & 1
+
+	sign := 1.0
+	if signBit == 0 {
+		sign = -1.0
 	}
-	farr2Pool.Put(s.count)
-	farrPool.Put(s.l2)
-	s.topK.Clean()
+
+	return col, sign
+}
+
+// InsertWithHash inserts a value using pre-calculated hash.
+// NOTE: This path CANNOT update TopK because the key string is missing.
+// Use UpdateString if TopK is required.
+func (s *CountSketch) InsertWithHash(hash uint64) {
+	s.InsertWithHashAndValue(hash, 1.0)
+}
+
+// InsertWithHashAndValue supports weighted updates.
+func (s *CountSketch) InsertWithHashAndValue(hash uint64, value float64) {
+	for r := 0; r < s.Rows; r++ {
+		c, sign := s.derivePosAndSign(hash, r)
+		increment := sign * value
+
+		// Update L2 moments
+		prev := s.Count[r][c]
+		s.Count[r][c] += increment
+		s.L2[r] += (s.Count[r][c] * s.Count[r][c]) - (prev * prev)
+	}
+}
+
+// QueryWithHash returns the estimated frequency.
+func (s *CountSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+	switch q {
+	case common.QueryFrequency:
+		estimates := make([]float64, s.Rows)
+		for r := 0; r < s.Rows; r++ {
+			c, sign := s.derivePosAndSign(hash, r)
+			estimates[r] = s.Count[r][c] * sign
+		}
+		sort.Float64s(estimates)
+
+		// Return Median
+		mid := s.Rows / 2
+		if s.Rows%2 == 1 {
+			return estimates[mid], nil
+		}
+		return (estimates[mid-1] + estimates[mid]) / 2.0, nil
+
+	case common.QuerySum2:
+		// Return Median of L2 arrays
+		l2s := make([]float64, s.Rows)
+		copy(l2s, s.L2)
+		sort.Float64s(l2s)
+
+		mid := s.Rows / 2
+		val := l2s[mid]
+		if s.Rows%2 == 0 {
+			val = (l2s[mid-1] + l2s[mid]) / 2.0
+		}
+		return math.Sqrt(val), nil
+
+	default:
+		return 0, common.ErrUnsupportedQuery
+	}
+}
+
+func (s *CountSketch) Merge(other common.Sketch) error {
+	o, ok := other.(*CountSketch)
+	if !ok {
+		return errors.New("cannot merge: incompatible sketch type")
+	}
+	if s.Rows != o.Rows || s.Cols != o.Cols {
+		return errors.New("cannot merge: dimension mismatch")
+	}
+
+	// 1. Merge Matrix and L2
+	for r := 0; r < s.Rows; r++ {
+		s.L2[r] += o.L2[r]
+		for c := 0; c < s.Cols; c++ {
+			s.Count[r][c] += o.Count[r][c]
+		}
+	}
+
+	// 2. Merge TopK Heap
+	if s.TopK != nil && o.TopK != nil {
+		for _, item := range o.TopK.Heap {
+			s.TopK.UpdateCS(item.Key, item.Count)
+		}
+	}
+
 	return nil
 }
 
-// NewWithEstimates creates a new Count Sketch with given error rate and condifence.
-// Accuracy guarantees will be made in terms of a pair of user specified parameters,
-// ε and δ, meaning that the error in answering a query is within a factor of ε with
-// probability δ.
-func NewCountSketchWithEstimates(epsilon, delta float64) (s *CountSketch, err error) {
-	if epsilon <= 0 || epsilon >= 1 {
-		return nil, errors.New("CountSketch NewWithEstiamtes: value of epsilon should be in range (0,1).")
-	}
-	if delta <= 0 || delta >= 1 {
-		return nil, errors.New("CountSketch NewWithEstimates: value of delta should be in range (0,1).")
-	}
-
-	row := int(math.Ceil(math.Log(1 / delta))) // depth ~ ln(1/δ)
-	col := int(math.Ceil(3.0 / (epsilon * epsilon)))
-
-	seed1 := make([]uint32, row)
-	seed2 := make([]uint32, row)
-	rand.Seed(time.Now().UnixNano())
-	for r := 0; r < row; r++ {
-		seed1[r] = rand.Uint32()
-		seed2[r] = rand.Uint32()
-	}
-
-	return NewCountSketch(row, col, seed1, seed2)
+func (s *CountSketch) TypeName() string {
+	return "countsketch"
 }
 
-// Row returns the number of rows (hash functions)
-func (s *CountSketch) Row() int { return s.row }
+// ================= EXTENDED FUNCTIONALITY (TopK Support) =================
 
-// Col returns the number of colums
-func (s *CountSketch) Col() int { return s.col }
-
-func (s *CountSketch) position_and_sign(key []byte) (pos []int32, sign []int32) {
-	pos = make([]int32, s.row)
-	sign = make([]int32, s.row)
-	var hash1, hash2 uint32
-	for i := uint32(0); i < uint32(s.row); i++ {
-		hash1 = murmur3.Sum32WithSeed(key, s.seeds[i])
-		hash2 = murmur3.Sum32WithSeed(key, hash1)
-		pos[i] = int32((hash1 + i*hash2) % uint32(s.col))
-		sign[i] = int32(murmur3.Sum32WithSeed(key, s.sign_seeds[i]) % 2)
-		sign[i] = sign[i]*2 - 1
-	}
-	return pos, sign
-}
-
+// UpdateString updates the sketch AND the TopK heap.
+// This preserves the functionality of the original implementation.
 func (s *CountSketch) UpdateString(key string, count float64) {
-	pos, sign := s.position_and_sign([]byte(key))
-	counters := make([]float64, s.row)
-	for r, c := range pos {
-		cur_count := s.count[r][c]
-		s.count[r][c] += float64(sign[r])
-		s.l2[r] += s.count[r][c]*s.count[r][c] - cur_count*cur_count
-		counters[r] = float64(sign[r]) * s.count[r][c]
-	}
+	// 1. Compute Hash internally (or accept it as arg if preferred)
+	hash := common.Hash64([]byte(key))
 
-	sort.Slice(counters, func(i, j int) bool { return counters[i] < counters[j] })
-	var median float64 = 0
-	if s.row%2 == 0 {
-		median = (counters[s.row/2] + counters[s.row/2-1]) / 2.0
-	} else {
-		median = counters[s.row/2]
-	}
-	s.topK.UpdateCS(key, int64(median))
+	// 2. Insert into Sketch
+	s.InsertWithHashAndValue(hash, count)
+
+	// 3. Estimate current count to update Heap
+	est, _ := s.QueryWithHash(common.QueryFrequency, hash)
+
+	// 4. Update TopK Heap
+	// We cast to int64 because common.TopKHeap uses int64
+	s.TopK.UpdateCS(key, int64(est))
 }
 
+// EstimateStringCount is a helper to query by string directly
 func (s *CountSketch) EstimateStringCount(key string) int64 {
-	pos, sign := s.position_and_sign([]byte(key))
-	counters := make([]float64, s.row)
-	for r, c := range pos {
-		counters[r] = float64(sign[r]) * s.count[r][c]
-	}
-
-	sort.Slice(counters, func(i, j int) bool { return counters[i] < counters[j] })
-	var median float64 = 0
-	if s.row%2 == 0 {
-		median = (counters[s.row/2] + counters[s.row/2-1]) / 2.0
-	} else {
-		median = counters[s.row/2]
-	}
-
-	return int64(median)
-}
-
-func (s *CountSketch) UpdateAndEstimateString(key string, count float64) float64 {
-	pos, sign := s.position_and_sign([]byte(key))
-	for r, c := range pos {
-		s.count[r][c] += float64(sign[r]) * count
-	}
-
-	counters := make([]float64, s.row)
-	for r, c := range pos {
-		counters[r] = float64(sign[r]) * s.count[r][c]
-	}
-
-	sort.Slice(counters, func(i, j int) bool { return counters[i] < counters[j] })
-	var median float64 = 0
-	if s.row%2 == 0 {
-		median = (counters[s.row/2] + counters[s.row/2-1]) / 2.0
-	} else {
-		median = counters[s.row/2]
-	}
-	s.topK.UpdateCS(key, int64(median))
-	return median
-}
-
-func (s *CountSketch) cs_l1() float64 {
-
-	sos := make([]float64, s.row)
-	for i := 0; i < s.row; i++ {
-		sos[i] = 0
-		for j := 0; j < s.col; j++ {
-			sos[i] += AbsFloat64(s.count[i][j])
-		}
-	}
-
-	sort.Slice(sos, func(i, j int) bool { return sos[i] < sos[j] })
-	f1_value := sos[s.row/2]
-
-	return f1_value
-}
-
-func (s *CountSketch) cs_l2() float64 {
-
-	sos := make([]float64, s.row)
-	for i := 0; i < s.row; i++ {
-		sos[i] = s.l2[i]
-	}
-
-	sort.Slice(sos, func(i, j int) bool { return sos[i] < sos[j] })
-	f2_value := sos[s.row/2]
-
-	return math.Sqrt(f2_value)
-}
-
-func (s *CountSketch) cs_l2_new() float64 {
-	sos := make([]float64, s.row)
-	for i := 0; i < s.row; i++ {
-		sos[i] = 0
-		for j := 0; j < s.col; j++ {
-			sos[i] += s.count[i][j] * s.count[i][j]
-		}
-	}
-	sort.Slice(sos, func(i, j int) bool { return sos[i] < sos[j] })
-	f2_value := sos[s.row/2]
-	return math.Sqrt(f2_value)
-}
-
-func (s *CountSketch) MergeWith(other *CountSketch) {
-	for i := 0; i < s.row; i++ {
-		for j := 0; j < s.col; j++ {
-			s.count[i][j] += other.count[i][j]
-		}
-	}
-
-	if s.topK != nil {
-
-		topk := NewTopKHeap(s.topK.k)
-		for _, item := range s.topK.heap {
-			topk.Update(item.key, item.count)
-		}
-
-		for _, item := range other.topK.heap {
-			index, find := topk.Find(item.key)
-			var count int64 = 0
-			if find {
-				count = topk.heap[index].count + item.count
-			} else {
-				count = item.count
-			}
-			topk.Update(item.key, count)
-			// fmt.Println("!!", item.key, us.cs_layers[i].EstimateStringCount(item.key))
-		}
-		s.topK = NewTopKFromHeap(topk)
-	}
+	hash := common.Hash64([]byte(key))
+	est, _ := s.QueryWithHash(common.QueryFrequency, hash)
+	return int64(est)
 }
