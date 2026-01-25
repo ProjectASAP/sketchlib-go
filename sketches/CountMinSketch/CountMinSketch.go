@@ -28,7 +28,7 @@ type CountMinSketch struct {
 /* sketch configurations */
 const (
 	CM_ROW_NO = 5
-	CM_COL_NO = 1024 // MUST be power-of-two
+	CM_COL_NO = 1024
 )
 
 func NewCountMinSketch(row, col int) (*CountMinSketch, error) {
