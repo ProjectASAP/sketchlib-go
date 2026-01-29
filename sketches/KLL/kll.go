@@ -11,8 +11,6 @@ import (
 	"github.com/approx-telemetry/sketchlib-go/common"
 )
 
-// KLLSketch implements the KLL streaming quantiles sketch.
-// Reference: http://arxiv.org/pdf/1603.05346v1.pdf
 type KLLSketch struct {
 	Compactors []Compactor
 	k          int

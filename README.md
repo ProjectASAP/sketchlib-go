@@ -1,39 +1,70 @@
-# sketchlib-go
+# `sketchlib-go`
 
-`sketchlib-go` is a probabilistic sketch library written in Go, designed for  
+`sketchlib-go` is a probabilistic sketch library written in Go, designed for
 **high-throughput telemetry, streaming analytics, and OpenTelemetry-style aggregation**.
 
-The library emphasizes:
-- **Prehashed insertion**
-- **Single-hash multi-row derivation**
-- **Zero-allocation hot paths**
-- **Engine-style architecture (hashing outside sketches)**
+The library is built around a **clear separation between numeric sketching and semantic processing**, enabling:
+
+* **Prehashed insertion**
+* **Single-hash multi-row derivation**
+* **Zero-allocation hot paths**
+* **Engine-style architecture (hashing outside sketches)**
+* **Lazy and sampling-based Top-K optimization**
+
+---
+
+## Core Design Principles
+
+This library follows several **strict, non-negotiable rules**:
+
+1. **Hashes are computed exactly once**
+2. **Sketches never perform hashing**
+3. **Hot paths are allocation-free**
+4. **Numeric sketches and semantic operators are decoupled**
+5. **Top-K is a derived structure, not a counting primitive**
+6. **Optimizations are structural, not micro-optimizations**
+
+High-level flow:
+
+```
+User / OpenTelemetry
+        ↓
+common.FromXxx   (hash computed once)
+        ↓
+HashLayer.Insert
+        ↓
+Sketch.InsertWithHash   (fast path, numeric only)
+        ↓
+(optional)
+Semantic Layer (Top-K, reporting, debugging)
+```
 
 ---
 
 ## Repository Structure
 
-The repository is organized into the following core components:
-
 ### 1. Common Building Blocks (`/common`)
 
-The `common` package provides shared primitives used by all sketches:
+The `common` package provides shared primitives used by all sketches.
 
-- **SketchInput**
-  - Normalizes input values
-  - Computes and caches a **64-bit hash exactly once**
-- **Hash utilities**
-  - `Hash64` based on `xxhash`
-  - Hashing is never performed inside sketches
-- **Sketch interface**
-  - Enforces a strict prehashed-insertion contract
+#### SketchInput
 
-Example:
+`SketchInput` is a normalized input container that:
+
+* Stores a canonical byte representation of the input
+* Computes and caches a **64-bit hash exactly once**
+* Allows the same hash to be reused across multiple sketches
 
 ```go
 input := common.FromString("user_id")
-hash := input.Hash // computed once and reused
-````
+hash := input.Hash // computed once, reused everywhere
+```
+
+Hashing utilities:
+
+* `Hash64` based on `xxhash`
+* No seeded hashing in hot paths
+* Hash computation is **strictly forbidden inside sketches**
 
 ---
 
@@ -48,13 +79,13 @@ Implemented / planned sketches:
 * HyperLogLog (HLL)
 * KLL / Quantile Sketches
 
-All sketches follow the same rules:
+All sketches obey the same **strict contract**:
 
-* **They accept hashes**
-* **They never compute hashes**
-* **They allocate nothing in the hot path**
+* ✅ Accept **precomputed hashes**
+* ❌ Never compute hashes internally
+* ❌ Never allocate memory in hot paths
 
-Common sketch contract:
+Common sketch interface:
 
 ```go
 type Sketch interface {
@@ -65,15 +96,21 @@ type Sketch interface {
 }
 ```
 
+This design enables:
+
+* Predictable latency
+* Easy fan-out insertion
+* Safe reuse in high-throughput engines
+
 ---
 
 ### 3. HashLayer (`/hashlayer`)
 
 `HashLayer` is an **engine-level component**, not a user-facing façade.
 
-Its responsibility is **strictly limited** to:
+Its sole responsibility is:
 
-> Distributing a precomputed hash to multiple sketches (fan-out insertion).
+> **Fan-out insertion of a precomputed hash to multiple sketches**
 
 ```go
 hl := hashlayer.New(cms, cs, hll)
@@ -83,7 +120,8 @@ hl.Insert(input) // hash computed once, reused by all sketches
 Design constraints:
 
 * ❌ HashLayer does **not** compute hashes
-* ❌ HashLayer does **not** perform queries
+* ❌ HashLayer does **not** execute queries
+* ❌ HashLayer does **not** perform semantic logic
 * ✅ Queries are executed **directly on sketches**
 
 Example query:
@@ -92,100 +130,76 @@ Example query:
 freq, _ := cms.QueryWithHash(common.QueryFrequency, input.Hash)
 ```
 
-This design mirrors the **engine-style HashLayer** used in the Rust implementation.
+This mirrors the **engine-style HashLayer** used in the Rust implementation and modern telemetry pipelines.
 
 ---
 
 ### 4. Benchmarks (`/benchmark`)
 
-Benchmarks are designed to validate that:
+Benchmarks validate that:
 
-* Hashing is completely removed from the hot path
+* Hashing is completely removed from hot paths
 * Prehashed insertion provides measurable speedups
 * No allocations occur during insert or query
+* Slow paths (string-based APIs, Top-K) are clearly separated
 
 Representative results:
 
 ```
-InsertPrehashed              ~23 ns/op   0 allocs/op
-InsertWithHashingInLoop      ~52 ns/op   2 allocs/op
-Speedup                      ~2.25×
+InsertWithHash               ~23 ns/op   0 allocs/op
+UpdateString (end-to-end)    ~270 ns/op  1 alloc/op
+Speedup (fast path)          ~10×
 ```
+
+Pipeline benchmarks further demonstrate the benefit of reusing a single hash across multiple sketches.
 
 ---
 
-## API Overview
-
-### SketchInput
-
-`SketchInput` is a normalized input container that:
-
-* Stores a byte representation of the input
-* Stores a **precomputed 64-bit hash**
-
-```go
-input := common.FromU64(42)
-fmt.Println(input.Hash)
-```
-
-All hashing occurs **here**, never inside sketches.
-
----
+## Sketch Characteristics
 
 ### Count-Min Sketch (CMS)
 
-Count-Min Sketch is used for approximate frequency estimation.
-
-Initialization:
-
-```go
-cms, _ := countminsketch.NewCountMinSketch(5, 1024)
-```
-
-Insertion (via HashLayer):
-
-```go
-input := common.FromString("event")
-hl.Insert(input)
-```
-
-Query (directly on the sketch):
-
-```go
-est, _ := cms.QueryWithHash(common.QueryFrequency, input.Hash)
-```
+Used for approximate frequency estimation with one-sided error.
 
 Key characteristics:
 
 * Single-hash multi-row derivation
-* Power-of-two width
-* Bit masking instead of modulo
+* Power-of-two width (bit masking instead of modulo)
+* No underestimation guarantee
 * Zero allocations in hot paths
 
 ---
 
-## Architectural Decisions
+### Count Sketch (CS)
 
-This library follows several strict architectural rules:
+Used for unbiased frequency estimation with signed updates.
 
-1. **Hashes are computed exactly once**
-2. **Sketches never perform hashing**
-3. **HashLayer is insert-only**
-4. **Queries are executed directly on sketches**
-5. **Seeded hashing (`HashIt`) is not used in hot paths**
-6. **Optimizations are structural, not micro-optimizations**
+Current optimizations:
 
-High-level flow:
+* Prehashed insert path
+* Median-of-rows estimator
 
-```
-User / OpenTelemetry
-        ↓
-common.FromXxx   (hash computed once)
-        ↓
-HashLayer.Insert
-        ↓
-Sketch.InsertWithHash
-```
+Planned optimizations:
+
+* Faster sign-bit derivation
+* Optimize Top-K path in UnivMon
+
+---
+
+### KLL Quantile Sketch
+
+Used for approximate quantile and distribution estimation.
+
+Key characteristics:
+
+* Mergeable summaries
+* Probabilistic rank error bounds
+* Sublinear memory usage
+
+Planned optimizations:
+
+* Fixed-size buffers
+* Improved merge efficiency
 
 ---
 
@@ -199,13 +213,11 @@ Sketch.InsertWithHash
 
 ### Sketch Status Table
 
-| Sketch              | Correctness | Performance | Current Optimization                                        | Next Optimization                         |
-| ------------------- | ----------- | ----------- | ----------------------------------------------------------- | ----------------------------------------- |
-| Count-Min Sketch    | ✅           | ✅           | Prehashed insert<br>Single-hash derivation<br>No allocation | Sharded CMS<br>Cache-line layout          |
-| Count Sketch        | 🟡          | 🟡          | Prehashed insert                                            | Sign-bit derivation<br>Power-of-two width |
-| HyperLogLog         | 🟡          | 🟡          | Prehashed insert path                                       | Bias correction<br>Register optimization  |
-| KLL Quantile        | 🟡          | 🟡          | Prehashed insert                                            | Fixed buffer<br>Lazy compaction           |
-
----
+| Sketch           | Correctness | Performance | Current Optimization                                        | Next Optimization                         |
+| ---------------- | ----------- | ----------- | ----------------------------------------------------------- | ----------------------------------------- |
+| Count-Min Sketch | ✅           | ✅           | Prehashed insert<br>Single-hash derivation<br>No allocation | Sharded CMS<br>Cache-line layout          |
+| Count Sketch     | ✅          | ✅          | Prehashed insert<br>Lazy Top-K threshold                    | Sign-bit derivation<br>Power-of-two width |
+| HyperLogLog      | 🟡          | 🟡          | Prehashed insert path                                       | Bias correction<br>Register optimization  |
+| KLL Quantile     | ✅          | ✅          | Prehashed insert<br>Merge correctness                       | Fixed buffer<br>Lazy compaction           |
 
 

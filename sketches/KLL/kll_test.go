@@ -24,6 +24,8 @@ func newTestKLL(t *testing.T, k int) *KLLSketch {
 // Basic Correctness
 // ======================
 
+// TestKLL_BasicFlow verifies basic functionality of the KLL sketch,
+// including insertion, size tracking, and rank queries.
 func TestKLL_BasicFlow(t *testing.T) {
 	k := 200
 	s := newTestKLL(t, k)
@@ -55,6 +57,9 @@ func TestKLL_BasicFlow(t *testing.T) {
 // Statistical Accuracy
 // ======================
 
+// TestKLL_StatisticalAccuracy measures rank estimation error
+// against ground truth to validate the probabilistic accuracy
+// guarantees of the KLL sketch.
 func TestKLL_StatisticalAccuracy(t *testing.T) {
 	k := 200
 	n := 10_000
@@ -104,6 +109,8 @@ func TestKLL_StatisticalAccuracy(t *testing.T) {
 // Merge Tests
 // ======================
 
+// TestKLL_Merge verifies that merging two KLL sketches results
+// in a correct summary of the combined input streams.
 func TestKLL_Merge(t *testing.T) {
 	k := 200
 	s1 := newTestKLL(t, k)
@@ -134,6 +141,8 @@ func TestKLL_Merge(t *testing.T) {
 	}
 }
 
+// TestKLL_IdempotentMerge ensures that merging a sketch with
+// an empty sketch does not change its quantile estimates.
 func TestKLL_IdempotentMerge(t *testing.T) {
 	k := 200
 	s := newTestKLL(t, k)
@@ -159,6 +168,9 @@ func TestKLL_IdempotentMerge(t *testing.T) {
 // Distribution Properties
 // ======================
 
+// TestKLL_CDF_Gaussian checks that the estimated CDF for a
+// Gaussian-distributed input matches expected statistical properties
+// (median near zero, correct standard deviation behavior).
 func TestKLL_CDF_Gaussian(t *testing.T) {
 	k := 200
 	n := 5000
@@ -182,6 +194,8 @@ func TestKLL_CDF_Gaussian(t *testing.T) {
 	}
 }
 
+// TestKLL_QuantileMonotonicity verifies that estimated quantiles
+// are monotonically increasing with respect to the quantile parameter p.
 func TestKLL_QuantileMonotonicity(t *testing.T) {
 	k := 200
 	s := newTestKLL(t, k)
@@ -202,6 +216,9 @@ func TestKLL_QuantileMonotonicity(t *testing.T) {
 	}
 }
 
+// TestKLL_ExtremeQuantiles validates the accuracy and ordering
+// of extreme tail quantiles (e.g., p99, p999), which are a known
+// strength of the KLL sketch.
 func TestKLL_ExtremeQuantiles(t *testing.T) {
 	k := 200
 	s := newTestKLL(t, k)
@@ -220,6 +237,9 @@ func TestKLL_ExtremeQuantiles(t *testing.T) {
 // Streaming Properties
 // ======================
 
+// TestKLL_OrderIndependence_ErrorBound verifies that different
+// insertion orders do not violate the theoretical error bounds,
+// even though KLL is not strictly order-deterministic due to randomness.
 func TestKLL_OrderIndependence_ErrorBound(t *testing.T) {
 	k := 200
 	n := 10000
@@ -255,6 +275,8 @@ func TestKLL_OrderIndependence_ErrorBound(t *testing.T) {
 	}
 }
 
+// TestKLL_QueryStability ensures that repeated queries return
+// identical results and do not mutate internal sketch state.
 func TestKLL_QueryStability(t *testing.T) {
 	k := 200
 	s := newTestKLL(t, k)
@@ -277,6 +299,9 @@ func TestKLL_QueryStability(t *testing.T) {
 // Memory & Space Guarantees
 // ======================
 
+// TestKLL_RetainedItemsVsN checks that the number of retained items
+// grows sublinearly with the number of inserted elements, validating
+// the space efficiency of the KLL sketch.
 func TestKLL_RetainedItemsVsN(t *testing.T) {
 	k := 200
 	s := newTestKLL(t, k)
@@ -294,6 +319,8 @@ func TestKLL_RetainedItemsVsN(t *testing.T) {
 	}
 }
 
+// TestKLL_MemoryBound verifies that memory usage remains within
+// the expected O(k log N) theoretical bound.
 func TestKLL_MemoryBound(t *testing.T) {
 	k := 200
 	s := newTestKLL(t, k)
