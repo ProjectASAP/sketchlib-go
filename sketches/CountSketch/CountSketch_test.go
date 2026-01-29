@@ -15,6 +15,9 @@ func logResult(t *testing.T, name string, expected, estimated float64) {
 }
 
 // 1. Zero-state correctness
+// TestCS_ZeroState verifies that a newly initialized CountSketch
+// returns zero estimates for keys that have never been observed.
+// This ensures there is no initialization bias.
 func TestCS_ZeroState(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
 
@@ -27,6 +30,9 @@ func TestCS_ZeroState(t *testing.T) {
 }
 
 // 2. Single-key exactness
+// TestCS_SingleKeyCorrectness checks basic correctness by inserting
+// a single key multiple times and verifying that the estimated
+// frequency matches the true count.
 func TestCS_SingleKeyCorrectness(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
 
@@ -43,6 +49,9 @@ func TestCS_SingleKeyCorrectness(t *testing.T) {
 }
 
 // 3. Linearity
+// TestCS_Linearity validates the linearity property of CountSketch:
+// multiple independent updates should be equivalent to a single
+// combined update of the same total weight.
 func TestCS_Linearity(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
 
@@ -62,6 +71,8 @@ func TestCS_Linearity(t *testing.T) {
 }
 
 // 4. Merge correctness
+// TestCS_MergeCorrectness verifies that merging two CountSketch
+// instances produces the same result as sketching the union of their input streams.
 func TestCS_MergeCorrectness(t *testing.T) {
 	cs1, _ := NewCountSketch(5, 1024)
 	cs2, _ := NewCountSketch(5, 1024)
@@ -86,6 +97,8 @@ func TestCS_MergeCorrectness(t *testing.T) {
 }
 
 // 5. Median estimator correctness
+// TestCS_MedianEstimator ensures that the median-of-rows estimator
+// is robust to outliers caused by hash collisions in individual rows.
 func TestCS_MedianEstimator(t *testing.T) {
 	cs, _ := NewCountSketch(3, 1024)
 	hash := common.Hash64([]byte("k"))
@@ -107,6 +120,9 @@ func TestCS_MedianEstimator(t *testing.T) {
 }
 
 // 6. Sign correctness
+// TestCS_SignCorrectness verifies that the sign hashing mechanism
+// correctly handles positive and negative updates, allowing
+// proper cancellation of counts.
 func TestCS_SignCorrectness(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
 
@@ -126,6 +142,9 @@ func TestCS_SignCorrectness(t *testing.T) {
 }
 
 // 7. Query purity
+// TestCS_QueryNoSideEffect ensures that calling query operations
+// does not mutate the internal state of the sketch.
+// Queries must be pure read-only operations.
 func TestCS_QueryNoSideEffect(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
 
@@ -145,6 +164,9 @@ func TestCS_QueryNoSideEffect(t *testing.T) {
 }
 
 // 8. Order independence (commutativity)
+// TestCS_OrderIndependence checks that the order of updates
+// does not affect the final frequency estimates.
+// CountSketch should be commutative with respect to updates.
 func TestCS_OrderIndependence(t *testing.T) {
 	cs1, _ := NewCountSketch(5, 1024)
 	cs2, _ := NewCountSketch(5, 1024)
@@ -171,6 +193,9 @@ func TestCS_OrderIndependence(t *testing.T) {
 }
 
 // 9. Multiple keys isolation
+// TestCS_KeyIsolation verifies that updates to one key do not
+// significantly affect the estimates of other unrelated keys.
+// This tests isolation under hash collisions.
 func TestCS_KeyIsolation(t *testing.T) {
 	cs, _ := NewCountSketch(5, 2048)
 
@@ -190,6 +215,9 @@ func TestCS_KeyIsolation(t *testing.T) {
 }
 
 // 10. Weighted update correctness
+// TestCS_WeightedUpdates verifies that CountSketch correctly
+// supports weighted updates (delta != 1), which are common
+// in aggregated or pre-processed streams.
 func TestCS_WeightedUpdates(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
 
@@ -206,6 +234,9 @@ func TestCS_WeightedUpdates(t *testing.T) {
 }
 
 // 11. Positive-negative cancellation
+// TestCS_Cancellation verifies algebraic cancellation: a sequence
+// of positive and negative updates with equal magnitude should
+// result in a zero estimate.
 func TestCS_Cancellation(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
 
@@ -223,6 +254,9 @@ func TestCS_Cancellation(t *testing.T) {
 }
 
 // 12. Idempotent merge with empty sketch
+// TestCS_MergeWithEmpty ensures that merging a sketch with an
+// empty sketch does not change its internal state.
+// This validates idempotence and the existence of a neutral element.
 func TestCS_MergeWithEmpty(t *testing.T) {
 	cs1, _ := NewCountSketch(5, 1024)
 	cs2, _ := NewCountSketch(5, 1024) // empty
