@@ -16,7 +16,7 @@ import (
 // =====================================================
 
 func TestCountMinSketch_AccuracyReport(t *testing.T) {
-	rows, cols := 5, 1024
+	rows, cols := 5, 2048
 	totalItems := 100_000
 	topKSize := 100
 	vocabSize := 10_000
@@ -93,7 +93,7 @@ func TestCountMinSketch_AccuracyReport(t *testing.T) {
 
 const (
 	cmBenchRows = 5
-	cmBenchCols = 1024
+	cmBenchCols = 2048
 	cmBenchN    = 1 << 20
 )
 

@@ -12,14 +12,9 @@ import (
 	countsketch "github.com/approx-telemetry/sketchlib-go/sketches/CountSketch"
 )
 
-//
 // =====================================================
 // 1. ACCURACY / CORRECTNESS BENCH TEST
 // =====================================================
-//
-// NOTE: This is NOT a microbenchmark.
-// This test prints accuracy metrics for evaluation.
-//
 
 func TestCountSketch_AccuracyReport(t *testing.T) {
 	rows, cols := 5, 2048

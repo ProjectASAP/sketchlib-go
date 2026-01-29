@@ -14,6 +14,8 @@ func logCMS(t *testing.T, name string, expected, estimated float64) {
 }
 
 // 1. Zero-state correctness
+// TestCMS_ZeroState verifies that a newly created Count-Min Sketch
+// returns zero for unseen keys.
 func TestCMS_ZeroState(t *testing.T) {
 	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 
@@ -28,6 +30,8 @@ func TestCMS_ZeroState(t *testing.T) {
 }
 
 // 2. No-underestimation (CORE CMS PROPERTY)
+// TestCMS_NoUnderestimate validates the core Count-Min property:
+// frequency estimates must never underestimate the true count.
 func TestCMS_NoUnderestimate(t *testing.T) {
 	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 
@@ -44,6 +48,8 @@ func TestCMS_NoUnderestimate(t *testing.T) {
 }
 
 // 3. Linearity
+// TestCMS_Linearity checks that Count-Min Sketch updates are additive,
+// ensuring correctness under batch and distributed updates.
 func TestCMS_Linearity(t *testing.T) {
 	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 
@@ -63,6 +69,8 @@ func TestCMS_Linearity(t *testing.T) {
 }
 
 // 4. Monotonicity
+// TestCMS_Monotonicity ensures that frequency estimates never
+// decrease as more updates are applied.
 func TestCMS_Monotonicity(t *testing.T) {
 	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 	h := common.FromString("mono").Hash
@@ -82,6 +90,9 @@ func TestCMS_Monotonicity(t *testing.T) {
 }
 
 // 5. Determinism
+// TestCMS_Determinism verifies that two sketches with identical
+// parameters and identical update streams produce the same results.
+// Count-Min Sketch should be deterministic.
 func TestCMS_Determinism(t *testing.T) {
 	s1, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 	s2, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
@@ -108,6 +119,8 @@ func TestCMS_Determinism(t *testing.T) {
 }
 
 // 6. Merge correctness
+// TestCMS_MergeCorrectness ensures that merging two Count-Min
+// sketches preserves the no-underestimation guarantee.
 func TestCMS_MergeCorrectness(t *testing.T) {
 	s1, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 	s2, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
@@ -132,6 +145,8 @@ func TestCMS_MergeCorrectness(t *testing.T) {
 }
 
 // 7. L1 & L2 accounting sanity
+// TestCMS_L1L2 validates internal consistency by checking
+// the L1 and L2 norms of the sketch against expected bounds.
 func TestCMS_L1L2(t *testing.T) {
 	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 
@@ -154,6 +169,8 @@ func TestCMS_L1L2(t *testing.T) {
 }
 
 // 8. Query purity
+// TestCMS_QueryNoSideEffect ensures that query operations do not
+// mutate the internal state of the sketch.
 func TestCMS_QueryNoSideEffect(t *testing.T) {
 	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 	h := common.FromString("pure").Hash
