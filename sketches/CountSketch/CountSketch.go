@@ -10,7 +10,7 @@ import (
 )
 
 const CS_ROW_NO_Univ_ELEPHANT int = 5
-const CS_COL_NO_Univ_ELEPHANT int = 4096
+const CS_COL_NO_Univ_ELEPHANT int = 2048
 const CS_ROW_NO_Univ_MICE int = 3
 const CS_COL_NO_Univ_MICE int = 512
 
@@ -195,6 +195,7 @@ func (s *CountSketch) UpdateString(key string, count float64) {
 	// 4. Update TopK Heap
 	// We cast to int64 because common.TopKHeap uses int64
 	s.TopK.UpdateCS(key, int64(est))
+
 }
 
 // EstimateStringCount is a helper to query by string directly
