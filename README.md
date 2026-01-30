@@ -3,12 +3,13 @@
 `sketchlib-go` is a probabilistic sketch library written in Go, designed for
 **high-throughput telemetry, streaming analytics, and OpenTelemetry-style aggregation**.
 
-The library is built around a **clear separation between numeric sketching and semantic processing**, enabling:
+The library emphasizes a **clear separation between numeric sketch execution and semantic processing**, enabling:
 
-* **Prehashed insertion**
+* **Pre-hashed insertion (fast path)**
 * **Single-hash multi-row derivation**
 * **Zero-allocation hot paths**
 * **Engine-style architecture (hashing outside sketches)**
+* **Explicit separation between fast and slow paths**
 * **Lazy and sampling-based Top-K optimization**
 
 ---
@@ -18,26 +19,30 @@ The library is built around a **clear separation between numeric sketching and s
 This library follows several **strict, non-negotiable rules**:
 
 1. **Hashes are computed exactly once**
-2. **Sketches never perform hashing**
-3. **Hot paths are allocation-free**
+2. **Sketches never perform hashing internally**
+3. **All hot paths are allocation-free**
 4. **Numeric sketches and semantic operators are decoupled**
-5. **Top-K is a derived structure, not a counting primitive**
-6. **Optimizations are structural, not micro-optimizations**
+5. **Top-K is a derived, key-aware structure**
+6. **Slow paths are explicit and isolated**
+7. **Optimizations are structural, not micro-optimizations**
 
-High-level flow:
+### High-Level Execution Flow
 
 ```
 User / OpenTelemetry
         ↓
-common.FromXxx   (hash computed once)
+common.FromXxx        (hash computed once)
         ↓
 HashLayer.Insert
         ↓
-Sketch.InsertWithHash   (fast path, numeric only)
+Sketch.InsertWithHash   (FAST PATH: numeric execution only)
         ↓
 (optional)
-Semantic Layer (Top-K, reporting, debugging)
+Semantic Layer          (SLOW PATH: Top-K, reporting, debugging)
 ```
+
+> **Design invariant:**
+> All high-throughput execution flows through `InsertWithHash`.
 
 ---
 
@@ -60,11 +65,11 @@ input := common.FromString("user_id")
 hash := input.Hash // computed once, reused everywhere
 ```
 
-Hashing utilities:
+Hashing rules:
 
 * `Hash64` based on `xxhash`
 * No seeded hashing in hot paths
-* Hash computation is **strictly forbidden inside sketches**
+* **Hash computation is strictly forbidden inside sketches**
 
 ---
 
@@ -79,17 +84,18 @@ Implemented / planned sketches:
 * HyperLogLog (HLL)
 * KLL / Quantile Sketches
 
-All sketches obey the same **strict contract**:
+All sketches obey the same **execution contract**:
 
-* ✅ Accept **precomputed hashes**
+* ✅ Accept **precomputed hashes** via fast path
 * ❌ Never compute hashes internally
 * ❌ Never allocate memory in hot paths
+* ❌ Never perform semantic logic (e.g., Top-K)
 
-Common sketch interface:
+#### Common Sketch Interface
 
 ```go
 type Sketch interface {
-	InsertWithHash(hash uint64)
+	InsertWithHash(hash uint64)              // fast path
 	QueryWithHash(q QueryType, hash uint64) (float64, error)
 	Merge(other Sketch) error
 	TypeName() string
@@ -99,22 +105,62 @@ type Sketch interface {
 This design enables:
 
 * Predictable latency
-* Easy fan-out insertion
-* Safe reuse in high-throughput engines
+* Safe fan-out insertion
+* Easy integration into ingestion engines
 
 ---
 
-### 3. HashLayer (`/hashlayer`)
+### 3. Fast Path vs Slow Path
+
+`sketchlib-go` explicitly distinguishes between **fast paths** and **slow paths**.
+
+#### Fast Path (Execution Layer)
+
+* Operates only on **pre-hashed input**
+* Allocation-free
+* Numeric only
+* Target of all performance optimization
+
+```go
+sketch.InsertWithHash(hash)
+```
+
+#### Slow Path (Key-Aware / Semantic Layer)
+
+Some operations inherently require **original keys**, for example:
+
+* Top-K / Heavy Hitters
+* Debugging and reporting
+* Sampling-based analysis
+
+These operations:
+
+* Cannot rely on hashes alone
+* Are explicitly isolated
+* Delegate numeric work to fast paths
+
+```go
+// Slow path example
+sketch.Insert(key)        // hashes internally, delegates
+topk.Update(key, estimate)
+```
+
+> **Important:**
+> Slow paths exist for correctness and semantics, not performance.
+
+---
+
+### 4. HashLayer (`/hashlayer`)
 
 `HashLayer` is an **engine-level component**, not a user-facing façade.
 
-Its sole responsibility is:
+Its sole responsibility:
 
-> **Fan-out insertion of a precomputed hash to multiple sketches**
+> **Fan-out a single precomputed hash to multiple sketches**
 
 ```go
 hl := hashlayer.New(cms, cs, hll)
-hl.Insert(input) // hash computed once, reused by all sketches
+hl.Insert(input) // hash computed once, reused everywhere
 ```
 
 Design constraints:
@@ -122,36 +168,40 @@ Design constraints:
 * ❌ HashLayer does **not** compute hashes
 * ❌ HashLayer does **not** execute queries
 * ❌ HashLayer does **not** perform semantic logic
-* ✅ Queries are executed **directly on sketches**
-
-Example query:
+* ✅ Queries run **directly on sketches**
 
 ```go
 freq, _ := cms.QueryWithHash(common.QueryFrequency, input.Hash)
 ```
 
-This mirrors the **engine-style HashLayer** used in the Rust implementation and modern telemetry pipelines.
+This mirrors **engine-style ingestion pipelines** used in modern telemetry systems.
 
 ---
 
-### 4. Benchmarks (`/benchmark`)
+### 5. Benchmarks (`/benchmark`)
 
 Benchmarks validate that:
 
 * Hashing is completely removed from hot paths
-* Prehashed insertion provides measurable speedups
+* Pre-hashed insertion provides measurable speedups
 * No allocations occur during insert or query
-* Slow paths (string-based APIs, Top-K) are clearly separated
+* Slow paths are clearly isolated
+* Accuracy is preserved across fast and slow paths
 
 Representative results:
 
 ```
-InsertWithHash               ~23 ns/op   0 allocs/op
-UpdateString (end-to-end)    ~270 ns/op  1 alloc/op
+InsertWithHash               ~23 ns/op    0 allocs/op
+Insert (slow path)           ~270 ns/op   1 alloc/op
 Speedup (fast path)          ~10×
 ```
 
-Pipeline benchmarks further demonstrate the benefit of reusing a single hash across multiple sketches.
+Benchmarks include:
+
+* Fast path only
+* Slow path only
+* End-to-end (hash + fast path)
+* Accuracy verification outside timed sections
 
 ---
 
@@ -161,10 +211,8 @@ Pipeline benchmarks further demonstrate the benefit of reusing a single hash acr
 
 Used for approximate frequency estimation with one-sided error.
 
-Key characteristics:
-
 * Single-hash multi-row derivation
-* Power-of-two width (bit masking instead of modulo)
+* Power-of-two width (bit masking)
 * No underestimation guarantee
 * Zero allocations in hot paths
 
@@ -174,32 +222,29 @@ Key characteristics:
 
 Used for unbiased frequency estimation with signed updates.
 
-Current optimizations:
-
-* Prehashed insert path
+* Pre-hashed fast path
 * Median-of-rows estimator
+* **Top-K handled externally (key-aware slow path)**
 
-Planned optimizations:
+---
 
-* Faster sign-bit derivation
-* Optimize Top-K path in UnivMon
+### HyperLogLog (HLL)
+
+Used for approximate cardinality estimation.
+
+* **Fast-path–only sketch**
+* Fully hash-based (no key semantics)
+* Slow path exists only as a wrapper for compatibility
 
 ---
 
 ### KLL Quantile Sketch
 
-Used for approximate quantile and distribution estimation.
-
-Key characteristics:
+Used for approximate quantile estimation.
 
 * Mergeable summaries
-* Probabilistic rank error bounds
+* Probabilistic rank guarantees
 * Sublinear memory usage
-
-Planned optimizations:
-
-* Fixed-size buffers
-* Improved merge efficiency
 
 ---
 
@@ -211,13 +256,14 @@ Planned optimizations:
 * 🟡 In Progress / Partial
 * ❌ To Do
 
-### Sketch Status Table
-
-| Sketch           | Correctness | Performance | Current Optimization                                        | Next Optimization                         |
-| ---------------- | ----------- | ----------- | ----------------------------------------------------------- | ----------------------------------------- |
-| Count-Min Sketch | ✅           | ✅           | Prehashed insert<br>Single-hash derivation<br>No allocation | Sharded CMS<br>Cache-line layout          |
-| Count Sketch     | ✅          | ✅          | Prehashed insert<br>Lazy Top-K threshold                    | Sign-bit derivation<br>Power-of-two width |
-| HyperLogLog      | 🟡          | 🟡          | Prehashed insert path                                       | Bias correction<br>Register optimization  |
-| KLL Quantile     | ✅          | ✅          | Prehashed insert<br>Merge correctness                       | Fixed buffer<br>Lazy compaction           |
+| Sketch            | Correctness | Performance | Current Optimization                                                     | Next Optimization                                      |
+| ----------------- | ----------- | ----------- | ------------------------------------------------------------------------ | ------------------------------------------------------ |
+| Count-Min Sketch  | ✅           | ✅           | Prehashed insert<br>Single-hash derivation<br>No allocation              | Sharded CMS<br>Cache-line–aware layout                 |
+| Count Sketch      | ✅           | ✅           | Prehashed insert<br>Median-of-rows estimator<br>Lazy Top-K threshold     | Faster sign-bit derivation                             |
+| HyperLogLog       | ✅           | ✅           | **Fast-path–only insert**<br>Hash-based execution<br>No key semantics    | Register layout optimization                           |
+| KLL Quantile      | ✅          | ✅          | Prehashed insert<br>Merge correctness                                    | Fixed buffer<br>Lazy compaction                        |
+| **UnivMon**       | 🟡          | 🟡          |   |              |
+| **HydraSketch**   | ❌          | ❌          |   |               |
+| **ElasticSketch** | ❌          | ❌          |   |  |
 
 
