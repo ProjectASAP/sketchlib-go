@@ -4,254 +4,173 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"github.com/approx-telemetry/sketchlib-go/common"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// TestCountSketchUniv_Basic verifies basic operations: Create, Update, Query, Clean
+func TestCountSketchUniv_Basic(t *testing.T) {
+	row := CS_ROW_NO_Univ_ELEPHANT
+	col := CS_COL_NO_Univ_ELEPHANT
+
+	// 1. Creation
+	cs, err := NewCountSketchUniv(row, col)
+	require.NoError(t, err)
+	require.NotNil(t, cs)
+
+	// Verify zero initialization
+	for r := 0; r < cs.row; r++ {
+		for c := 0; c < cs.col; c++ {
+			require.Equal(t, int64(0), cs.count[r][c])
+		}
+	}
+
+	// 2. Data Preparation
+	cases := []struct {
+		key string
+		cnt int64
+	}{
+		{"apple", 1},
+		{"banana", 10},
+		{"apple", 2}, // Total apple = 3
+		{"orange", 5},
+	}
+
+	// 3. Update Loop
+	for _, c := range cases {
+		input := common.FromString(c.key)
+		// Using UpdateWithHash (can also use InsertWithHash for count=1)
+		cs.UpdateWithHash(input.Hash, c.cnt)
+	}
+
+	// 4. Query & Verification
+	// Apple = 3
+	estApple, _ := cs.QueryWithHash(common.QueryFrequency, common.FromString("apple").Hash)
+	assert.Equal(t, 3.0, estApple, "Frequency estimation for 'apple' is incorrect")
+
+	// Banana = 10
+	estBanana, _ := cs.QueryWithHash(common.QueryFrequency, common.FromString("banana").Hash)
+	assert.Equal(t, 10.0, estBanana, "Frequency estimation for 'banana' is incorrect")
+
+	// Orange = 5
+	estOrange, _ := cs.QueryWithHash(common.QueryFrequency, common.FromString("orange").Hash)
+	assert.Equal(t, 5.0, estOrange, "Frequency estimation for 'orange' is incorrect")
+
+	// Not Found = 0
+	estGhost, _ := cs.QueryWithHash(common.QueryFrequency, common.FromString("ghost").Hash)
+	assert.Equal(t, 0.0, estGhost, "Non-existent item must be 0 (in case of no collision)")
+
+	// 5. Test Clean
+	err = cs.CleanCountSketchUniv()
+	require.NoError(t, err)
+	estAppleAfterClean, _ := cs.QueryWithHash(common.QueryFrequency, common.FromString("apple").Hash)
+	assert.Equal(t, 0.0, estAppleAfterClean, "Sketch must be empty after Clean")
+}
+
+// TestCSL2 tests L2 Norm estimation accuracy (Second Frequency Moment)
+// Adapted from your original test to match new API
 func TestCSL2(t *testing.T) {
-	seed1 := make([]uint32, CS_ROW_NO_Univ_ELEPHANT)
-	seed2 := make([]uint32, CS_ROW_NO_Univ_ELEPHANT)
 	rand.Seed(time.Now().UnixNano())
-	for r := 0; r < CS_ROW_NO_Univ_ELEPHANT; r++ {
-		seed1[r] = rand.Uint32()
-		seed2[r] = rand.Uint32()
-	}
+
+	// Setup Sketch
+	row := CS_ROW_NO_Univ_ELEPHANT
+	col := CS_COL_NO_Univ_ELEPHANT
 
 	t_now := time.Now()
-	cs, err := NewCountSketchUniv(CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, seed1, seed2)
-	since := time.Since(t_now)
-	t.Log(since)
+	cs, err := NewCountSketchUniv(row, col)
 	require.NoError(t, err)
-	var s float64 = 2
-	var v float64 = 1
-	var RAND *rand.Rand = rand.New(rand.NewSource(time.Now().Unix()))
-	z := rand.NewZipf(RAND, s, v, uint64(value_scale))
-	vec := make(common.Vector, 0)
+	t.Log("Setup time:", time.Since(t_now))
 
-	t2 := 1000000
-	for t := 0; t < t2; t++ {
-		value := float64(z.Uint64())
-		// TODO: DDSketch and KLL only works with positive float64 currently
-		vec = append(vec, common.Sample{T: int64(t), F: value})
-	}
+	// Setup Synthetic Data (Zipf)
+	s_zipf := 2.0
+	v_zipf := 1.0
+	value_scale_local := 50000 // Adjust scale
+
+	zipf := rand.NewZipf(rand.New(rand.NewSource(time.Now().Unix())), s_zipf, v_zipf, uint64(value_scale_local))
+
+	// Ground Truth Calculation
 	l1Map := make(map[float64]float64)
-	for t := 0; t < t2; t++ {
-		if _, ok := l1Map[vec[t].F]; ok {
-			l1Map[vec[t].F] += 1
-		} else {
-			l1Map[vec[t].F] = 1
-		}
+	t2 := 100000 // Number of items
 
-	}
-
-	var l1 float64 = 0.0
-	var l2 float64 = 0.0
-	var entropynorm float64 = 0.0
+	// Generate & Update Sketch via streaming
 	start := time.Now()
-	for _, value := range l1Map {
-		l1 += value
-		entropynorm += value * math.Log(value) / math.Log(2)
-		l2 += value * value
-	}
-	elapsed := time.Since(start)
-	fmt.Println("total baseline query time=", elapsed)
-	// entropy := math.Log(float64(t2))/math.Log(2) - entropynorm/float64(t2)
-	l2 = math.Sqrt(l2)
-	// card := float64(len(l1Map))
+	for i := 0; i < t2; i++ {
+		val := float64(zipf.Uint64())
 
-	for t := 0; t < t2; t++ {
-		key := strconv.FormatFloat(vec[t].F, 'f', -1, 64)
-		pos, sign := cs.position_and_sign([]byte(key))
-		cs.UpdateString(key, 1, pos, sign)
+		// Update Ground Truth
+		l1Map[val]++
+
+		// Update Sketch
+		// Convert float to string key to be consistent with old method,
+		// or use common.FromF64(val) if you want to hash raw float bytes.
+		// Here we follow the old pattern: strconv key
+		key := strconv.FormatFloat(val, 'f', -1, 64)
+		input := common.FromString(key)
+
+		cs.UpdateWithHash(input.Hash, 1)
 	}
-	start = time.Now()
-	l2_cs := cs.cs_l2()
-	elapsed = time.Since(start)
-	fmt.Println("total CS query time=", elapsed)
-	l2_err := AbsFloat64(l2_cs-l2) / l2
-	fmt.Println("l2 err:", l2_err*100, "%")
+	t.Log("Update time:", time.Since(start))
+
+	// Calculate Exact L2
+	var l2_exact_sq float64 = 0.0
+	for _, count := range l1Map {
+		l2_exact_sq += count * count
+	}
+	l2_exact := math.Sqrt(l2_exact_sq)
+
+	// Query Sketch L2
+	// Using QueryWithHash with QuerySum2 type
+	l2_est, _ := cs.QueryWithHash(common.QuerySum2, 0) // Hash argument ignored for L2 query
+
+	// Evaluate Error
+	fmt.Printf("Exact L2: %.4f, Est L2: %.4f\n", l2_exact, l2_est)
+
+	l2_err := math.Abs(l2_est-l2_exact) / l2_exact
+	fmt.Printf("L2 Error Rate: %.4f%%\n", l2_err*100)
+
+	// Assert reasonable error rate (e.g. < 5% for this setting)
+	assert.Less(t, l2_err, 0.05, "L2 Error rate too high")
 }
 
-func TestNewCountSketchUniv(t *testing.T) {
-	cases := []struct {
-		key string
-		cnt int64
-	}{
-		{"notfound", 1},
-		{"hello", 1},
-		{"count", 3},
-		{"min", 4},
-		{"world", 10},
-		{"cheatcheat", 3},
-		{"cheatcheat", 7},
-		{"min", 2},
-		{"hello", 2},
-		{"tigger", 34},
-		{"flow", 9},
-		{"miss", 4},
-		{"hello", 30},
-		{"world", 10},
-		{"hello", 10},
-	}
+// TestCountSketchUniv_Merge verifies Merge function
+func TestCountSketchUniv_Merge(t *testing.T) {
+	row, col := 5, 1024
+	cs1, _ := NewCountSketchUniv(row, col)
+	cs2, _ := NewCountSketchUniv(row, col)
 
-	expected := []struct {
-		key string
-		cnt int64
-	}{
-		{"notfound", 1},
-		{"hello", 43},
-		{"count", 3},
-		{"min", 6},
-		{"world", 20},
-		{"cheatcheat", 10},
-		{"tigger", 34},
-		{"flow", 9},
-		{"miss", 4},
-	}
+	key := "test_merge"
+	input := common.FromString(key)
 
-	seed1 := make([]uint32, 5)
-	seed2 := make([]uint32, 5)
-	rand.Seed(time.Now().UnixNano())
-	for r := 0; r < 5; r++ {
-		seed1[r] = rand.Uint32()
-		seed2[r] = rand.Uint32()
-	}
+	// CS1: count = 10
+	cs1.UpdateWithHash(input.Hash, 10)
 
-	t_now := time.Now()
-	s, err := NewCountSketchUniv(5, 4096, seed1, seed2)
-	since := time.Since(t_now)
-	t.Log(since)
+	// CS2: count = 20
+	cs2.UpdateWithHash(input.Hash, 20)
+
+	// Merge CS2 into CS1
+	err := cs1.Merge(cs2)
 	require.NoError(t, err)
 
-	for r := 0; r < s.Row(); r++ {
-		for c := 0; c < s.Col(); c++ {
-			require.Equal(t, int64(0), s.count[r][c])
-		}
-	}
-
-	for _, c := range cases {
-		key := c.key
-		pos, sign := s.position_and_sign([]byte(key))
-		s.UpdateString(c.key, c.cnt, pos, sign)
-	}
-
-	for i, c := range expected {
-		got := s.EstimateStringCount(c.key)
-		if c.cnt != got {
-			t.Logf("case %d '%s' got %d, expect %d", i, c.key, got, c.cnt)
-		}
-	}
-
-	err = s.FreeCountSketchUniv()
-	require.NoError(t, err)
-
-	t_now = time.Now()
-	s1, err1 := NewCountSketchUniv(5, 4096, seed1, seed2)
-	since = time.Since(t_now)
-	t.Log(since)
-	require.NoError(t, err1)
-	for r := 0; r < s1.Row(); r++ {
-		for c := 0; c < s1.Col(); c++ {
-			require.Equal(t, int64(0), s1.count[r][c])
-		}
-	}
-
-	for _, c := range cases {
-		key := c.key
-		pos, sign := s1.position_and_sign([]byte(key))
-		s1.UpdateString(c.key, c.cnt, pos, sign)
-	}
-
-	for i, c := range expected {
-		got := s1.EstimateStringCount(c.key)
-		if c.cnt != got {
-			t.Logf("case %d '%s' got %d, expect %d", i, c.key, got, c.cnt)
-		}
-	}
-
-	err = s1.FreeCountSketchUniv()
-	require.NoError(t, err)
-
-	t_now = time.Now()
-	s2, err2 := NewCountSketchUniv(5, 4096, seed1, seed2)
-	since = time.Since(t_now)
-	t.Log(since)
-	require.NoError(t, err2)
-	for r := 0; r < s2.Row(); r++ {
-		for c := 0; c < s2.Col(); c++ {
-			require.Equal(t, int64(0), s2.count[r][c])
-		}
-	}
-
-	err = s2.FreeCountSketchUniv()
-	require.NoError(t, err)
+	// CS1 should now be 30
+	est, _ := cs1.QueryWithHash(common.QueryFrequency, input.Hash)
+	assert.Equal(t, 30.0, est, "Merge failed to sum counters")
 }
 
-func TestCountSketchUniv(t *testing.T) {
-	fmt.Println("Hello TestCountSketchUniv")
-	cases := []struct {
-		key string
-		cnt int64
-	}{
-		{"notfound", 1},
-		{"hello", 1},
-		{"count", 3},
-		{"min", 4},
-		{"world", 10},
-		{"cheatcheat", 3},
-		{"cheatcheat", 7},
-		{"min", 2},
-		{"hello", 2},
-		{"tigger", 34},
-		{"flow", 9},
-		{"miss", 4},
-		{"hello", 30},
-		{"world", 10},
-		{"hello", 10},
-	}
+// TestUpdateAndEstimate verifies combined Update+Estimate function (UnivMon core)
+func TestUpdateAndEstimate(t *testing.T) {
+	cs, _ := NewCountSketchUniv(5, 1024)
+	input := common.FromString("itemX")
 
-	expected := []struct {
-		key string
-		cnt int64
-	}{
-		{"notfound", 1},
-		{"hello", 43},
-		{"count", 3},
-		{"min", 6},
-		{"world", 20},
-		{"cheatcheat", 10},
-		{"tigger", 34},
-		{"flow", 9},
-		{"miss", 4},
-	}
+	// Update 1: return value must be new estimate (1)
+	est1 := cs.UpdateAndEstimateHash(input.Hash, 1)
+	assert.Equal(t, int64(1), est1)
 
-	seed1 := make([]uint32, 5)
-	seed2 := make([]uint32, 5)
-	rand.Seed(time.Now().UnixNano())
-	for r := 0; r < 3; r++ {
-		seed1[r] = rand.Uint32()
-		seed2[r] = rand.Uint32()
-	}
-
-	s, err := NewCountSketchUniv(5, 4096, seed1, seed2)
-	require.NoError(t, err)
-
-	for _, c := range cases {
-		key := c.key
-		pos, sign := s.position_and_sign([]byte(key))
-		s.UpdateString(c.key, c.cnt, pos, sign)
-	}
-
-	for i, c := range expected {
-		got := s.EstimateStringCount(c.key)
-		if c.cnt != got {
-			t.Logf("case %d '%s' got %d, expect %d", i, c.key, got, c.cnt)
-		}
-	}
-	err = s.FreeCountSketchUniv()
-	require.NoError(t, err)
+	// Update 2: return value must be new estimate (1+2=3)
+	est2 := cs.UpdateAndEstimateHash(input.Hash, 2)
+	assert.Equal(t, int64(3), est2)
 }
