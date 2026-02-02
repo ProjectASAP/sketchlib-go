@@ -75,7 +75,6 @@ func TestCountSketchUniv_Basic(t *testing.T) {
 // TestCSL2 tests L2 Norm estimation accuracy (Second Frequency Moment)
 // Adapted from your original test to match new API
 func TestCSL2(t *testing.T) {
-	rand.Seed(time.Now().UnixNano())
 
 	// Setup Sketch
 	row := CS_ROW_NO_Univ_ELEPHANT
@@ -91,6 +90,7 @@ func TestCSL2(t *testing.T) {
 	v_zipf := 1.0
 	value_scale_local := 50000 // Adjust scale
 
+	// Using local random source for Zipf (Correct way)
 	zipf := rand.NewZipf(rand.New(rand.NewSource(time.Now().Unix())), s_zipf, v_zipf, uint64(value_scale_local))
 
 	// Ground Truth Calculation
