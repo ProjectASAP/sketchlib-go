@@ -1,331 +1,189 @@
 package univmon
 
 import (
-	"bufio"
 	"fmt"
 	"math"
 	"math/rand"
-	"os"
-
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	common "github.com/approx-telemetry/sketchlib-go/common"
-
-	"github.com/OneOfOne/xxhash"
+	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-var (
-	cases                     = make([]TestCase, 0)
-	total_time_series int     = 1
-	value_scale       float64 = 50000
-	stdDev            float64 = 10000
-	stdMean           float64 = 50000
-	test_times        int     = 5
-	time_range        int64   = 200000000
-)
+// TestUnivSketch_Basic verifies basic operations and statistical queries (L1, Card, Entropy)
+func TestUnivSketch_Basic(t *testing.T) {
+	// Configuration
+	k := TOPK_SIZE
+	row := CS_ROW_NO_Univ_ELEPHANT
+	col := CS_COL_NO_Univ_ELEPHANT
+	layer := CS_LVLS
 
-type TestCase struct {
-	key string
-	vec common.Vector
-}
+	// 1. Initialization (No manual Seed, handled internally/common)
+	us, err := NewUnivSketchPyramid(k, row, col, layer)
+	require.NoError(t, err)
+	defer us.Free()
 
-func TestUnivSketch(t *testing.T) {
-	fmt.Println("Hello TestUnivSketch")
-
+	// 2. Prepare Simple Data
 	cases := []struct {
 		key string
 		cnt int64
 	}{
-		{"notfound", 1},
-		{"hello", 1},
-		{"count", 3},
-		{"min", 4},
-		{"world", 10},
-		{"cheatcheat", 3},
-		{"cheatcheat", 7},
-		{"min", 2},
-		{"hello", 2},
-		{"tigger", 34},
-		{"flow", 9},
-		{"miss", 4},
-		{"hello", 30},
-		{"world", 10},
-		{"hello", 10},
-		{"mom", 1},
+		{"apple", 1},
+		{"banana", 1},
+		{"apple", 1}, // apple total 2
+		{"orange", 10},
+		{"mango", 5},
 	}
 
-	/*
-		expected := []struct {
-			key	string
-			cnt	float64
-		}{
-			{"notfound", 1},
-			{"hello", 43},
-			{"count", 3},
-			{"min", 6},
-			{"world", 20},
-			{"cheatcheat", 10},
-			{"tigger", 34},
-			{"flow", 9},
-			{"miss", 4},
-		}
-	*/
+	// 3. Insert Loop (Using New API: Update)
+	totalExpected := int64(0)
+	distinctExpected := 4 // apple, banana, orange, mango
 
-	seed1 := make([]uint32, 5)
-	seed2 := make([]uint32, 5)
+	for _, c := range cases {
+		// Create SketchInput from string
+		input := common.FromString(c.key)
+		// Update sketch
+		us.Update(input, c.cnt)
+		totalExpected += c.cnt
+	}
+
+	// 4. Verify L1 (Total Count)
+	// Since GetL1() is missing, we check bucket_size directly (Exact Count)
+	assert.Equal(t, totalExpected, us.bucket_size, "Bucket size (Exact L1) mismatch")
+
+	// 5. Verify Cardinality
+	cardEst := us.GetCardinality()
+	fmt.Printf("Actual Distinct: %d, Estimated: %.4f\n", distinctExpected, cardEst)
+	// Error tolerance slightly loose for very small data
+	assert.InDelta(t, float64(distinctExpected), cardEst, 1.5, "Cardinality estimation inaccurate")
+
+	// 6. Verify Entropy
+	// Calculate entropy manually:
+	// Total=18. P(apple)=2/18, P(banana)=1/18, P(orange)=10/18, P(mango)=5/18
+	// Entropy = -Sum(p * log2(p))
+	probs := []float64{2.0 / 18.0, 1.0 / 18.0, 10.0 / 18.0, 5.0 / 18.0}
+	expectedEntropy := 0.0
+	for _, p := range probs {
+		expectedEntropy -= p * math.Log2(p)
+	}
+
+	entropyEst := us.GetEntropy()
+	fmt.Printf("Actual Entropy: %.4f, Estimated: %.4f\n", expectedEntropy, entropyEst)
+	assert.InDelta(t, expectedEntropy, entropyEst, 0.5, "Entropy estimation inaccurate")
+}
+
+// TestUnivSketch_TopK verifies Heavy Hitters accuracy
+func TestUnivSketch_TopK(t *testing.T) {
+	us, _ := NewUnivSketchPyramid(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS)
+
+	// Scenario: "elephant" appears 1000 times, "mouse" appears 10 times
+	targetKey := "elephant"
+	targetCount := int64(1000)
+
+	inputHeavy := common.FromString(targetKey)
+	us.Update(inputHeavy, targetCount)
+
+	inputLight := common.FromString("mouse")
+	us.Update(inputLight, 10)
+
+	// Query TopK
+	topk := us.QueryTopK(5) // Get top 5
+
+	// Check if elephant exists
+	idx, found := topk.Find(targetKey)
+	require.True(t, found, "Heavy hitter 'elephant' must be found in TopK")
+
+	// Check count accuracy
+	estCount := topk.Heap[idx].Count
+	fmt.Printf("Heavy Hitter '%s': Real=%d, Est=%d\n", targetKey, targetCount, estCount)
+
+	// Error tolerance 5%
+	assert.InDelta(t, float64(targetCount), float64(estCount), float64(targetCount)*0.05, "TopK count estimation inaccurate")
+}
+
+// TestUnivSketch_Merge verifies sketch merging
+func TestUnivSketch_Merge(t *testing.T) {
+	k, row, col, layer := TOPK_SIZE, 5, 2048, 8
+
+	us1, _ := NewUnivSketchPyramid(k, row, col, layer)
+	us2, _ := NewUnivSketchPyramid(k, row, col, layer)
+
+	// US1: key A = 10
+	us1.Update(common.FromString("A"), 10)
+
+	// US2: key A = 20, key B = 5
+	us2.Update(common.FromString("A"), 20)
+	us2.Update(common.FromString("B"), 5)
+
+	// Merge US2 ke US1
+	us1.MergeWith(us2)
+
+	// Expectation in US1:
+	// A = 10 + 20 = 30
+	// B = 0 + 5 = 5
+	// Total bucket size = 35
+
+	assert.Equal(t, int64(35), us1.bucket_size, "Bucket size incorrect after merge")
+
+	// Check TopK to verify merged counters
+	topk := us1.QueryTopK(5)
+
+	idxA, foundA := topk.Find("A")
+	require.True(t, foundA, "Key A must exist after merge")
+	assert.InDelta(t, 30.0, float64(topk.Heap[idxA].Count), 2.0, "Count A after merge is incorrect")
+
+	idxB, foundB := topk.Find("B")
+	require.True(t, foundB, "Key B must exist after merge")
+	assert.InDelta(t, 5.0, float64(topk.Heap[idxB].Count), 1.0, "Count B after merge is incorrect")
+}
+
+// TestAccuracy_Syntethic similar to your original test using Zipf distribution
+func TestAccuracy_Syntethic(t *testing.T) {
 	rand.Seed(time.Now().UnixNano())
-	for r := 0; r < 5; r++ {
-		seed1[r] = rand.Uint32()
-		seed2[r] = rand.Uint32()
+
+	us, _ := NewUnivSketchPyramid(100, 5, 4096, 16)
+
+	// Create Zipf distribution
+	zipfS := 2.0
+	zipfV := 1.0
+	// Using standard math/rand for Zipf
+	zipf := rand.NewZipf(rand.New(rand.NewSource(time.Now().UnixNano())), zipfS, zipfV, 10000) // N=10000 items
+
+	totalItems := 100000
+	gtCounts := make(map[string]int64)
+
+	start := time.Now()
+	for i := 0; i < totalItems; i++ {
+		num := zipf.Uint64()
+		key := fmt.Sprintf("key-%d", num)
+
+		gtCounts[key]++
+		us.Update(common.FromString(key), 1)
 	}
-	seed3 := rand.Uint32()
+	duration := time.Since(start)
 
-	t_now := time.Now()
-	s, _ := NewUnivSketch(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS, seed1, seed2, seed3, -1)
-	since := time.Since(t_now)
-	fmt.Println("univmon creation time =", since)
-	fmt.Println(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS)
+	fmt.Printf("Processed %d items in %v (%.2f us/op)\n", totalItems, duration, float64(duration.Microseconds())/float64(totalItems))
 
-	// fmt.Println("successfully init universal sketch")
+	// Evaluate Heavy Hitters
+	topk := us.QueryTopK(100)
 
-	for _, c := range cases {
-		hash := xxhash.ChecksumString64S(c.key, uint64(seed3))
-		bottom_layer_num := findBottomLayerNum(hash, CS_LVLS)
-
-		pos, sign := s.cs_layers[0].position_and_sign([]byte(c.key))
-
-		s.univmon_processing(c.key, c.cnt, bottom_layer_num, &pos, &sign)
-		/*
-			fmt.Println("insert", c.key, c.cnt)
-
-			for _, item := range s.HH_layers[0].topK.heap {
-				fmt.Println("!!", item.key, item.count)
-			}
-			fmt.Println("----------------")
-		*/
-	}
-
-	got := s.calcL1()
-
-	if got != 131 {
-		fmt.Printf("got %f, expect %d\n", got, 131)
-	}
-
-	card := s.calcCard()
-
-	if card != 10 {
-		fmt.Printf("got card %f, expect %d\n", card, 10)
-	}
-
-	s.Free()
-	t_now = time.Now()
-	s1, _ := NewUnivSketch(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS, seed1, seed2, seed3, -1)
-	since = time.Since(t_now)
-	fmt.Println("univmon creation time =", since)
-	fmt.Println(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS)
-
-	for _, c := range cases {
-		hash := xxhash.ChecksumString64S(c.key, uint64(seed3))
-		bottom_layer_num := findBottomLayerNum(hash, CS_LVLS)
-		pos, sign := s.cs_layers[0].position_and_sign([]byte(c.key))
-		s1.univmon_processing(c.key, c.cnt, bottom_layer_num, &pos, &sign)
-		/*
-			fmt.Println("insert", c.key, c.cnt)
-			for _, item := range s.HH_layers[0].topK.heap {
-				fmt.Println("!!", item.key, item.count)
-			}
-			fmt.Println("----------------")
-		*/
-	}
-
-	got = s1.calcL1()
-
-	if got != 131 {
-		fmt.Printf("got %f, expect %d\n", got, 131)
-	}
-
-	card = s1.calcCard()
-
-	if card != 10 {
-		fmt.Printf("got card %f, expect %d\n", card, 10)
-	}
-
-	s1.Free()
-	t_now = time.Now()
-	s2, _ := NewUnivSketch(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS, seed1, seed2, seed3, -1)
-	since = time.Since(t_now)
-	fmt.Println("univmon creation time =", since)
-	fmt.Println(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS)
-
-	for _, c := range cases {
-		hash := xxhash.ChecksumString64S(c.key, uint64(seed3))
-		bottom_layer_num := findBottomLayerNum(hash, CS_LVLS)
-		pos, sign := s.cs_layers[0].position_and_sign([]byte(c.key))
-		s2.univmon_processing(c.key, c.cnt, bottom_layer_num, &pos, &sign)
-		/*
-			fmt.Println("insert", c.key, c.cnt)
-			for _, item := range s.HH_layers[0].topK.heap {
-				fmt.Println("!!", item.key, item.count)
-			}
-			fmt.Println("----------------")
-		*/
-	}
-
-	got = s2.calcL1()
-
-	if got != 131 {
-		fmt.Printf("got %f, expect %d", got, 131)
-	}
-
-	card = s2.calcCard()
-	if card != 10 {
-		fmt.Printf("got card %f, expect %d", card, 10)
-	}
-}
-
-func readCAIDADebug() {
-	for i := 0; i < 1; i++ {
-		f, err := os.Open("./testdata/caida_input.txt")
-		if err != nil {
-			panic(err)
-		}
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		t := int64(0)
-		vec := make(common.Vector, 0)
-		for scanner.Scan() {
-			splits := strings.Fields(scanner.Text())
-			T := t
-			F, _ := strconv.ParseFloat(strings.TrimSpace(splits[0]), 64)
-			vec = append(vec, common.Sample{T: T, F: F})
-			t += 1
-		}
-		tmp := TestCase{
-			key: "caida_input",
-			vec: vec,
-		}
-		cases = append(cases, tmp)
-	}
-}
-
-func gsum(values []float64) (float64, float64, float64, float64) {
-	m := make(map[float64]int)
-	n := float64(len(values))
-	for _, v := range values {
-		if _, ok := m[v]; !ok {
-			m[v] = 1
-		} else {
-			m[v] += 1
+	// Get actual Top 1 item (Most Frequent Item)
+	maxKey := ""
+	maxVal := int64(0)
+	for k, v := range gtCounts {
+		if v > maxVal {
+			maxVal = v
+			maxKey = k
 		}
 	}
-	var l1, l2, entropy float64 = 0, 0, 0
-	for _, v := range m {
-		l1 += float64(v)
-		l2 += float64(v * v)
-		entropy += float64(v) * math.Log2(float64(v))
+
+	idx, found := topk.Find(maxKey)
+	if assert.True(t, found, "Most frequent item (%s) must be in TopK", maxKey) {
+		estVal := topk.Heap[idx].Count
+		errRate := math.Abs(float64(estVal-maxVal)) / float64(maxVal)
+		fmt.Printf("Top Item '%s': Real=%d, Est=%d, Error=%.2f%%\n", maxKey, maxVal, estVal, errRate*100)
+		assert.Less(t, errRate, 0.05, "Error rate for top item must be < 5%")
 	}
-	distinct := float64(len(m))
-	l2 = math.Sqrt(l2)
-	entropy = math.Log2(n) - entropy/n
-	return distinct, l1, entropy, l2
-}
-
-func TestUnivCAIDA(t *testing.T) {
-	query_window_size := int64(1000000)
-
-	// constructInputTimeSeriesZipf()
-	readCAIDADebug()
-
-	seed1 := make([]uint32, 5)
-	seed2 := make([]uint32, 5)
-	rand.Seed(time.Now().UnixNano())
-	for r := 0; r < 5; r++ {
-		seed1[r] = rand.Uint32()
-		seed2[r] = rand.Uint32()
-	}
-	seed3 := rand.Uint32()
-	univ, _ := NewUnivSketch(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS, seed1, seed2, seed3, -1)
-	values := make([]float64, 0)
-
-	for t := int64(0); t < query_window_size; t++ {
-		values = append(values, cases[0].vec[t].F)
-	}
-	gt_distinct, gt_l1, gt_entropy, gt_l2 := gsum(values)
-
-	now := time.Now()
-	for t := int64(0); t < query_window_size; t++ {
-		key := strconv.FormatFloat(cases[0].vec[t].F, 'f', -1, 64)
-		hash := xxhash.ChecksumString64S(key, uint64(univ.seed))
-		bottom_layer_num := findBottomLayerNum(hash, CS_LVLS)
-
-		pos, sign := univ.cs_layers[0].position_and_sign([]byte(key))
-		univ.univmon_processing(key, 1, bottom_layer_num, &pos, &sign)
-	}
-	since := time.Since(now)
-	fmt.Println("UnivMon update time per item:", float64(since.Microseconds())/float64(query_window_size), "us")
-
-	// univ.PrintHHlayers()
-
-	count := float64(query_window_size)
-	distinct := univ.calcCard()
-	l1 := univ.calcL1()
-	l2 := univ.calcL2()
-	entropy := univ.calcEntropy()
-
-	univ_optimized, _ := NewUnivSketchPyramid(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS, seed1, seed2, seed3, -1)
-	now = time.Now()
-	for t := int64(0); t < query_window_size; t++ {
-		key := strconv.FormatFloat(cases[0].vec[t].F, 'f', -1, 64)
-		hash := xxhash.ChecksumString64S(key, uint64(univ.seed))
-		bottom_layer_num := findBottomLayerNum(hash, CS_LVLS)
-
-		pos, sign := univ_optimized.cs_layers[0].position_and_sign([]byte(key))
-		univ_optimized.univmon_processing_optimized(key, 1, bottom_layer_num, &pos, &sign)
-	}
-	since = time.Since(now)
-	fmt.Println("Optimized UnivMon update time per item:", float64(since.Microseconds())/float64(query_window_size), "us")
-
-	// univ_optimized.PrintHHlayers()
-	count_op := float64(query_window_size)
-	distinct_op := univ_optimized.calcCard()
-	l1_op := univ_optimized.calcL1()
-	l2_op := univ_optimized.calcL2()
-	entropy_op := univ_optimized.calcEntropy()
-
-	fmt.Println("native univ:")
-	fmt.Println("approx:", distinct, l1, entropy, l2, count)
-	fmt.Println("gt:", gt_distinct, gt_l1, gt_entropy, gt_l2, 1000000)
-
-	rel_err := AbsFloat64(gt_distinct-distinct) / (gt_distinct) * 100
-	fmt.Println("distinct err:", rel_err)
-
-	rel_err = AbsFloat64(gt_l1-l1) / (gt_l1) * 100
-	fmt.Println("l1 err:", rel_err)
-
-	rel_err = AbsFloat64(gt_entropy-entropy) / (gt_entropy) * 100
-	fmt.Println("entropy err:", rel_err)
-
-	rel_err = AbsFloat64(gt_l2-l2) / (gt_l2) * 100
-	fmt.Println("l2 err:", rel_err)
-	fmt.Println(univ.GetMemoryKB())
-
-	fmt.Println("optimized univ:")
-	fmt.Println("approx:", distinct_op, l1_op, entropy_op, l2_op, count_op)
-	fmt.Println("gt:", gt_distinct, gt_l1, gt_entropy, gt_l2, 1000000)
-
-	rel_err_op := AbsFloat64(gt_distinct-distinct_op) / (gt_distinct) * 100
-	fmt.Println("distinct err:", rel_err_op)
-
-	rel_err_op = AbsFloat64(gt_l1-l1_op) / (gt_l1) * 100
-	fmt.Println("l1 err:", rel_err_op)
-
-	rel_err_op = AbsFloat64(gt_entropy-entropy_op) / (gt_entropy) * 100
-	fmt.Println("entropy err:", rel_err_op)
-
-	rel_err_op = AbsFloat64(gt_l2-l2_op) / (gt_l2) * 100
-	fmt.Println("l2 err:", rel_err_op)
-	fmt.Println(univ_optimized.GetMemoryKBPyramid(), "KB")
 }
