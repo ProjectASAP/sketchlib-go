@@ -11,7 +11,7 @@ type Item struct {
 
 type TopKHeap struct {
 	Heap     []Item
-	k        int
+	K        int
 	totalMem float64
 }
 
@@ -26,7 +26,7 @@ func (topkheap *TopKHeap) GetMemoryBytes() float64 {
 func NewTopKHeap(k int) (topkheap *TopKHeap) {
 	topkheap = &TopKHeap{
 		Heap:     make([]Item, 0, k),
-		k:        k,
+		K:        k,
 		totalMem: 0,
 	}
 	return topkheap
@@ -34,7 +34,7 @@ func NewTopKHeap(k int) (topkheap *TopKHeap) {
 
 func NewTopKFromHeap(from *TopKHeap) (topkheap *TopKHeap) {
 	topkheap = &TopKHeap{
-		k:    from.k,
+		K:    from.K,
 		Heap: make([]Item, len(from.Heap)),
 	}
 	for i, item := range from.Heap {
@@ -115,7 +115,7 @@ func (topkheap *TopKHeap) Update(key string, count int64) bool {
 }
 
 func (topkheap *TopKHeap) Insert(key string, count int64) {
-	if int(len(topkheap.Heap)) < topkheap.k {
+	if int(len(topkheap.Heap)) < topkheap.K {
 		topkheap.Heap = append(topkheap.Heap, Item{
 			Key:   key,
 			Count: count,

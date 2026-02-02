@@ -141,14 +141,13 @@ func TestUnivSketch_Merge(t *testing.T) {
 
 // TestAccuracy_Syntethic similar to your original test using Zipf distribution
 func TestAccuracy_Syntethic(t *testing.T) {
-	rand.Seed(time.Now().UnixNano())
 
 	us, _ := NewUnivSketchPyramid(100, 5, 4096, 16)
 
 	// Create Zipf distribution
 	zipfS := 2.0
 	zipfV := 1.0
-	// Using standard math/rand for Zipf
+	// Using standard math/rand for Zipf with local source
 	zipf := rand.NewZipf(rand.New(rand.NewSource(time.Now().UnixNano())), zipfS, zipfV, 10000) // N=10000 items
 
 	totalItems := 100000
