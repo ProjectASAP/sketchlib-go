@@ -1,88 +1,81 @@
-// Package coco implements CocoSketch (Cornucopia Sketch) in Go.
-// Features:
-// - d-ary (number of arrays/hashes can be >2)
-// - Insert: power-of-d choices + probabilistic replacement (1/C)
-// - Merge: sketch-to-sketch & per-entry
-// - Snapshot & Aggregation: raw, sum, median
-//
-// Note: this is a single-threaded version. For concurrent ingestion,
-// use application-level sharding or protect Insert/Merge with a mutex.
 package cocosketch
 
 import (
 	"errors"
-	"math"
 	"math/rand"
 	"sort"
 	"time"
+
+	"github.com/approx-telemetry/sketchlib-go/common"
 )
 
-// Hasher converts key K into a 64-bit hash.
-// Simple implementation: FNV-1a 64 or xxhash64 (if adding extra lib).
-type Hasher[K comparable] func(K) uint64
-
-// Aggregation determines how to combine values across multiple arrays
-// (when a key appears in >1 array). Paper usually recommends median.
+// Aggregation determines how to combine values if a hash is found in multiple arrays simultaneously.
 type Aggregation int
 
 const (
-	AggregateRaw    Aggregation = iota // no combination; just use Snapshot()
-	AggregateSum                       // sum across all arrays
-	AggregateMedian                    // median across arrays (recommended)
+	AggregateRaw    Aggregation = iota // Returns the first value found (fastest)
+	AggregateSum                       // Sums up all occurrences across arrays
+	AggregateMedian                    // Takes the median of all occurrences (Recommended by paper)
+	AggregateMax                       // Takes the maximum value (Common in Count-Min)
 )
 
-// Entry is the payload for MergeEntry (per-key).
-type Entry[K comparable] struct {
-	Key   K
-	Value uint64
-	// If PositionsValid=false, positions will be computed from hash(key).
-	Positions      []int
-	PositionsValid bool
+// CocoSketch implements common.Sketch using the Cornucopia Sketch algorithm.
+// It uses probabilistic replacement to manage heavy hitters in a fixed-size table.
+type CocoSketch struct {
+	d          int         // number of arrays
+	length     int         // number of buckets per array
+	keys       [][]uint64  // Stores the Hash itself as the key
+	counts     [][]uint64  // Stores the frequency count
+	rng        *rand.Rand  // Local RNG for probabilistic replacement
+	defaultAgg Aggregation // Default aggregation method for QueryWithHash
 }
 
-// Coco is the main CocoSketch structure.
-type Coco[K comparable] struct {
-	d      int   // number of arrays/hashes (d)
-	length int   // number of buckets per array
-	keys   [][]K // [d][length]
-	counts [][]uint64
-	hasher Hasher[K]
-	rng    *rand.Rand
-}
-
-// NewCoco creates a sketch with d arrays and length buckets per array.
-func NewCoco[K comparable](d, length int, hasher Hasher[K]) (*Coco[K], error) {
+// NewCocoSketch creates a new instance.
+// d: number of arrays (hashes).
+// length: size of each array.
+func NewCocoSketch(d, length int) (*CocoSketch, error) {
 	if d <= 0 || length <= 0 {
 		return nil, errors.New("d and length must be > 0")
 	}
-	if hasher == nil {
-		return nil, errors.New("hasher must not be nil")
-	}
-	keys := make([][]K, d)
+
+	keys := make([][]uint64, d)
 	counts := make([][]uint64, d)
 	for i := 0; i < d; i++ {
-		keys[i] = make([]K, length)
+		keys[i] = make([]uint64, length)
 		counts[i] = make([]uint64, length)
 	}
+
+	// Use local random source
 	src := rand.NewSource(time.Now().UnixNano())
-	return &Coco[K]{
-		d:      d,
-		length: length,
-		keys:   keys,
-		counts: counts,
-		hasher: hasher,
-		rng:    rand.New(src),
+
+	return &CocoSketch{
+		d:          d,
+		length:     length,
+		keys:       keys,
+		counts:     counts,
+		rng:        rand.New(src),
+		defaultAgg: AggregateMedian, // Recommended default
 	}, nil
 }
 
-// positions uses double hashing to generate candidate positions
-// for each array: pos[i] = (h1 + i*h2) % length, with h2 odd.
-func (c *Coco[K]) positions(h uint64) []int {
+// SetAggregation changes the default aggregation strategy used by QueryWithHash.
+func (c *CocoSketch) SetAggregation(agg Aggregation) {
+	c.defaultAgg = agg
+}
+
+// TypeName returns the name of the sketch.
+func (c *CocoSketch) TypeName() string {
+	return "CocoSketch"
+}
+
+// positions generates d positions based on the input hash using double hashing logic.
+func (c *CocoSketch) positions(h uint64) []int {
 	pos := make([]int, c.d)
-	// split into 2x32-bit
+	// Split 64-bit hash into two 32-bit parts
 	h1 := uint64(uint32(h & 0xffffffff))
-	h2 := uint64(uint32((h >> 32) | 1)) // ensure non-zero (usually odd)
+	h2 := uint64(uint32((h >> 32) | 1)) // ensure odd
 	mod := uint64(c.length)
+
 	for i := 0; i < c.d; i++ {
 		p := (h1 + uint64(i)*h2) % mod
 		pos[i] = int(p)
@@ -90,23 +83,24 @@ func (c *Coco[K]) positions(h uint64) []int {
 	return pos
 }
 
-// Insert adds 1 to an item (full key) using power-of-d choices.
-func (c *Coco[K]) Insert(item K) {
-	h := c.hasher(item)
-	pos := c.positions(h)
+// InsertWithHash inserts a hash into the sketch (value = 1).
+// Implements common.Sketch.
+func (c *CocoSketch) InsertWithHash(hash uint64) {
+	pos := c.positions(hash)
 
-	// 1) if same key is found in candidates → increment and finish
+	// 1) If same hash is found in candidates -> increment and finish
 	for i := 0; i < c.d; i++ {
-		if c.keys[i][pos[i]] == item {
+		if c.keys[i][pos[i]] == hash {
 			c.counts[i][pos[i]]++
 			return
 		}
 	}
 
-	// 2) choose the bucket with minimum counter
+	// 2) Choose the bucket with minimum counter
 	minIdx := 0
 	minPos := pos[0]
 	minVal := c.counts[0][minPos]
+
 	for i := 1; i < c.d; i++ {
 		v := c.counts[i][pos[i]]
 		if v < minVal {
@@ -116,218 +110,130 @@ func (c *Coco[K]) Insert(item K) {
 		}
 	}
 
-	// 3) increment counter
+	// 3) Increment counter of the victim/target
 	c.counts[minIdx][minPos]++
 	C := c.counts[minIdx][minPos]
-	// 4) probabilistic replacement: replace key with probability 1/C
+
+	// 4) Probabilistic replacement: replace key with probability 1/C
 	if C == 0 {
-		// won't happen because we just incremented
-		C = 1
+		C = 1 // Should not happen after increment
 	}
 	if (c.rng.Uint64() % C) == 0 {
-		c.keys[minIdx][minPos] = item
+		c.keys[minIdx][minPos] = hash
 	}
 }
 
-// Merge combines another sketch into this one, following rules:
-// counts[i][j] += other.counts[i][j]
-// and probability to adopt key from other = other.counts / new counts.
-func (c *Coco[K]) Merge(other *Coco[K]) error {
-	if other == nil {
-		return nil
+// QueryWithHash returns the estimated frequency of the hash.
+// It uses the default aggregation strategy set by SetAggregation (default: Median).
+// Implements common.Sketch.
+func (c *CocoSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+	if q == common.QuerySum2 {
+		// Not implemented for Coco yet
+		return 0, nil
 	}
-	if c.d != other.d || c.length != other.length {
+	if q != common.QueryFrequency {
+		return 0, common.ErrUnsupportedQuery
+	}
+
+	// Call internal function using default aggregation strategy
+	return c.estimateSpecific(hash, c.defaultAgg), nil
+}
+
+// QuerySpecific allows querying with a specific Aggregation strategy manually.
+func (c *CocoSketch) QuerySpecific(hash uint64, agg Aggregation) float64 {
+	return c.estimateSpecific(hash, agg)
+}
+
+// estimateSpecific is the internal logic to collect values and aggregate them.
+func (c *CocoSketch) estimateSpecific(hash uint64, agg Aggregation) float64 {
+	pos := c.positions(hash)
+
+	// Collect all counter values that match this hash
+	var values []uint64
+
+	for i := 0; i < c.d; i++ {
+		if c.keys[i][pos[i]] == hash {
+			val := c.counts[i][pos[i]]
+			if agg == AggregateRaw {
+				return float64(val) // Return immediately for Raw (First match)
+			}
+			values = append(values, val)
+		}
+	}
+
+	if len(values) == 0 {
+		return 0
+	}
+
+	// Process Aggregation
+	switch agg {
+	case AggregateSum:
+		var sum uint64
+		for _, v := range values {
+			sum += v
+		}
+		return float64(sum)
+
+	case AggregateMax:
+		var maxVal uint64
+		for _, v := range values {
+			if v > maxVal {
+				maxVal = v
+			}
+		}
+		return float64(maxVal)
+
+	case AggregateMedian:
+		sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
+		n := len(values)
+		if n%2 == 1 {
+			return float64(values[n/2])
+		}
+		// Average of two middle values
+		return float64(values[n/2-1]+values[n/2]) / 2.0
+
+	default: // Fallback to Sum or Raw
+		return float64(values[0])
+	}
+}
+
+// Merge combines another sketch into this one.
+// Implements common.Sketch.
+func (c *CocoSketch) Merge(other common.Sketch) error {
+	o, ok := other.(*CocoSketch)
+	if !ok {
+		return errors.New("cannot merge different sketch types")
+	}
+
+	if c.d != o.d || c.length != o.length {
 		return errors.New("incompatible sketches: d/length mismatch")
 	}
+
 	for i := 0; i < c.d; i++ {
 		for j := 0; j < c.length; j++ {
-			add := other.counts[i][j]
+			add := o.counts[i][j]
 			if add == 0 {
 				continue
 			}
+
 			c.counts[i][j] += add
 			total := c.counts[i][j]
-			// adopt key from other with probability add/total
-			// realization: rng%total < add
-			if (c.rng.Uint64() % total) < add {
-				c.keys[i][j] = other.keys[i][j]
+
+			// Adopt key from other with probability add/total
+			if total > 0 && (c.rng.Uint64()%total) < add {
+				c.keys[i][j] = o.keys[i][j]
 			}
 		}
 	}
 	return nil
 }
 
-// MergeEntry combines a single entry (e.g., from a shard).
-// If PositionsValid, use Positions (length must == d).
-// Otherwise, compute from hash(key).
-func (c *Coco[K]) MergeEntry(e Entry[K]) error {
-	if e.Value == 0 {
-		return nil
-	}
-	var pos []int
-	if e.PositionsValid {
-		if len(e.Positions) != c.d {
-			return errors.New("entry positions length != d")
-		}
-		pos = make([]int, c.d)
-		for i := 0; i < c.d; i++ {
-			pi := e.Positions[i] % c.length
-			if pi < 0 {
-				pi += c.length
-			}
-			pos[i] = pi
-		}
-	} else {
-		pos = c.positions(c.hasher(e.Key))
-	}
-
-	// 1) if same key exists in candidates → add value, finish
-	for i := 0; i < c.d; i++ {
-		if c.keys[i][pos[i]] == e.Key {
-			c.counts[i][pos[i]] += e.Value
-			return nil
-		}
-	}
-
-	// 2) choose bucket with minimum counter among candidates
-	minIdx := 0
-	minPos := pos[0]
-	minVal := c.counts[0][minPos]
-	for i := 1; i < c.d; i++ {
-		v := c.counts[i][pos[i]]
-		if v < minVal {
-			minVal = v
-			minIdx = i
-			minPos = pos[i]
-		}
-	}
-
-	// 3) add value
-	c.counts[minIdx][minPos] += e.Value
-	C := c.counts[minIdx][minPos]
-	if C == 0 {
-		C = 1
-	}
-	// 4) probabilistic replacement: rng%count < value
-	if (c.rng.Uint64() % C) < e.Value {
-		c.keys[minIdx][minPos] = e.Key
-	}
-	return nil
-}
-
-// Snapshot returns a map key → slice of values (one per array) for keys
-// recorded in buckets. Useful for post-processing/reconstruction.
-// Note: zero-value keys may appear; caller should filter if necessary.
-func (c *Coco[K]) Snapshot() map[K][]uint64 {
-	m := make(map[K][]uint64)
+// Clear resets the sketch.
+func (c *CocoSketch) Clear() {
 	for i := 0; i < c.d; i++ {
 		for j := 0; j < c.length; j++ {
-			k := c.keys[i][j]
-			v := c.counts[i][j]
-			if _, ok := m[k]; !ok {
-				m[k] = make([]uint64, 0, c.d)
-			}
-			m[k] = append(m[k], v)
+			c.keys[i][j] = 0
+			c.counts[i][j] = 0
 		}
 	}
-	return m
-}
-
-// Table returns aggregated estimates per key using an aggregation method.
-// - AggregateSum: sum of values across arrays
-// - AggregateMedian: median of values across arrays
-// Note: zero-value keys & zero counts can be filtered by caller if desired.
-func (c *Coco[K]) Table(agg Aggregation) map[K]uint64 {
-	raw := c.Snapshot()
-	out := make(map[K]uint64, len(raw))
-	switch agg {
-	case AggregateSum:
-		for k, arr := range raw {
-			var s uint64
-			for _, x := range arr {
-				s += x
-			}
-			out[k] = s
-		}
-	case AggregateMedian:
-		for k, arr := range raw {
-			cp := append([]uint64(nil), arr...)
-			sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
-			n := len(cp)
-			if n == 0 {
-				continue
-			}
-			var med uint64
-			if n%2 == 1 {
-				med = cp[n/2]
-			} else {
-				// even-length → average of two middle values (floored)
-				med = (cp[n/2-1] + cp[n/2]) / 2
-			}
-			out[k] = med
-		}
-	default:
-		// AggregateRaw → return one value (e.g., the first)
-		for k, arr := range raw {
-			if len(arr) > 0 {
-				out[k] = arr[0]
-			}
-		}
-	}
-	return out
-}
-
-// ====== Example built-in hashers (optional) ======
-
-// FNV1a64 for string (simple, no dependency).
-func FNV1a64String(s string) uint64 {
-	var h uint64 = 1469598103934665603
-	const prime = 1099511628211
-	for i := 0; i < len(s); i++ {
-		h ^= uint64(s[i])
-		h *= prime
-	}
-	return h
-}
-
-// FNV1a64Bytes for []byte.
-func FNV1a64Bytes(b []byte) uint64 {
-	var h uint64 = 1469598103934665603
-	const prime = 1099511628211
-	for _, x := range b {
-		h ^= uint64(x)
-		h *= prime
-	}
-	return h
-}
-
-// FNV1a64Uint64 for uint64 (fold into small bytes).
-func FNV1a64Uint64(x uint64) uint64 {
-	// split into two 32-bit parts as a simple variation
-	return FNV1a64Bytes([]byte{
-		byte(x), byte(x >> 8), byte(x >> 16), byte(x >> 24),
-		byte(x >> 32), byte(x >> 40), byte(x >> 48), byte(x >> 56),
-	})
-}
-
-// ====== Small utilities ======
-
-// EstimatedMemoryBytes estimates memory footprint for current configuration.
-func (c *Coco[K]) EstimatedMemoryBytes() int {
-	// Estimate: counts (uint64) + keys (size unknown).
-	// Since size of generic K is not known at runtime in Go portably,
-	// we only count counts: d * length * 8 bytes.
-	return c.d * c.length * 8
-}
-
-// HeavyThreshold returns heavy hitter threshold based on totalCount and theta.
-func HeavyThreshold(totalCount uint64, theta float64) uint64 {
-	if theta <= 0 {
-		return math.MaxUint64
-	}
-	v := float64(totalCount) * theta
-	if v < 1 {
-		v = 1
-	}
-	return uint64(v)
 }
