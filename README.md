@@ -26,7 +26,9 @@ This library follows several **strict, non-negotiable rules**:
 6. **Slow paths are explicit and isolated**
 7. **Optimizations are structural, not micro-optimizations**
 
-### High-Level Execution Flow
+---
+
+## High-Level Execution Flow
 
 ```
 User / OpenTelemetry
@@ -89,7 +91,6 @@ All sketches obey the same **execution contract**:
 * ✅ Accept **precomputed hashes** via fast path
 * ❌ Never compute hashes internally
 * ❌ Never allocate memory in hot paths
-* ❌ Never perform semantic logic (e.g., Top-K)
 
 #### Common Sketch Interface
 
@@ -178,7 +179,21 @@ This mirrors **engine-style ingestion pipelines** used in modern telemetry syste
 
 ---
 
-### 5. Benchmarks (`/benchmark`)
+## Supported Sketches & Framework Capabilities
+
+| Sketch / Framework | Type      | Aggregation Operations / Statistical Queries Supported                                                                       | Notes                                                                                                                      |
+| ------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **CountMinSketch** | Sketch    | • Frequency (Point Query using Min)<br>• L1 Norm (Sum of counts)<br>• L2 Norm (Euclidean Norm)<br>• Sum (Min of sum columns) | Uses a conservative update strategy (never underestimates).                                                                |
+| **CountSketch**    | Sketch    | • Frequency (Point Query using Median)<br>• L2 Norm (Euclidean Norm)<br>• Heavy Hitters / Top-K                              | Uses a median-based estimation to handle noise from collisions and tracks heavy hitters via a heap.                        |
+| **CocoSketch**     | Sketch    | • Frequency (Flexible Aggregation)<br>• Supports: Raw, Sum, Median, Max                                                      | Allows selecting the aggregation strategy dynamically at query time.                                                       |
+| **HyperLogLog**    | Sketch    | • Cardinality (Distinct Count)                                                                                               | Specialized for counting unique items using probabilistic registers.                                                       |
+| **KLLSketch**      | Sketch    | • Quantile Estimation<br>• Rank Estimation<br>• CDF (Cumulative Distribution Function)<br>• Total Count (Stream length)      | Stores a compact distribution summary to answer percentile and rank queries.                                               |
+| **UnivMon**        | Framework | • Entropy<br>• Cardinality<br>• Heavy Hitters / Top-K<br>• L2 Norm (Intermediate)                                            | “Universal Monitor” framework that layers multiple `CountSketchUniv` instances to compute complex statistics like entropy. |
+| **HashLayer**      | Framework | • Dispatcher (Vector Result)                                                                                                 | Acts as a wrapper to broadcast queries to multiple sketches and return a vector of results (e.g., `[]float64`).            |
+
+---
+
+## Benchmarks (`/benchmark`)
 
 Benchmarks validate that:
 
@@ -256,14 +271,12 @@ Used for approximate quantile estimation.
 * 🟡 In Progress / Partial
 * ❌ To Do
 
-| Sketch            | Correctness | Performance | Current Optimization                                                     | Next Optimization                                      |
-| ----------------- | ----------- | ----------- | ------------------------------------------------------------------------ | ------------------------------------------------------ |
-| Count-Min Sketch  | ✅           | ✅           | Prehashed insert<br>Single-hash derivation<br>No allocation              | Sharded CMS<br>Cache-line–aware layout                 |
-| Count Sketch      | ✅           | ✅           | Prehashed insert<br>Median-of-rows estimator<br>Lazy Top-K threshold     | Faster sign-bit derivation                             |
-| HyperLogLog       | ✅           | ✅           | **Fast-path–only insert**<br>Hash-based execution<br>No key semantics    | Register layout optimization                           |
-| KLL Quantile      | ✅          | ✅          | Prehashed insert<br>Merge correctness                                    | Fixed buffer<br>Lazy compaction                        |
-| **UnivMon**       | 🟡          | 🟡          |   |              |
-| **HydraSketch**   | ❌          | ❌          |   |               |
-| **ElasticSketch** | ❌          | ❌          |   |  |
-
-
+| Sketch            | Correctness | Performance | Current Optimization                                                 | Next Optimization                      |
+| ----------------- | ----------- | ----------- | -------------------------------------------------------------------- | -------------------------------------- |
+| Count-Min Sketch  | ✅           | ✅           | Prehashed insert<br>Single-hash derivation<br>No allocation          | Sharded CMS<br>Cache-line–aware layout |
+| Count Sketch      | ✅           | ✅           | Prehashed insert<br>Median-of-rows estimator<br>Lazy Top-K threshold | Faster sign-bit derivation             |
+| HyperLogLog       | ✅           | ✅           | Fast-path–only insert<br>Hash-based execution<br>No key semantics    | Register layout optimization           |
+| KLL Quantile      | ✅           | ✅           | Prehashed insert<br>Merge correctness                                | Fixed buffer<br>Lazy compaction        |
+| **UnivMon**       | 🟡          | 🟡          | Layered CountSketch execution                                        | Memory tuning<br>Query fusion          |
+| **HydraSketch**   | ❌           | ❌           | —                                                                    | Design optimization                     |
+| **ElasticSketch** | ❌           | ❌           | —                                                                    | Design optimization      |
