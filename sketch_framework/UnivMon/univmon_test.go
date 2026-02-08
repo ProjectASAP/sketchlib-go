@@ -117,8 +117,8 @@ func TestUnivSketch_Merge(t *testing.T) {
 	us2.Update(common.FromString("A"), 20)
 	us2.Update(common.FromString("B"), 5)
 
-	// Merge US2 ke US1
-	us1.MergeWith(us2)
+	// Merge US2 to US1
+	us1.Merge(us2)
 
 	// Expectation in US1:
 	// A = 10 + 20 = 30

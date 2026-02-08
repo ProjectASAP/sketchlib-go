@@ -14,7 +14,6 @@ type UnivSketch struct {
 	layer       int
 	cs_layers   []*CountSketchUniv
 	HH_layers   []*common.TopKHeap
-	seed        uint32
 	bucket_size int64
 }
 
@@ -141,50 +140,123 @@ func (us *UnivSketch) univmon_processing_optimized(key string, value int64, bott
 
 // --- Merging Logic ---
 
-// MergeWith combines another UnivSketch into this one.
-func (us *UnivSketch) MergeWith(other *UnivSketch) {
-	if us.layer != other.layer {
-		// Ideally return error, but signature follows legacy void style
-		fmt.Println("Error: UnivSketch layer mismatch in MergeWith")
-		return
+// // MergeWith combines another UnivSketch into this one.
+// func (us *UnivSketch) MergeWith(other *UnivSketch) {
+// 	if us.layer != other.layer {
+// 		// Ideally return error, but signature follows legacy void style
+// 		fmt.Println("Error: UnivSketch layer mismatch in MergeWith")
+// 		return
+// 	}
+
+// 	us.bucket_size += other.bucket_size
+
+// 	for i := 0; i < us.layer; i++ {
+// 		// 1. Merge CountSketch layers (Sum counters)
+// 		// We can cast to common.Sketch or call Merge directly if accessible
+// 		err := us.cs_layers[i].Merge(other.cs_layers[i])
+// 		if err != nil {
+// 			fmt.Println("Error merging CS layer:", err)
+// 		}
+
+// 		// 2. Merge TopK Heaps
+// 		// Since common.TopKHeap doesn't have a "Sum-Merge", we implement it manually here.
+// 		// We create a new temporary heap to consolidate counts.
+// 		newHeap := common.NewTopKHeap(us.HH_layers[i].K) // Assuming K is accessible/same
+
+// 		// Add items from this sketch
+// 		for _, item := range us.HH_layers[i].Heap {
+// 			newHeap.Update(item.Key, item.Count)
+// 		}
+
+// 		// Add items from other sketch (Summing counts if key exists)
+// 		for _, item := range other.HH_layers[i].Heap {
+// 			index, found := newHeap.Find(item.Key)
+// 			if found {
+// 				// Sum existing count with new count
+// 				currentCount := newHeap.Heap[index].Count
+// 				newHeap.Update(item.Key, currentCount+item.Count)
+// 			} else {
+// 				// Insert new item
+// 				newHeap.Update(item.Key, item.Count)
+// 			}
+// 		}
+
+// 		// Replace the heap for this layer
+// 		us.HH_layers[i] = newHeap
+// 	}
+// }
+
+// TypeName returns the sketch type name.
+func (us *UnivSketch) TypeName() string {
+	return "univmon"
+}
+
+// InsertWithHash implements common.Sketch.
+// Since UnivMon usually requires a string key for TopK, this is a simplified wrapper.
+func (us *UnivSketch) InsertWithHash(hash uint64) {
+	// We create a dummy input with the hash.
+	// Note: The original key string is lost here, which affects TopK accuracy if strictly relying on this method.
+	input := &common.SketchInput{
+		Hash:  hash,
+		Bytes: []byte{}, // Key is empty
+	}
+	us.Update(input, 1)
+}
+
+// QueryWithHash provides access to cardinality/sum estimates via the interface.
+func (us *UnivSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+	switch q {
+	case common.QueryCardinality:
+		return us.GetCardinality(), nil
+	case common.QuerySum:
+		// Return the estimate from the first layer (CountSketch)
+		return us.cs_layers[0].QueryWithHash(q, hash)
+	default:
+		return 0, common.ErrUnsupportedQuery
+	}
+}
+
+// Merge combines another common.Sketch into this one.
+// Replaces the old MergeWith to satisfy the interface.
+func (us *UnivSketch) Merge(other common.Sketch) error {
+	// 1. Type Assertion: Ensure the other sketch is of the correct type
+	o, ok := other.(*UnivSketch)
+	if !ok {
+		return fmt.Errorf("cannot merge: incompatible sketch type (expected *UnivSketch)")
 	}
 
-	us.bucket_size += other.bucket_size
+	// 2. Validation: Check if layers match
+	if us.layer != o.layer {
+		return fmt.Errorf("univmon: layer mismatch (%d vs %d)", us.layer, o.layer)
+	}
 
+	// 3. Update Metadata
+	us.bucket_size += o.bucket_size
+
+	// 4. Merge Layers
 	for i := 0; i < us.layer; i++ {
-		// 1. Merge CountSketch layers (Sum counters)
-		// We can cast to common.Sketch or call Merge directly if accessible
-		err := us.cs_layers[i].Merge(other.cs_layers[i])
-		if err != nil {
-			fmt.Println("Error merging CS layer:", err)
+		// A. Merge CountSketch Layer
+		// Assuming cs_layers[i] already implements Merge(common.Sketch)
+		if err := us.cs_layers[i].Merge(o.cs_layers[i]); err != nil {
+			return fmt.Errorf("error merging CS layer %d: %v", i, err)
 		}
 
-		// 2. Merge TopK Heaps
-		// Since common.TopKHeap doesn't have a "Sum-Merge", we implement it manually here.
-		// We create a new temporary heap to consolidate counts.
-		newHeap := common.NewTopKHeap(us.HH_layers[i].K) // Assuming K is accessible/same
-
-		// Add items from this sketch
-		for _, item := range us.HH_layers[i].Heap {
-			newHeap.Update(item.Key, item.Count)
-		}
-
-		// Add items from other sketch (Summing counts if key exists)
-		for _, item := range other.HH_layers[i].Heap {
-			index, found := newHeap.Find(item.Key)
+		// B. Merge TopK Heaps Manually
+		// (Heap library might not support direct merge, so we do it element-wise)
+		for _, item := range o.HH_layers[i].Heap {
+			index, found := us.HH_layers[i].Find(item.Key)
 			if found {
-				// Sum existing count with new count
-				currentCount := newHeap.Heap[index].Count
-				newHeap.Update(item.Key, currentCount+item.Count)
+				// Key exists: Sum the counts
+				currentCount := us.HH_layers[i].Heap[index].Count
+				us.HH_layers[i].Update(item.Key, currentCount+item.Count)
 			} else {
-				// Insert new item
-				newHeap.Update(item.Key, item.Count)
+				// New key: Insert it
+				us.HH_layers[i].Update(item.Key, item.Count)
 			}
 		}
-
-		// Replace the heap for this layer
-		us.HH_layers[i] = newHeap
 	}
+
+	return nil
 }
 
 // --- Query Functions ---

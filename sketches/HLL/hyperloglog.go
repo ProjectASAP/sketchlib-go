@@ -54,6 +54,10 @@ func (h *HyperLogLog) Debug() {
 // -----------------------
 //
 
+func (h *HyperLogLog) TypeName() string {
+	return "hll"
+}
+
 // Insert is the SLOW PATH.
 // It hashes the input and delegates to the fast path.
 func (h *HyperLogLog) Insert(x float64) {
@@ -149,6 +153,13 @@ func (h *HyperLogLog) Estimate() int {
 	return int(math.Round(0.5 / math.Ln2 * m * m / z))
 }
 
+func (h *HyperLogLog) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+	if q == common.QueryCardinality {
+		return float64(h.Estimate()), nil
+	}
+	return 0, common.ErrUnsupportedQuery
+}
+
 //
 // -----------------------
 // MERGE
@@ -157,14 +168,19 @@ func (h *HyperLogLog) Estimate() int {
 
 // Merge combines another HLL into this one.
 // Both sketches must use the same precision.
-func (h *HyperLogLog) Merge(other *HyperLogLog) error {
-	if len(h.Registers) != len(other.Registers) {
-		return errors.New("hyperloglog: incompatible register lengths for merging")
+func (h *HyperLogLog) Merge(other common.Sketch) error {
+	o, ok := other.(*HyperLogLog)
+	if !ok {
+		return errors.New("cannot merge: incompatible sketch type")
+	}
+
+	if len(h.Registers) != len(o.Registers) {
+		return errors.New("hyperloglog: incompatible register lengths")
 	}
 
 	for i := 0; i < HLLRegisterCount; i++ {
-		if other.Registers[i] > h.Registers[i] {
-			h.Registers[i] = other.Registers[i]
+		if o.Registers[i] > h.Registers[i] {
+			h.Registers[i] = o.Registers[i]
 		}
 	}
 	return nil
