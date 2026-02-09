@@ -76,8 +76,10 @@ func (s *CountSketchUniv) InsertWithHash(hash uint64) {
 
 // QueryWithHash implements the common.Sketch interface
 // Returns Frequency Count estimation
+// QueryWithHash implements the common.Sketch interface
 func (s *CountSketchUniv) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
-	if q == common.QueryFrequency {
+	// [FIX] Handle both Frequency (iota 0) and Sum (iota 1) as point queries
+	if q == common.QueryFrequency || q == common.QuerySum {
 		return float64(s.EstimateHash(hash)), nil
 	}
 	if q == common.QuerySum2 {

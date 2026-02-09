@@ -121,21 +121,69 @@ func (us *UnivSketch) Update(input *common.SketchInput, value int64) {
 	}
 }
 
-// --- Legacy Wrappers for Compatibility ---
-
-// univmon_processing is a wrapper for Update.
-// Note: 'pos' and 'sign' arguments are ignored as the new framework derives indices from the hash.
-func (us *UnivSketch) univmon_processing(key string, value int64, bottom_layer_num int, pos *([]int16), sign *([]int8)) {
-	// Convert string key to common.SketchInput
-	input := common.FromString(key)
-	us.Update(input, value)
+// TypeName returns the sketch type name.
+func (us *UnivSketch) TypeName() string {
+	return "univmon"
 }
 
-// univmon_processing_optimized is a wrapper for Update.
-// The optimization logic (pyramid handling) is now built-in to Update.
-func (us *UnivSketch) univmon_processing_optimized(key string, value int64, bottom_layer_num int, pos *([]int16), sign *([]int8)) {
-	input := common.FromString(key)
-	us.Update(input, value)
+// InsertWithHash implements common.Sketch.
+func (us *UnivSketch) InsertWithHash(hash uint64) {
+	// We create a dummy input with the hash.
+	input := &common.SketchInput{
+		Hash:  hash,
+		Bytes: []byte{}, // Key is empty
+	}
+	us.Update(input, 1)
+}
+
+// QueryWithHash provides access to cardinality/sum estimates via the interface.
+func (us *UnivSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+	switch q {
+	case common.QueryCardinality:
+		return us.GetCardinality(), nil
+	case common.QuerySum:
+		// Return the estimate from the first layer (CountSketch)
+		return us.cs_layers[0].QueryWithHash(q, hash)
+	case common.QueryFrequency:
+		// [FIX] Added support for QueryFrequency
+		return us.cs_layers[0].QueryWithHash(q, hash)
+	default:
+		return 0, common.ErrUnsupportedQuery
+	}
+}
+
+// Merge combines another common.Sketch into this one.
+func (us *UnivSketch) Merge(other common.Sketch) error {
+	o, ok := other.(*UnivSketch)
+	if !ok {
+		return fmt.Errorf("cannot merge: incompatible sketch type (expected *UnivSketch)")
+	}
+
+	if us.layer != o.layer {
+		return fmt.Errorf("univmon: layer mismatch (%d vs %d)", us.layer, o.layer)
+	}
+
+	us.bucket_size += o.bucket_size
+
+	for i := 0; i < us.layer; i++ {
+		// A. Merge CountSketch Layer
+		if err := us.cs_layers[i].Merge(o.cs_layers[i]); err != nil {
+			return fmt.Errorf("error merging CS layer %d: %v", i, err)
+		}
+
+		// B. Merge TopK Heaps Manually
+		for _, item := range o.HH_layers[i].Heap {
+			index, found := us.HH_layers[i].Find(item.Key)
+			if found {
+				currentCount := us.HH_layers[i].Heap[index].Count
+				us.HH_layers[i].Update(item.Key, currentCount+item.Count)
+			} else {
+				us.HH_layers[i].Update(item.Key, item.Count)
+			}
+		}
+	}
+
+	return nil
 }
 
 // --- Merging Logic ---
@@ -186,79 +234,6 @@ func (us *UnivSketch) univmon_processing_optimized(key string, value int64, bott
 // 	}
 // }
 
-// TypeName returns the sketch type name.
-func (us *UnivSketch) TypeName() string {
-	return "univmon"
-}
-
-// InsertWithHash implements common.Sketch.
-// Since UnivMon usually requires a string key for TopK, this is a simplified wrapper.
-func (us *UnivSketch) InsertWithHash(hash uint64) {
-	// We create a dummy input with the hash.
-	// Note: The original key string is lost here, which affects TopK accuracy if strictly relying on this method.
-	input := &common.SketchInput{
-		Hash:  hash,
-		Bytes: []byte{}, // Key is empty
-	}
-	us.Update(input, 1)
-}
-
-// QueryWithHash provides access to cardinality/sum estimates via the interface.
-func (us *UnivSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
-	switch q {
-	case common.QueryCardinality:
-		return us.GetCardinality(), nil
-	case common.QuerySum:
-		// Return the estimate from the first layer (CountSketch)
-		return us.cs_layers[0].QueryWithHash(q, hash)
-	default:
-		return 0, common.ErrUnsupportedQuery
-	}
-}
-
-// Merge combines another common.Sketch into this one.
-// Replaces the old MergeWith to satisfy the interface.
-func (us *UnivSketch) Merge(other common.Sketch) error {
-	// 1. Type Assertion: Ensure the other sketch is of the correct type
-	o, ok := other.(*UnivSketch)
-	if !ok {
-		return fmt.Errorf("cannot merge: incompatible sketch type (expected *UnivSketch)")
-	}
-
-	// 2. Validation: Check if layers match
-	if us.layer != o.layer {
-		return fmt.Errorf("univmon: layer mismatch (%d vs %d)", us.layer, o.layer)
-	}
-
-	// 3. Update Metadata
-	us.bucket_size += o.bucket_size
-
-	// 4. Merge Layers
-	for i := 0; i < us.layer; i++ {
-		// A. Merge CountSketch Layer
-		// Assuming cs_layers[i] already implements Merge(common.Sketch)
-		if err := us.cs_layers[i].Merge(o.cs_layers[i]); err != nil {
-			return fmt.Errorf("error merging CS layer %d: %v", i, err)
-		}
-
-		// B. Merge TopK Heaps Manually
-		// (Heap library might not support direct merge, so we do it element-wise)
-		for _, item := range o.HH_layers[i].Heap {
-			index, found := us.HH_layers[i].Find(item.Key)
-			if found {
-				// Key exists: Sum the counts
-				currentCount := us.HH_layers[i].Heap[index].Count
-				us.HH_layers[i].Update(item.Key, currentCount+item.Count)
-			} else {
-				// New key: Insert it
-				us.HH_layers[i].Update(item.Key, item.Count)
-			}
-		}
-	}
-
-	return nil
-}
-
 // --- Query Functions ---
 
 func (us *UnivSketch) calcGSumHeuristic(g func(float64) float64, isCard bool) float64 {
@@ -266,7 +241,6 @@ func (us *UnivSketch) calcGSumHeuristic(g func(float64) float64, isCard bool) fl
 	var coe float64 = 1
 	var tmp float64 = 0
 
-	// Bottom layer processing
 	Y[us.layer-1] = 0
 	l2_val, _ := us.cs_layers[us.layer-1].QueryWithHash(common.QuerySum2, 0)
 	var threshold int64 = int64(l2_val * 0.01)
@@ -281,7 +255,6 @@ func (us *UnivSketch) calcGSumHeuristic(g func(float64) float64, isCard bool) fl
 	}
 	Y[us.layer-1] = tmp
 
-	// Recursive estimator for upper layers
 	for i := (us.layer - 2); i >= 0; i-- {
 		tmp = 0
 		l2_val, _ = us.cs_layers[i].QueryWithHash(common.QuerySum2, 0)
@@ -321,23 +294,14 @@ func (us *UnivSketch) GetCardinality() float64 {
 	return us.calcGSumHeuristic(func(x float64) float64 { return 1 }, true)
 }
 
-// QueryTopK returns the global Heavy Hitters list (Top-K items)
-// by merging candidates from all layers that satisfy the L2 threshold.
 func (us *UnivSketch) QueryTopK(K int) *common.TopKHeap {
-	// Create new heap to hold final result
 	topk := common.NewTopKHeap(K)
 
-	// Iterate from bottom layer to top
 	for i := (us.layer - 1); i >= 0; i-- {
-		// Get L2 value (variance) from that layer to determine noise threshold
 		l2_val, _ := us.cs_layers[i].QueryWithHash(common.QuerySum2, 0)
-
-		// Threshold heuristic: item is considered significant if count > 1% of L2 norm
 		var threshold int64 = int64(l2_val * 0.01)
 
-		// Iterate all items in this layer's Heap
 		for _, item := range us.HH_layers[i].Heap {
-			// Only insert into final result if count exceeds noise threshold
 			if item.Count > threshold {
 				topk.Update(item.Key, item.Count)
 			}
@@ -351,9 +315,6 @@ func (us *UnivSketch) GetMemoryKB() float64 {
 	for i := 0; i < us.layer; i++ {
 		total_topk += us.HH_layers[i].GetMemoryBytes()
 	}
-	// Estimate: CS size + Heap size
-	// Note: Accurate size depends on architecture (32/64 bit).
-	// This is a rough estimation compatible with the legacy code logic.
 	csSize := float64(CS_COL_NO_Univ_ELEPHANT) * float64(CS_ROW_NO_Univ_ELEPHANT) * float64(us.layer) * 8
 	return (csSize + total_topk) / 1024
 }
