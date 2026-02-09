@@ -79,13 +79,6 @@ Hashing rules:
 
 This directory contains the probabilistic sketch implementations.
 
-Implemented / planned sketches:
-
-* Count-Min Sketch (CMS)
-* Count Sketch (CS)
-* HyperLogLog (HLL)
-* KLL / Quantile Sketches
-
 All sketches obey the same **execution contract**:
 
 * ✅ Accept **precomputed hashes** via fast path
@@ -134,12 +127,6 @@ Some operations inherently require **original keys**, for example:
 * Debugging and reporting
 * Sampling-based analysis
 
-These operations:
-
-* Cannot rely on hashes alone
-* Are explicitly isolated
-* Delegate numeric work to fast paths
-
 ```go
 // Slow path example
 sketch.Insert(key)        // hashes internally, delegates
@@ -166,100 +153,135 @@ hl.Insert(input) // hash computed once, reused everywhere
 
 Design constraints:
 
-* ❌ HashLayer does **not** compute hashes
-* ❌ HashLayer does **not** execute queries
-* ❌ HashLayer does **not** perform semantic logic
+* ❌ Does **not** compute hashes
+* ❌ Does **not** execute queries
+* ❌ Does **not** perform semantic logic
 * ✅ Queries run **directly on sketches**
-
-```go
-freq, _ := cms.QueryWithHash(common.QueryFrequency, input.Hash)
-```
-
-This mirrors **engine-style ingestion pipelines** used in modern telemetry systems.
 
 ---
 
 ## Supported Sketches & Framework Capabilities
 
-| Sketch / Framework | Type      | Aggregation Operations / Statistical Queries Supported                                                                       | Notes                                                                                                                      |
-| ------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| **CountMinSketch** | Sketch    | • Frequency (Point Query using Min)<br>• L1 Norm (Sum of counts)<br>• L2 Norm (Euclidean Norm)<br>• Sum (Min of sum columns) | Uses a conservative update strategy (never underestimates).                                                                |
-| **CountSketch**    | Sketch    | • Frequency (Point Query using Median)<br>• L2 Norm (Euclidean Norm)<br>• Heavy Hitters / Top-K                              | Uses a median-based estimation to handle noise from collisions and tracks heavy hitters via a heap.                        |
-| **CocoSketch**     | Sketch    | • Frequency (Flexible Aggregation)<br>• Supports: Raw, Sum, Median, Max                                                      | Allows selecting the aggregation strategy dynamically at query time.                                                       |
-| **HyperLogLog**    | Sketch    | • Cardinality (Distinct Count)                                                                                               | Specialized for counting unique items using probabilistic registers.                                                       |
-| **KLLSketch**      | Sketch    | • Quantile Estimation<br>• Rank Estimation<br>• CDF (Cumulative Distribution Function)<br>• Total Count (Stream length)      | Stores a compact distribution summary to answer percentile and rank queries.                                               |
-| **UnivMon**        | Framework | • Entropy<br>• Cardinality<br>• Heavy Hitters / Top-K<br>• L2 Norm (Intermediate)                                            | “Universal Monitor” framework that layers multiple `CountSketchUniv` instances to compute complex statistics like entropy. |
-| **HashLayer**      | Framework | • Dispatcher (Vector Result)                                                                                                 | Acts as a wrapper to broadcast queries to multiple sketches and return a vector of results (e.g., `[]float64`).            |
+| Sketch / Framework       | Type      | Aggregation Operations / Statistical Queries Supported                                                                       | Notes                                                                           |
+| ------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| **CountMinSketch**       | Sketch    | • Frequency (Point Query using Min)<br>• L1 Norm (Sum of counts)<br>• L2 Norm (Euclidean Norm)<br>• Sum (Min of sum columns) | Uses a conservative update strategy (never underestimates).                     |
+| **CountSketch**          | Sketch    | • Frequency (Point Query using Median)<br>• L2 Norm (Euclidean Norm)<br>• Heavy Hitters / Top-K                              | Median-based estimation to handle collision noise; Top-K tracked via heap.      |
+| **CocoSketch**           | Sketch    | • Frequency (Flexible Aggregation)<br>• Supports: Raw, Sum, Median, Max                                                      | Aggregation strategy selectable at query time.                                  |
+| **HyperLogLog**          | Sketch    | • Cardinality (Distinct Count)                                                                                               | Specialized probabilistic sketch for unique counting.                           |
+| **KLLSketch**            | Sketch    | • Quantile Estimation<br>• Rank Estimation<br>• CDF<br>• Total Count                                                         | Compact summary for percentile and rank queries.                                |
+| **ExponentialHistogram** | Sketch    | • Bucket-based Distribution<br>• Quantile Estimation<br>• Cumulative Bucket Counts<br>• Scale Adjustment                     | OpenTelemetry-compatible exponential bucketing with adaptive precision.         |
+| **UnivMon**              | Framework | • Entropy<br>• Cardinality<br>• Heavy Hitters / Top-K<br>• L2 Norm (Intermediate)<br>• Frequency Estimation                  | Universal Monitor using layered CountSketchUniv for multi-metric queries.       |
+| **HydraSketch**          | Framework | • Adaptive Sketch Selection<br>• Multi-sketch Composition<br>• Unified Query Interface<br>• Dynamic Strategy Switching       | Adaptive framework that selects optimal sketches based on workload and data.    |
+| **HashLayer**            | Framework | • Dispatcher (Vector Result)                                                                                                 | Broadcasts inserts and queries to multiple sketches and returns vector results. |
 
 ---
 
-## Benchmarks (`/benchmark`)
-
-Benchmarks validate that:
-
-* Hashing is completely removed from hot paths
-* Pre-hashed insertion provides measurable speedups
-* No allocations occur during insert or query
-* Slow paths are clearly isolated
-* Accuracy is preserved across fast and slow paths
-
-Representative results:
-
-```
-InsertWithHash               ~23 ns/op    0 allocs/op
-Insert (slow path)           ~270 ns/op   1 alloc/op
-Speedup (fast path)          ~10×
-```
-
-Benchmarks include:
-
-* Fast path only
-* Slow path only
-* End-to-end (hash + fast path)
-* Accuracy verification outside timed sections
+Oke, sip — berarti **fokusnya hanya ke HydraSketch, Exponential Histogram (EH), dan UnivMon** untuk bagian **Sketch Characteristics**.
+Di bawah ini adalah **teks final yang bisa langsung kamu tempel** ke README, *tanpa menyentuh sketch lain* dan **konsisten dengan arsitektur `sketchlib-go`**.
 
 ---
 
-## Sketch Characteristics
+## Sketch Characteristics (Framework & Advanced Sketches)
 
-### Count-Min Sketch (CMS)
+### Exponential Histogram (EH)
 
-Used for approximate frequency estimation with one-sided error.
+**Design & Execution**
 
-* Single-hash multi-row derivation
-* Power-of-two width (bit masking)
-* No underestimation guarantee
-* Zero allocations in hot paths
+* Implements **exponential bucket boundaries** as defined in OpenTelemetry metrics
+* Buckets are organized by scale, enabling logarithmic growth in range
+* Pre-hashed fast path ensures **zero allocation** during insertion
+* Bucket index and scale are derived directly from the hash and value
+
+**Supported Queries**
+
+* Bucket-based distribution representation
+* Quantile estimation over exponential buckets
+* Cumulative bucket counts
+* Dynamic scale inspection and adjustment
+
+**Architectural Notes**
+
+* Numeric-only sketch with no key semantics
+* Designed for high-throughput telemetry ingestion
+* Can be merged efficiently across shards and time windows
+* Acts as a foundational building block for histogram-style metrics
+
+**Typical Use Cases**
+
+* Latency and duration distributions
+* Size and magnitude metrics with large value variance
+* Drop-in replacement for OpenTelemetry exponential histograms
 
 ---
 
-### Count Sketch (CS)
+### UnivMon
 
-Used for unbiased frequency estimation with signed updates.
+A **multi-layer sketch framework** for computing diverse statistical metrics from a shared structure.
 
-* Pre-hashed fast path
-* Median-of-rows estimator
-* **Top-K handled externally (key-aware slow path)**
+**Design & Execution**
+
+* Built on a **layered CountSketch architecture**
+* Each layer captures different frequency scales
+* Uses shared pre-hashed insertion across all layers
+* Numeric execution is fully decoupled from semantic queries
+
+**Supported Metrics**
+
+* Frequency estimation
+* Cardinality estimation
+* Entropy computation
+* Heavy hitters / Top-K detection
+* Intermediate L2 norm computation for derived metrics
+
+**Architectural Notes**
+
+* Avoids duplicating sketches per metric
+* Enables efficient multi-metric queries from a single ingestion stream
+* Error bounds are controlled by the number of layers and sketch width
+* Designed as a *framework*, not a standalone sketch
+
+**Typical Use Cases**
+
+* Network traffic analysis
+* Telemetry pipelines requiring entropy and heavy hitters
+* Streaming analytics with mixed statistical queries
 
 ---
 
-### HyperLogLog (HLL)
+### HydraSketch
 
-Used for approximate cardinality estimation.
+An **adaptive multi-sketch composition framework** designed for heterogeneous and evolving query workloads.
 
-* **Fast-path–only sketch**
-* Fully hash-based (no key semantics)
-* Slow path exists only as a wrapper for compatibility
+**Design Philosophy**
 
----
+* No single sketch is optimal for all data distributions or queries
+* Sketch selection should adapt dynamically to workload characteristics
 
-### KLL Quantile Sketch
+**Design & Execution**
 
-Used for approximate quantile estimation.
+* Composes multiple sketches under a unified interface
+* Uses pre-hashed insertion to fan-out data efficiently
+* Supports **runtime strategy switching** at query time
+* Separates cost modeling, execution, and query semantics
 
-* Mergeable summaries
-* Probabilistic rank guarantees
-* Sublinear memory usage
+**Core Capabilities**
+
+* Adaptive sketch selection based on data and query patterns
+* Unified query interface across heterogeneous sketches
+* Dynamic strategy switching without reinsertion
+* Cost–benefit optimization for performance vs accuracy trade-offs
+
+**Architectural Notes**
+
+* Generalizes concepts from UnivMon and ElasticSketch
+* Treats sketches as interchangeable execution units
+* Designed as a research-oriented framework for adaptive sketching
+
+**Typical Use Cases**
+
+* Mixed workloads (frequency + cardinality + quantiles)
+* Systems with evolving query distributions
+* Experimentation with adaptive sketch strategies
 
 ---
 
@@ -271,12 +293,14 @@ Used for approximate quantile estimation.
 * 🟡 In Progress / Partial
 * ❌ To Do
 
-| Sketch            | Correctness | Performance | Current Optimization                                                 | Next Optimization                      |
-| ----------------- | ----------- | ----------- | -------------------------------------------------------------------- | -------------------------------------- |
-| Count-Min Sketch  | ✅           | ✅           | Prehashed insert<br>Single-hash derivation<br>No allocation          | Sharded CMS<br>Cache-line–aware layout |
-| Count Sketch      | ✅           | ✅           | Prehashed insert<br>Median-of-rows estimator<br>Lazy Top-K threshold | Faster sign-bit derivation             |
-| HyperLogLog       | ✅           | ✅           | Fast-path–only insert<br>Hash-based execution<br>No key semantics    | Register layout optimization           |
-| KLL Quantile      | ✅           | ✅           | Prehashed insert<br>Merge correctness                                | Fixed buffer<br>Lazy compaction        |
-| **UnivMon**       | 🟡          | 🟡          | Layered CountSketch execution                                        | Memory tuning<br>Query fusion          |
-| **HydraSketch**   | ❌           | ❌           | —                                                                    | Design optimization                     |
-| **ElasticSketch** | ❌           | ❌           | —                                                                    | Design optimization      |
+| Sketch                | Correctness | Performance | Current Optimization                                                 | Next Optimization                      |
+| --------------------- | ----------- | ----------- | -------------------------------------------------------------------- | -------------------------------------- |
+| Count-Min Sketch      | ✅           | ✅           | Prehashed insert<br>Single-hash derivation<br>No allocation          | Sharded CMS<br>Cache-line–aware layout |
+| Count Sketch          | ✅           | ✅           | Prehashed insert<br>Median-of-rows estimator<br>Lazy Top-K threshold | Faster sign-bit derivation             |
+| HyperLogLog           | ✅           | ✅           | Fast-path–only insert<br>Hash-based execution                        | Register layout optimization           |
+| KLL Quantile          | ✅           | ✅           | Prehashed insert<br>Merge correctness                                | Fixed buffer<br>Lazy compaction        |
+| Exponential Histogram | ✅           | ✅           | Exponential bucketing<br>Scale adjustment<br>No allocation           | Bucket compression<br>Adaptive scaling |
+| UnivMon               | ✅           | 🟡          | Layered CountSketch<br>Multi-metric support                          | Memory tuning<br>Query fusion          |
+| HydraSketch           | 🟡          | 🟡          | Framework design<br>Sketch composition                               | Strategy optimization<br>Cost modeling |
+| ElasticSketch         | ❌           | ❌           | —                                                                    | Design optimization                    |
+
