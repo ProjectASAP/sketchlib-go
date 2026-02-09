@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/approx-telemetry/sketchlib-go/common"
 	"github.com/golang/glog"
 )
 
@@ -18,15 +19,13 @@ func TestMain(m *testing.M) {
 
 func TestHydraUpdateEstimateSingleKey(t *testing.T) {
 	cfg := HydraConfig{
-		D: 3,
-		W: 8,
-		UM: UnivMonConfig{
-			Layers: 2,
-			Rows:   3,
-			Cols:   128,
-			TopK:   2,
-		},
-		UseBigUM: true,
+		D:            3,
+		W:            8,
+		UnivMonLayer: 2,
+		UnivMonRow:   3,
+		UnivMonCol:   128,
+		UnivMonTopK:  2,
+		UseBigUM:     true,
 	}
 
 	h, err := NewHydra(cfg)
@@ -35,7 +34,7 @@ func TestHydraUpdateEstimateSingleKey(t *testing.T) {
 	}
 
 	const key = "alpha"
-	const count = 7
+	const count int64 = 7
 	h.UpdateN(key, count)
 	glog.Infof("TestHydraUpdateEstimateSingleKey: updated key=%s count=%d", key, count)
 
@@ -48,8 +47,17 @@ func TestHydraUpdateEstimateSingleKey(t *testing.T) {
 	if h.Big == nil {
 		t.Fatalf("expected Big UnivMon to be initialized")
 	}
-	global := h.Big.Estimate(key)
+
+	// FIX: Use FromString(key).Hash to match the hash used during Update
+	hash := common.FromString(key).Hash
+	globalFloat, err := h.Big.QueryWithHash(common.QuerySum, hash)
+	if err != nil {
+		t.Fatalf("error querying global sketch: %v", err)
+	}
+
+	global := int64(globalFloat)
 	glog.Infof("TestHydraUpdateEstimateSingleKey: global estimate=%d", global)
+
 	if global != count {
 		t.Fatalf("expected global estimate %d, got %d", count, global)
 	}
@@ -57,14 +65,12 @@ func TestHydraUpdateEstimateSingleKey(t *testing.T) {
 
 func TestHydraParallelUpdate(t *testing.T) {
 	cfg := HydraConfig{
-		D: 4,
-		W: 16,
-		UM: UnivMonConfig{
-			Layers: 3,
-			Rows:   3,
-			Cols:   256,
-			TopK:   4,
-		},
+		D:            4,
+		W:            16,
+		UnivMonLayer: 3,
+		UnivMonRow:   3,
+		UnivMonCol:   256,
+		UnivMonTopK:  4,
 	}
 
 	h, err := NewHydra(cfg)
@@ -83,7 +89,7 @@ func TestHydraParallelUpdate(t *testing.T) {
 
 	ParallelUpdate(h, jobs, 3)
 
-	expected := map[string]int{
+	expected := map[string]int64{
 		"alpha": 5,
 		"beta":  6,
 		"gamma": 4,
@@ -100,13 +106,11 @@ func TestHydraParallelUpdate(t *testing.T) {
 
 func TestHydraHashCMBounds(t *testing.T) {
 	cfg := HydraConfig{
-		D: 5,
-		W: 32,
-		UM: UnivMonConfig{
-			Layers: 1,
-			Rows:   1,
-			Cols:   32,
-		},
+		D:            5,
+		W:            32,
+		UnivMonLayer: 1,
+		UnivMonRow:   1,
+		UnivMonCol:   32,
 	}
 
 	h, err := NewHydra(cfg)
