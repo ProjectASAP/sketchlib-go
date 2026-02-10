@@ -235,8 +235,6 @@ func NewExpoHistogramUniv(ehK int, windowSize int64, k, row, col, layer int) *Ex
 func (eh *ExpoHistogramUniv) UpdateItem(key string, timestamp int64) error {
 	s, _ := univmon.NewUnivSketchPyramid(eh.univK, eh.univRow, eh.univCol, eh.univLayer)
 
-	// FIX: Gunakan common.FromString() + s.Update()
-	// karena univmon.go Anda saat ini tidak memiliki method UpdateString.
 	s.Update(common.FromString(key), 1)
 
 	return eh.Update(s, timestamp)
@@ -257,10 +255,9 @@ func NewExpoHistogramCountSketch(ehK int, windowSize int64, rows, cols int) *Exp
 	return eh
 }
 
-// CountSketch menggunakan UpdateString (untuk TopK support)
 func (eh *ExpoHistogramCountSketch) UpdateItem(key string, timestamp int64) error {
 	s, _ := countsketch.NewCountSketch(eh.rows, eh.cols)
-	s.UpdateString(key, 1) // Ini memanggil InsertWithHash + Update TopK
+	s.UpdateString(key, 1) 
 	return eh.Update(s, timestamp)
 }
 
@@ -281,7 +278,6 @@ func NewExpoHistogramHLL(ehK int, windowSize int64) *ExpoHistogramHLL {
 
 func (eh *ExpoHistogramHLL) UpdateItem(key string, timestamp int64) error {
 	s := hll.NewHyperLogLog()
-	// HLL Update logic sesuai file hll.go Anda
 	s.InsertWithHash(common.FromString(key).Hash)
 	return eh.Update(s, timestamp)
 }
