@@ -176,11 +176,6 @@ Design constraints:
 
 ---
 
-Oke, sip — berarti **fokusnya hanya ke HydraSketch, Exponential Histogram (EH), dan UnivMon** untuk bagian **Sketch Characteristics**.
-Di bawah ini adalah **teks final yang bisa langsung kamu tempel** ke README, *tanpa menyentuh sketch lain* dan **konsisten dengan arsitektur `sketchlib-go`**.
-
----
-
 ## Sketch Characteristics (Framework & Advanced Sketches)
 
 ### Exponential Histogram (EH)
