@@ -300,7 +300,7 @@ An **adaptive multi-sketch composition framework** designed for heterogeneous an
 | HyperLogLog           | ✅           | ✅           | Fast-path–only insert<br>Hash-based execution                        | Register layout optimization           |
 | KLL Quantile          | ✅           | ✅           | Prehashed insert<br>Merge correctness                                | Fixed buffer<br>Lazy compaction        |
 | Exponential Histogram | ✅           | ✅           | Exponential bucketing<br>Scale adjustment<br>No allocation           | Bucket compression<br>Adaptive scaling |
-| UnivMon               | ✅           | 🟡          | Layered CountSketch<br>Multi-metric support                          | Memory tuning<br>Query fusion          |
-| HydraSketch           | 🟡          | 🟡          | Framework design<br>Sketch composition                               | Strategy optimization<br>Cost modeling |
+| UnivMon               | ✅           | ✅          | Layered CountSketch<br>Multi-metric support                          | Memory tuning<br>Query fusion          |
+| HydraSketch           | ✅          | ✅          | Framework design<br>Sketch composition                               | Strategy optimization<br>Cost modeling |
 | ElasticSketch         | ❌           | ❌           | —                                                                    | Design optimization                    |
 
