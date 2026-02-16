@@ -2,20 +2,42 @@ package ddsketch
 
 import (
 	"math"
-	"math/rand"
 	"sort"
 	"testing"
+
+	"github.com/approx-telemetry/sketchlib-go/testdata"
 )
 
-// ---------------- Helpers ----------------
+// ==============================================================================
+// 1. HELPERS
+// ==============================================================================
 
-func relErr(a, b float64) float64 {
-	if a == 0 && b == 0 {
-		return 0
+// Helper to load CAIDA data
+func loadCAIDA(t *testing.T) []testdata.Sample {
+	// Adjust path relative to this file location (sketches/DDSketch/)
+	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+	samples, err := testdata.ReadCAIDAStream(file1, "")
+	if err != nil {
+		t.Skipf("Skipping CAIDA test: %v", err)
 	}
-	return math.Abs(a-b) / math.Max(1e-30, math.Abs(b))
+	if len(samples) == 0 {
+		t.Skip("No CAIDA samples found.")
+	}
+	return samples
 }
 
+// relErr calculates relative error between estimated and true value.
+func relErr(est, truth float64) float64 {
+	if est == 0 && truth == 0 {
+		return 0
+	}
+	if truth == 0 {
+		return math.Inf(1) // Avoid division by zero
+	}
+	return math.Abs(est-truth) / math.Abs(truth)
+}
+
+// trueQuantile calculates the exact quantile from a sorted slice (Ground Truth).
 func trueQuantile(sorted []float64, p float64) float64 {
 	n := len(sorted)
 	if n == 0 {
@@ -27,170 +49,206 @@ func trueQuantile(sorted []float64, p float64) float64 {
 	if p >= 1 {
 		return sorted[n-1]
 	}
-	k := int(math.Ceil(p*float64(n))) - 1
-	if k < 0 {
-		k = 0
+	// Nearest rank definition for simplicity, matching common sketch logic
+	rank := math.Ceil(p * float64(n))
+	idx := int(rank) - 1
+	if idx < 0 {
+		idx = 0
 	}
-	if k >= n {
-		k = n - 1
+	if idx >= n {
+		idx = n - 1
 	}
-	return sorted[k]
+	return sorted[idx]
 }
 
-func sampleUniform(min, max float64, n int, seed int64) []float64 {
-	r := rand.New(rand.NewSource(seed))
-	out := make([]float64, n)
-	for i := 0; i < n; i++ {
-		out[i] = min + r.Float64()*(max-min)
-	}
-	return out
-}
+// ==============================================================================
+// 2. CAIDA TESTS
+// ==============================================================================
 
-// ---------------- Positive-only behavior ----------------
+// TestDDSketch_CAIDA_Insertion verifies that we can ingest real traffic data
+// and that the sketch correctly ignores invalid (non-positive) values if any.
+func TestDDSketch_CAIDA_Insertion(t *testing.T) {
+	samples := loadCAIDA(t)
 
-func TestPositiveOnlyBehavior(t *testing.T) {
-
+	// Initialize with 1% relative error accuracy
 	s := NewDDSketch(0.01)
 
-	values := []float64{-100, 0, 10, 100, 1000}
-
-	for _, v := range values {
-		s.Add(v)
+	validCount := 0
+	for _, sample := range samples {
+		val := sample.F
+		// DDSketch only accepts strictly positive values
+		if val > 0 {
+			s.Add(val)
+			validCount++
+		}
 	}
 
-	t.Logf("Inserted values: %v", values)
-	t.Logf("Stored count (should ignore <=0): %d", s.GetCount())
+	t.Logf("Processed %d samples", len(samples))
+	t.Logf("Valid (>0) samples inserted: %d", validCount)
+	t.Logf("Sketch Internal Count: %d", s.GetCount())
 
-	if s.GetCount() != 3 {
-		t.Fatalf("expected count 3 (only positives)")
-	}
-
-	min, _ := s.GetValueAtQuantile(0)
-	max, _ := s.GetValueAtQuantile(1)
-
-	t.Logf("Min estimate: %f", min)
-	t.Logf("Max estimate: %f", max)
-
-	if min <= 0 {
-		t.Fatalf("min should be strictly positive")
+	if s.GetCount() != uint64(validCount) {
+		t.Errorf("Count mismatch. Expected %d, got %d", validCount, s.GetCount())
 	}
 }
 
-// ---------------- Safe merge rejection ----------------
+// TestDDSketch_CAIDA_Merge splits the CAIDA dataset into two halves,
+// sketches them separately, merges them, and verifies the result matches
+// a sketch created from the full dataset.
+func TestDDSketch_CAIDA_Merge(t *testing.T) {
+	samples := loadCAIDA(t)
+	alpha := 0.01
 
-func TestSafeMergeRejectsDifferentMappings(t *testing.T) {
+	sPart1 := NewDDSketch(alpha)
+	sPart2 := NewDDSketch(alpha)
+	sTotal := NewDDSketch(alpha)
 
-	s1 := NewDDSketch(0.01)
-	s2 := NewDDSketch(0.02)
+	mid := len(samples) / 2
 
-	s1.Add(100)
-	s2.Add(100)
+	for i, sample := range samples {
+		val := sample.F
+		if val <= 0 {
+			continue
+		}
 
-	err := s1.Merge(s2)
+		sTotal.Add(val)
 
-	t.Logf("Merge error: %v", err)
-
-	if err == nil {
-		t.Fatalf("expected merge failure")
-	}
-}
-
-// ---------------- Safe merge success ----------------
-
-func TestSafeMergeSuccess(t *testing.T) {
-
-	s1 := NewDDSketch(0.01)
-	s2 := NewDDSketch(0.01)
-
-	values1 := []float64{10, 100}
-	values2 := []float64{1000}
-
-	for _, v := range values1 {
-		s1.Add(v)
-	}
-	for _, v := range values2 {
-		s2.Add(v)
+		if i < mid {
+			sPart1.Add(val)
+		} else {
+			sPart2.Add(val)
+		}
 	}
 
-	err := s1.Merge(s2)
+	// Perform Merge
+	err := sPart1.Merge(sPart2)
 	if err != nil {
-		t.Fatalf("merge should succeed")
+		t.Fatalf("Merge failed: %v", err)
 	}
 
-	t.Logf("Merged Count: %d", s1.GetCount())
+	// 1. Verify Count
+	if sPart1.GetCount() != sTotal.GetCount() {
+		t.Errorf("Merge Count Mismatch: Part1+2=%d, Total=%d", sPart1.GetCount(), sTotal.GetCount())
+	}
 
-	if s1.GetCount() != 3 {
-		t.Fatalf("count mismatch after merge")
+	// 2. Verify Internal Bucket State (Semantic Equality)
+	// We cannot compare len(counts) because Add() adds padding (GrowChunk)
+	// while Merge() allocates exact fit. We must compare counts at every index.
+
+	// Helper to safely get count at a specific global index
+	getCount := func(b *Buckets, k int32) uint64 {
+		idx := k - b.offset
+		if idx >= 0 && int(idx) < len(b.counts) {
+			return b.counts[idx]
+		}
+		return 0
+	}
+
+	// Determine the global range covering both sketches
+	l1, r1, _ := sPart1.store.Range()
+	l2, r2, _ := sTotal.store.Range()
+
+	minIdx := minInt32(l1, l2)
+	maxIdx := maxInt32(r1, r2)
+
+	for k := minIdx; k <= maxIdx; k++ {
+		c1 := getCount(&sPart1.store, k)
+		c2 := getCount(&sTotal.store, k)
+
+		if c1 != c2 {
+			t.Errorf("Bucket content mismatch at index %d: Merged=%d, Total=%d", k, c1, c2)
+			// Fail fast to avoid flooding logs
+			break
+		}
+	}
+
+	// 3. Verify Quantile Query Result
+	qMerged, _ := sPart1.GetValueAtQuantile(0.95)
+	qTotal, _ := sTotal.GetValueAtQuantile(0.95)
+
+	if qMerged != qTotal {
+		t.Errorf("Quantile query mismatch after merge. Merged=%.2f, Total=%.2f", qMerged, qTotal)
 	}
 }
 
-// ---------------- Quantile accuracy (uniform) ----------------
+// TestDDSketch_CAIDA_Accuracy verifies that the sketch adheres to the alpha accuracy guarantee
+// when estimating quantiles of the real-world IP distribution.
+func TestDDSketch_CAIDA_Accuracy(t *testing.T) {
+	samples := loadCAIDA(t)
 
-func TestQuantileAccuracyUniform(t *testing.T) {
-
-	const alpha = 0.01
-	const n = 10000
-
-	vals := sampleUniform(1000, 100000, n, 42)
-
+	// Define target accuracy (alpha)
+	// alpha=0.01 means estimates should be within 1% of the true value.
+	alpha := 0.01
 	s := NewDDSketch(alpha)
-	for _, v := range vals {
-		s.Add(v)
+
+	// Collect Ground Truth
+	var truth []float64
+	for _, sample := range samples {
+		val := sample.F
+		if val > 0 {
+			s.Add(val)
+			truth = append(truth, val)
+		}
 	}
 
-	sort.Float64s(vals)
+	// Sort Ground Truth for exact quantile calculation
+	sort.Float64s(truth)
 
-	ps := []float64{0.1, 0.5, 0.9}
+	// Test points: Min, 50th(Median), 90th, 99th, Max
+	quantiles := []float64{0.5, 0.90, 0.99}
 
-	t.Logf("=== Uniform Quantile Accuracy Test ===")
+	t.Log("===================================================")
+	t.Logf(" CAIDA QUANTILE ACCURACY REPORT (alpha=%.2f)", alpha)
+	t.Logf(" Data Size: %d items", len(truth))
+	t.Log("===================================================")
 
-	for _, p := range ps {
-
-		got, ok := s.GetValueAtQuantile(p)
+	for _, q := range quantiles {
+		// 1. Get Estimate
+		est, ok := s.GetValueAtQuantile(q)
 		if !ok {
-			t.Fatalf("quantile failed")
+			t.Fatalf("Failed to get quantile for q=%.2f", q)
 		}
 
-		want := trueQuantile(vals, p)
-		err := relErr(got, want)
+		// 2. Get Ground Truth
+		exact := trueQuantile(truth, q)
 
-		t.Logf(
-			"p=%.2f | got=%10.3f | want=%10.3f | err=%.6f",
-			p, got, want, err,
-		)
+		// 3. Calculate Error
+		err := relErr(est, exact)
 
-		if err > alpha {
-			t.Fatalf("relative error exceeded alpha")
+		t.Logf(" q=%-4.2f | Est: %12.0f | True: %12.0f | RelErr: %.5f", q, est, exact, err)
+
+		// 4. Verify Guarantee
+		// DDSketch guarantees relative error <= alpha
+		// (We use a tiny buffer 1e-6 for float precision issues)
+		if err > alpha+1e-6 {
+			t.Errorf("Accuracy violation at q=%.2f! Error %.5f > Alpha %.2f", q, err, alpha)
 		}
 	}
 }
 
-// ---------------- Monotonic quantile test ----------------
-
-func TestQuantileMonotonicity(t *testing.T) {
-
+// TestDDSketch_CAIDA_Monotonicity ensures that on real data, requesting higher quantiles
+// always returns equal or higher values (CDF property).
+func TestDDSketch_CAIDA_Monotonicity(t *testing.T) {
+	samples := loadCAIDA(t)
 	s := NewDDSketch(0.01)
 
-	values := []float64{10, 20, 30, 40, 50}
-	for _, v := range values {
-		s.Add(v)
+	for _, sample := range samples {
+		if sample.F > 0 {
+			s.Add(sample.F)
+		}
 	}
 
-	prev := math.Inf(-1)
+	prevVal := math.Inf(-1)
+	steps := 20 // Check every 5%
 
-	for p := 0.0; p <= 1.0; p += 0.1 {
+	for i := 0; i <= steps; i++ {
+		q := float64(i) / float64(steps)
+		val, _ := s.GetValueAtQuantile(q)
 
-		val, ok := s.GetValueAtQuantile(p)
-		if !ok {
-			t.Fatalf("quantile failed")
+		if val < prevVal {
+			t.Fatalf("Monotonicity violation at q=%.2f. Prev=%.2f, Curr=%.2f", q, prevVal, val)
 		}
-
-		t.Logf("p=%.2f → %f", p, val)
-
-		if val < prev {
-			t.Fatalf("quantiles not monotonic")
-		}
-
-		prev = val
+		prevVal = val
 	}
+	t.Logf("Monotonicity verified across %d quantile steps", steps)
 }

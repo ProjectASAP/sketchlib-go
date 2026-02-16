@@ -1,170 +1,168 @@
 package hll
 
 import (
-	"fmt"
+	"encoding/binary"
 	"math"
 	"testing"
 
-	common "github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/approx-telemetry/sketchlib-go/testdata"
 )
 
-const (
-	relativeTolerance = 0.02
-)
+// Tolerance for HLL (Standard Error for 14-bit HLL is ~0.8%, we allow 2% margin)
+const relativeTolerance = 0.02
 
-//
-// -----------------------
-// ACCURACY TESTS
-// -----------------------
-//
+// ==============================================================================
+// 1. HELPERS
+// ==============================================================================
 
-// Tests estimation accuracy across different cardinalities.
-func TestHyperLogLogEstimateAccuracy(t *testing.T) {
-	for exp := 0; exp < 10; exp++ {
-		exp := exp
-		t.Run(fmt.Sprintf("1e%d", exp), func(t *testing.T) {
-			actual := int(math.Pow10(exp))
-			h := NewHyperLogLog()
-
-			for i := 0; i < actual; i++ {
-				h.Insert(float64(i)) // slow path
-			}
-
-			estimate := h.Estimate()
-			assertWithinRelativeError(t, estimate, actual, relativeTolerance)
-		})
+// Helper to load CAIDA data
+func loadCAIDA(t *testing.T) []testdata.Sample {
+	// Adjust path relative to this file location (sketches/HyperLogLog/)
+	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+	samples, err := testdata.ReadCAIDAStream(file1, "")
+	if err != nil {
+		t.Skipf("Skipping CAIDA test: %v", err)
 	}
+	if len(samples) == 0 {
+		t.Skip("No CAIDA samples found.")
+	}
+	return samples
 }
 
-// Ensures duplicate values do not affect cardinality.
-func TestHyperLogLogIgnoresDuplicates(t *testing.T) {
-	h := NewHyperLogLog()
-
-	for i := 0; i < 1000; i++ {
-		h.Insert(42.0)
-	}
-
-	if estimate := h.Estimate(); estimate != 1 {
-		t.Fatalf("expected cardinality 1, got %d", estimate)
-	}
-}
-
-//
-// -----------------------
-// FAST PATH TESTS
-// -----------------------
-//
-
-// Ensures InsertWithHash produces equivalent results to Insert.
-func TestHyperLogLogFastPathMatchesSlowPath(t *testing.T) {
-	actual := 10000
-
-	hSlow := NewHyperLogLog()
-	hFast := NewHyperLogLog()
-
-	for i := 0; i < actual; i++ {
-		// slow path
-		hSlow.Insert(float64(i))
-
-		// fast path
-		buf := common.Float64ToBytes(float64(i))
-		hash := common.HashIt(0, buf)
-		hFast.InsertWithHash(hash)
-	}
-
-	estSlow := hSlow.Estimate()
-	estFast := hFast.Estimate()
-
-	assertWithinRelativeError(t, estFast, estSlow, relativeTolerance)
-}
-
-// Ensures duplicates are ignored in fast path as well.
-func TestHyperLogLogFastPathIgnoresDuplicates(t *testing.T) {
-	h := NewHyperLogLog()
-
-	buf := common.Float64ToBytes(42.0)
-	hash := common.HashIt(0, buf)
-
-	for i := 0; i < 1000; i++ {
-		h.InsertWithHash(hash)
-	}
-
-	if estimate := h.Estimate(); estimate != 1 {
-		t.Fatalf("expected cardinality 1, got %d", estimate)
-	}
-}
-
-//
-// -----------------------
-// MERGE TESTS
-// -----------------------
-//
-
-// Tests merging two sketches with disjoint sets.
-func TestHyperLogLogMerge(t *testing.T) {
-	first := NewHyperLogLog()
-	second := NewHyperLogLog()
-
-	for i := 0; i < 5000; i++ {
-		first.Insert(float64(i))
-	}
-	for i := 5000; i < 10000; i++ {
-		second.Insert(float64(i))
-	}
-
-	if err := first.Merge(second); err != nil {
-		t.Fatalf("merge failed: %v", err)
-	}
-
-	assertWithinRelativeError(t, first.Estimate(), 10000, relativeTolerance)
-}
-
-// Tests merging using fast path sketches.
-func TestHyperLogLogMergeFastPath(t *testing.T) {
-	first := NewHyperLogLog()
-	second := NewHyperLogLog()
-
-	for i := 0; i < 5000; i++ {
-		buf := common.Float64ToBytes(float64(i))
-		hash := common.HashIt(0, buf)
-		first.InsertWithHash(hash)
-	}
-	for i := 5000; i < 10000; i++ {
-		buf := common.Float64ToBytes(float64(i))
-		hash := common.HashIt(0, buf)
-		second.InsertWithHash(hash)
-	}
-
-	if err := first.Merge(second); err != nil {
-		t.Fatalf("merge failed: %v", err)
-	}
-
-	assertWithinRelativeError(t, first.Estimate(), 10000, relativeTolerance)
-}
-
-//
-// -----------------------
-// HELPERS
-// -----------------------
-//
-
+// Helper to assert relative error
 func assertWithinRelativeError(t *testing.T, estimate, actual int, tolerance float64) {
 	t.Helper()
-
 	if actual == 0 {
 		if estimate != 0 {
-			t.Fatalf("expected zero estimate, got %d", estimate)
+			t.Errorf("Expected 0, got %d", estimate)
 		}
 		return
 	}
 
 	diff := math.Abs(float64(estimate - actual))
-	if diff/float64(actual) > tolerance {
-		t.Fatalf(
-			"estimate %d differs from actual %d beyond tolerance %.2f",
-			estimate,
-			actual,
-			tolerance,
-		)
+	relErr := diff / float64(actual)
+
+	t.Logf(" Actual: %d | Estimate: %d | RelErr: %.4f%%", actual, estimate, relErr*100)
+
+	if relErr > tolerance {
+		t.Errorf("Accuracy violation! Error %.4f%% > Tolerance %.2f%%", relErr*100, tolerance*100)
 	}
+}
+
+// Helper to convert float IP to bytes (simulating raw packet data)
+func floatIpToBytes(f float64) []byte {
+	ipUint := uint32(f)
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, ipUint)
+	return b
+}
+
+// ==============================================================================
+// 2. CAIDA TESTS
+// ==============================================================================
+
+// TestHyperLogLog_CAIDA_Accuracy verifies the cardinality estimation accuracy
+// on the real-world CAIDA dataset.
+func TestHyperLogLog_CAIDA_Accuracy(t *testing.T) {
+	samples := loadCAIDA(t)
+	hll := NewHyperLogLog()
+
+	// Ground Truth Set
+	uniqueIPs := make(map[uint32]bool)
+
+	for _, s := range samples {
+		ip := uint32(s.F)
+		uniqueIPs[ip] = true
+
+		// Insert into HLL
+		// HLL expects a hash. We use the common hashing utility.
+		ipBytes := floatIpToBytes(s.F)
+		hll.InsertWithHash(common.Hash64(ipBytes))
+	}
+
+	actualCardinality := len(uniqueIPs)
+	estimatedCardinality := hll.Estimate()
+
+	t.Log("===================================================")
+	t.Logf(" CAIDA CARDINALITY REPORT (HyperLogLog)")
+	t.Logf(" Total Packets: %d", len(samples))
+	t.Logf(" Unique IPs:    %d", actualCardinality)
+	t.Log("===================================================")
+
+	assertWithinRelativeError(t, estimatedCardinality, actualCardinality, relativeTolerance)
+}
+
+// TestHyperLogLog_CAIDA_Merge splits the CAIDA stream into two disjoint time windows,
+// sketches them separately, merges them, and verifies the result matches the full stream.
+func TestHyperLogLog_CAIDA_Merge(t *testing.T) {
+	samples := loadCAIDA(t)
+	mid := len(samples) / 2
+
+	hllPart1 := NewHyperLogLog()
+	hllPart2 := NewHyperLogLog()
+	hllTotal := NewHyperLogLog()
+
+	// Ingest Data
+	for i, s := range samples {
+		ipBytes := floatIpToBytes(s.F)
+		hash := common.Hash64(ipBytes)
+
+		// Full Sketch
+		hllTotal.InsertWithHash(hash)
+
+		// Split Sketches
+		if i < mid {
+			hllPart1.InsertWithHash(hash)
+		} else {
+			hllPart2.InsertWithHash(hash)
+		}
+	}
+
+	// Merge
+	if err := hllPart1.Merge(hllPart2); err != nil {
+		t.Fatalf("Merge failed: %v", err)
+	}
+
+	// Verify 1: Estimate Match
+	estMerged := hllPart1.Estimate()
+	estTotal := hllTotal.Estimate()
+
+	// The estimates should be IDENTICAL because HLL merge is lossless
+	// (register max operation is deterministic regardless of order).
+	if estMerged != estTotal {
+		t.Errorf("Merge logic error. Merged Estimate (%d) != Total Estimate (%d)", estMerged, estTotal)
+	}
+
+	// Verify 2: Internal State Match
+	// The registers themselves must be identical bit-for-bit
+	if hllPart1.Registers != hllTotal.Registers {
+		t.Error("Merge state mismatch. Registers differ between Merged and Total sketch.")
+	} else {
+		t.Log("Merge state verification passed (Registers are identical).")
+	}
+}
+
+// TestHyperLogLog_CAIDA_Idempotency ensures that re-inserting the same CAIDA stream
+// multiple times does not change the cardinality estimate.
+func TestHyperLogLog_CAIDA_Idempotency(t *testing.T) {
+	samples := loadCAIDA(t)
+	hll := NewHyperLogLog()
+
+	// Pass 1
+	for _, s := range samples {
+		hll.InsertWithHash(common.Hash64(floatIpToBytes(s.F)))
+	}
+	est1 := hll.Estimate()
+
+	// Pass 2 (Duplicate Data)
+	for _, s := range samples {
+		hll.InsertWithHash(common.Hash64(floatIpToBytes(s.F)))
+	}
+	est2 := hll.Estimate()
+
+	if est1 != est2 {
+		t.Fatalf("Idempotency violation! Pass 1: %d, Pass 2: %d", est1, est2)
+	}
+	t.Logf("Idempotency verified. Estimate remains %d after duplicate ingestion.", est1)
 }

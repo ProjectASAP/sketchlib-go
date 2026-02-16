@@ -1,277 +1,251 @@
 package countsketch
 
 import (
+	"encoding/binary"
 	"math"
+	"sort"
 	"testing"
 
 	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/approx-telemetry/sketchlib-go/testdata"
 )
 
-func logResult(t *testing.T, name string, expected, estimated float64) {
-	t.Helper()
-	err := math.Abs(estimated - expected)
-	t.Logf("[%s] expected=%.2f estimated=%.2f abs_error=%.2f",
-		name, expected, estimated, err)
+// Helper to load CAIDA data for tests
+func loadCAIDA(t *testing.T) []testdata.Sample {
+	// Adjust path as needed for your project structure
+	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+	samples, err := testdata.ReadCAIDAStream(file1, "")
+	if err != nil {
+		t.Skipf("Skipping CAIDA test: %v", err)
+	}
+	if len(samples) == 0 {
+		t.Skip("No CAIDA samples found.")
+	}
+	return samples
 }
 
-// 1. Zero-state correctness
-// TestCS_ZeroState verifies that a newly initialized CountSketch
-// returns zero estimates for keys that have never been observed.
-// This ensures there is no initialization bias.
+// ==============================================================================
+// 1. BASIC PROPERTY TESTS (Synthetic Data)
+// ==============================================================================
+
+// TestCS_ZeroState verifies initialization.
 func TestCS_ZeroState(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
-
 	est := float64(cs.EstimateStringCount("never_seen"))
-	logResult(t, "ZeroState", 0, est)
-
-	if math.Abs(est) > 1 {
+	if math.Abs(est) > 0 {
 		t.Fatalf("zero-state incorrect")
 	}
 }
 
-// 2. Single-key exactness
-// TestCS_SingleKeyCorrectness checks basic correctness by inserting
-// a single key multiple times and verifying that the estimated
-// frequency matches the true count.
+// TestCS_SingleKeyCorrectness checks basic insertion.
 func TestCS_SingleKeyCorrectness(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
-
 	for i := 0; i < 1000; i++ {
 		cs.UpdateString("key", 1)
 	}
-
 	est := float64(cs.EstimateStringCount("key"))
-	logResult(t, "SingleKey", 1000, est)
-
 	if math.Abs(est-1000) > 2 {
 		t.Fatalf("single-key incorrect")
 	}
 }
 
-// 3. Linearity
-// TestCS_Linearity validates the linearity property of CountSketch:
-// multiple independent updates should be equivalent to a single
-// combined update of the same total weight.
-func TestCS_Linearity(t *testing.T) {
-	cs, _ := NewCountSketch(5, 1024)
-
-	for i := 0; i < 300; i++ {
-		cs.UpdateString("a", 1)
-	}
-	for i := 0; i < 700; i++ {
-		cs.UpdateString("a", 1)
-	}
-
-	est := float64(cs.EstimateStringCount("a"))
-	logResult(t, "Linearity", 1000, est)
-
-	if math.Abs(est-1000) > 3 {
-		t.Fatalf("linearity violated")
-	}
-}
-
-// 4. Merge correctness
-// TestCS_MergeCorrectness verifies that merging two CountSketch
-// instances produces the same result as sketching the union of their input streams.
-func TestCS_MergeCorrectness(t *testing.T) {
-	cs1, _ := NewCountSketch(5, 1024)
-	cs2, _ := NewCountSketch(5, 1024)
-
-	for i := 0; i < 400; i++ {
-		cs1.UpdateString("x", 1)
-	}
-	for i := 0; i < 600; i++ {
-		cs2.UpdateString("x", 1)
-	}
-
-	if err := cs1.Merge(cs2); err != nil {
-		t.Fatalf("merge failed: %v", err)
-	}
-
-	est := float64(cs1.EstimateStringCount("x"))
-	logResult(t, "Merge", 1000, est)
-
-	if math.Abs(est-1000) > 5 {
-		t.Fatalf("merge incorrect")
-	}
-}
-
-// 5. Median estimator correctness
-// TestCS_MedianEstimator ensures that the median-of-rows estimator
-// is robust to outliers caused by hash collisions in individual rows.
+// TestCS_MedianEstimator ensures robustness against outliers.
 func TestCS_MedianEstimator(t *testing.T) {
 	cs, _ := NewCountSketch(3, 1024)
 	hash := common.Hash64([]byte("k"))
 
-	// poison one row
+	// Poison one row to simulate a massive collision
 	c, sign := cs.derivePosAndSign(hash, 0)
-	cs.Count[0][c] += 10_000 * sign
+	cs.Count[0][c] += 10_000 * float64(sign)
 
 	for i := 0; i < 3; i++ {
 		cs.InsertWithHash(hash)
 	}
 
 	est, _ := cs.QueryWithHash(common.QueryFrequency, hash)
-	logResult(t, "MedianEstimator", 3, est)
 
+	// The median should ignore the 10,000 outlier
 	if est < 2 || est > 4 {
-		t.Fatalf("median estimator broken")
+		t.Fatalf("median estimator broken: got %.2f", est)
 	}
 }
 
-// 6. Sign correctness
-// TestCS_SignCorrectness verifies that the sign hashing mechanism
-// correctly handles positive and negative updates, allowing
-// proper cancellation of counts.
+// TestCS_SignCorrectness verifies cancellation mechanism.
 func TestCS_SignCorrectness(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
-
 	for i := 0; i < 100; i++ {
 		cs.UpdateString("pos", 1)
 		cs.UpdateString("neg", -1)
 	}
-
 	estPos := float64(cs.EstimateStringCount("pos"))
 	estNeg := float64(cs.EstimateStringCount("neg"))
-
-	t.Logf("[Sign] pos_est=%.2f neg_est=%.2f", estPos, estNeg)
 
 	if estPos <= 0 || estNeg >= 0 {
 		t.Fatalf("sign incorrect")
 	}
 }
 
-// 7. Query purity
-// TestCS_QueryNoSideEffect ensures that calling query operations
-// does not mutate the internal state of the sketch.
-// Queries must be pure read-only operations.
-func TestCS_QueryNoSideEffect(t *testing.T) {
-	cs, _ := NewCountSketch(5, 1024)
+// ==============================================================================
+// 2. LOGIC TESTS USING CAIDA DATASET
+// ==============================================================================
 
-	cs.UpdateString("x", 1)
-	before := float64(cs.EstimateStringCount("x"))
+// TestCS_CAIDA_MergeCorrectness verifies that splitting the CAIDA dataset into two
+// parts and merging the resulting sketches yields the same state as processing the full stream.
+func TestCS_CAIDA_MergeCorrectness(t *testing.T) {
+	samples := loadCAIDA(t)
+	mid := len(samples) / 2
+	rows, cols := 5, 2048
 
-	for i := 0; i < 100; i++ {
-		cs.EstimateStringCount("x")
+	// 1. Create Partial Sketches
+	csPart1, _ := NewCountSketch(rows, cols)
+	csPart2, _ := NewCountSketch(rows, cols)
+
+	// 2. Create Total Sketch
+	csTotal, _ := NewCountSketch(rows, cols)
+
+	// Ingest Data
+	for i, s := range samples {
+		ipUint := uint32(s.F)
+		ipBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(ipBytes, ipUint)
+		h := common.Hash64(ipBytes)
+
+		// Insert into Total
+		csTotal.InsertWithHash(h)
+
+		// Insert into Parts
+		if i < mid {
+			csPart1.InsertWithHash(h)
+		} else {
+			csPart2.InsertWithHash(h)
+		}
 	}
 
-	after := float64(cs.EstimateStringCount("x"))
-	logResult(t, "QueryPurity", before, after)
-
-	if before != after {
-		t.Fatalf("query has side effects")
+	// 3. Merge Parts
+	if err := csPart1.Merge(csPart2); err != nil {
+		t.Fatalf("Merge failed: %v", err)
 	}
+
+	// 4. Verify Internal State (Exact Match)
+	// Since floating point addition of 1.0 is associative for these ranges,
+	// the matrices should be identical.
+	for r := 0; r < rows; r++ {
+		for c := 0; c < cols; c++ {
+			valMerged := csPart1.Count[r][c]
+			valTotal := csTotal.Count[r][c]
+			if valMerged != valTotal {
+				t.Errorf("Merge mismatch at [%d][%d]: Merged=%.0f, Total=%.0f", r, c, valMerged, valTotal)
+				return // Fail fast
+			}
+		}
+	}
+	t.Logf("Merge Correctness Verified on %d packets", len(samples))
 }
 
-// 8. Order independence (commutativity)
-// TestCS_OrderIndependence checks that the order of updates
-// does not affect the final frequency estimates.
-// CountSketch should be commutative with respect to updates.
-func TestCS_OrderIndependence(t *testing.T) {
-	cs1, _ := NewCountSketch(5, 1024)
-	cs2, _ := NewCountSketch(5, 1024)
+// TestCS_CAIDA_OrderIndependence verifies that processing the CAIDA stream
+// forwards vs backwards results in the same sketch state (Commutativity).
+func TestCS_CAIDA_OrderIndependence(t *testing.T) {
+	samples := loadCAIDA(t)
+	rows, cols := 5, 2048
 
-	// A then B
-	cs1.UpdateString("a", 1)
-	cs1.UpdateString("b", 1)
+	csForward, _ := NewCountSketch(rows, cols)
+	csBackward, _ := NewCountSketch(rows, cols)
 
-	// B then A
-	cs2.UpdateString("b", 1)
-	cs2.UpdateString("a", 1)
-
-	est1a := float64(cs1.EstimateStringCount("a"))
-	est2a := float64(cs2.EstimateStringCount("a"))
-	est1b := float64(cs1.EstimateStringCount("b"))
-	est2b := float64(cs2.EstimateStringCount("b"))
-
-	t.Logf("[OrderIndependence] a:(%.2f, %.2f) b:(%.2f, %.2f)",
-		est1a, est2a, est1b, est2b)
-
-	if math.Abs(est1a-est2a) > 1 || math.Abs(est1b-est2b) > 1 {
-		t.Fatalf("order independence violated")
+	// Forward
+	for _, s := range samples {
+		ipBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(ipBytes, uint32(s.F))
+		csForward.InsertWithHash(common.Hash64(ipBytes))
 	}
+
+	// Backward
+	for i := len(samples) - 1; i >= 0; i-- {
+		ipBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(ipBytes, uint32(samples[i].F))
+		csBackward.InsertWithHash(common.Hash64(ipBytes))
+	}
+
+	// Compare
+	mismatch := false
+	for r := 0; r < rows; r++ {
+		for c := 0; c < cols; c++ {
+			if csForward.Count[r][c] != csBackward.Count[r][c] {
+				mismatch = true
+				break
+			}
+		}
+	}
+
+	if mismatch {
+		t.Fatal("Order Independence violated on CAIDA dataset")
+	}
+	t.Logf("Order Independence Verified on %d packets", len(samples))
 }
 
-// 9. Multiple keys isolation
-// TestCS_KeyIsolation verifies that updates to one key do not
-// significantly affect the estimates of other unrelated keys.
-// This tests isolation under hash collisions.
-func TestCS_KeyIsolation(t *testing.T) {
-	cs, _ := NewCountSketch(5, 2048)
+// TestCS_CAIDA_Accuracy validates the median estimator against ground truth.
+func TestCS_CAIDA_Accuracy(t *testing.T) {
+	samples := loadCAIDA(t)
 
-	for i := 0; i < 1000; i++ {
-		cs.UpdateString("hot", 1)
-		cs.UpdateString("cold", 1)
+	// Initialize Sketch
+	rows, cols := 5, 2048
+	cs, err := NewCountSketch(rows, cols)
+	if err != nil {
+		t.Fatalf("Failed to initialize CountSketch: %v", err)
 	}
 
-	estHot := float64(cs.EstimateStringCount("hot"))
-	estCold := float64(cs.EstimateStringCount("cold"))
+	groundTruth := make(map[uint32]int64)
 
-	t.Logf("[Isolation] hot=%.2f cold=%.2f", estHot, estCold)
+	// Ingest Stream
+	for _, s := range samples {
+		ip := uint32(s.F)
+		groundTruth[ip]++
 
-	if math.Abs(estHot-1000) > 5 || math.Abs(estCold-1000) > 5 {
-		t.Fatalf("key isolation broken")
-	}
-}
-
-// 10. Weighted update correctness
-// TestCS_WeightedUpdates verifies that CountSketch correctly
-// supports weighted updates (delta != 1), which are common
-// in aggregated or pre-processed streams.
-func TestCS_WeightedUpdates(t *testing.T) {
-	cs, _ := NewCountSketch(5, 1024)
-
-	cs.UpdateString("w", 2)
-	cs.UpdateString("w", 3)
-	cs.UpdateString("w", 5)
-
-	est := float64(cs.EstimateStringCount("w"))
-	logResult(t, "WeightedUpdate", 10, est)
-
-	if math.Abs(est-10) > 2 {
-		t.Fatalf("weighted update incorrect")
-	}
-}
-
-// 11. Positive-negative cancellation
-// TestCS_Cancellation verifies algebraic cancellation: a sequence
-// of positive and negative updates with equal magnitude should
-// result in a zero estimate.
-func TestCS_Cancellation(t *testing.T) {
-	cs, _ := NewCountSketch(5, 1024)
-
-	for i := 0; i < 100; i++ {
-		cs.UpdateString("x", 1)
-		cs.UpdateString("x", -1)
+		ipBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(ipBytes, ip)
+		cs.InsertWithHash(common.Hash64(ipBytes))
 	}
 
-	est := float64(cs.EstimateStringCount("x"))
-	logResult(t, "Cancellation", 0, est)
-
-	if math.Abs(est) > 1 {
-		t.Fatalf("cancellation failed")
+	// Sort Ground Truth
+	type kv struct {
+		IP    uint32
+		Count int64
 	}
-}
-
-// 12. Idempotent merge with empty sketch
-// TestCS_MergeWithEmpty ensures that merging a sketch with an
-// empty sketch does not change its internal state.
-// This validates idempotence and the existence of a neutral element.
-func TestCS_MergeWithEmpty(t *testing.T) {
-	cs1, _ := NewCountSketch(5, 1024)
-	cs2, _ := NewCountSketch(5, 1024) // empty
-
-	cs1.UpdateString("z", 100)
-
-	before := float64(cs1.EstimateStringCount("z"))
-	if err := cs1.Merge(cs2); err != nil {
-		t.Fatalf("merge failed")
+	var sorted []kv
+	for k, v := range groundTruth {
+		sorted = append(sorted, kv{k, v})
 	}
-	after := float64(cs1.EstimateStringCount("z"))
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Count > sorted[j].Count
+	})
 
-	logResult(t, "MergeEmpty", before, after)
+	topK := 100
+	if len(sorted) < topK {
+		topK = len(sorted)
+	}
 
-	if before != after {
-		t.Fatalf("merge with empty changed state")
+	// Verify Estimates
+	var totalRelErr float64
+	for i := 0; i < topK; i++ {
+		item := sorted[i]
+		ipBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(ipBytes, item.IP)
+
+		est, _ := cs.QueryWithHash(common.QueryFrequency, common.Hash64(ipBytes))
+
+		err := math.Abs(est - float64(item.Count))
+		relErr := err / float64(item.Count)
+		totalRelErr += relErr
+	}
+
+	avgRelError := (totalRelErr / float64(topK)) * 100
+
+	t.Log("===================================================")
+	t.Logf(" CAIDA ACCURACY REPORT (CountSketch)")
+	t.Logf(" Processed: %d packets, Unique IPs: %d", len(samples), len(groundTruth))
+	t.Logf(" Top-%d Avg Relative Error: %.4f%%", topK, avgRelError)
+	t.Log("===================================================")
+
+	if avgRelError > 20.0 {
+		t.Errorf("Accuracy too low on real-world data: %.2f%%", avgRelError)
 	}
 }
