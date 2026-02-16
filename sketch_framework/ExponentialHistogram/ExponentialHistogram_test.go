@@ -1,390 +1,250 @@
 package exponentialhistogram
 
 import (
-	"bufio"
-	"fmt"
-	"math"
 	"math/rand"
-	"os"
-	"runtime"
 	"sort"
-	"strconv"
-	"sync"
 	"testing"
 	"time"
-
-	"github.com/approx-telemetry/sketchlib-go/common"
-
-	// Import all sketches
-	univmon "github.com/approx-telemetry/sketchlib-go/sketch_framework/UnivMon"
-	countsketch "github.com/approx-telemetry/sketchlib-go/sketches/CountSketch"
-	hll "github.com/approx-telemetry/sketchlib-go/sketches/HLL"
-	kll "github.com/approx-telemetry/sketchlib-go/sketches/KLL"
 )
 
 // ==============================================================================
-// 1. CONFIG & HELPERS
+// TEST SUITE: EH STRUCTURE & LOGIC CORRECTNESS
+// Uses 'ExpoHistogramCount' (Exact Counter) to verify logic.
 // ==============================================================================
 
-const (
-	BENCH_WINDOW_SIZE = 100000
-	BENCH_TIME_RANGE  = 200000
-	VALUE_SCALE       = 100000.0
-)
+// 1. Test Sliding Window Logic
+// Ensures old data is removed, while accounting for the approximation nature of EH.
+func TestLogic_SlidingWindow(t *testing.T) {
+	k := 10
+	windowSize := int64(100) // Window 100ms
+	eh := NewExpoHistogramCount(k, windowSize)
 
-type BenchSample struct {
-	T int64
-	F float64
-	S string
-}
+	t.Log("Testing Sliding Window Logic...")
 
-type ResultRow struct {
-	SketchType    string
-	WindowSize    int64
-	K             int
-	Param         string
-	AvgInsertTime float64 // ns
-	AvgQueryTime  float64 // us
-	AvgError      float64 // %
-	MemoryKB      float64
-}
-
-func genZipfData(n int64) []BenchSample {
-	rand.Seed(time.Now().UnixNano())
-	vec := make([]BenchSample, 0, n)
-	s := 1.01
-	v := 1.0
-	z := rand.NewZipf(rand.New(rand.NewSource(time.Now().UnixNano())), s, v, uint64(VALUE_SCALE))
-
-	for t := int64(0); t < n; t++ {
-		val := float64(z.Uint64()) + 1
-		vec = append(vec, BenchSample{
-			T: t,
-			F: val,
-			S: strconv.FormatFloat(val, 'f', -1, 64),
-		})
+	// Phase 1: Fill the window completely (t=0 to t=99)
+	for i := int64(0); i < 100; i++ {
+		eh.UpdateCount(1, i)
 	}
-	return vec
-}
 
-func genUniformData(n int64) []BenchSample {
-	rand.Seed(time.Now().UnixNano())
-	vec := make([]BenchSample, 0, n)
-	for t := int64(0); t < n; t++ {
-		val := rand.Float64() * VALUE_SCALE
-		vec = append(vec, BenchSample{
-			T: t,
-			F: val,
-			S: strconv.FormatFloat(val, 'f', -1, 64),
-		})
+	// Check Total: Should be 100 (since no sliding yet, buckets are usually precision 1)
+	total, _ := eh.GetTotalCount(0, 100)
+	if total != 100 {
+		t.Errorf("Phase 1 Failed: Expected 100, got %d", total)
 	}
-	return vec
-}
 
-func calcErr(est, gt float64) float64 {
-	if gt == 0 {
-		return math.Abs(est)
+	// Phase 2: Slide the window (t=100 to t=149)
+	// Items t=0..49 should be expired.
+	// Items t=50..149 are valid (total 100 items).
+	for i := int64(100); i < 150; i++ {
+		eh.UpdateCount(1, i)
 	}
-	return math.Abs(est-gt) / gt
-}
 
-// ==============================================================================
-// 2. WORKER FUNCTIONS
-// ==============================================================================
+	// Query wide range covering all active buckets
+	totalAfterSlide, _ := eh.GetTotalCount(50, 150)
 
-// --- KLL ---
-func runBenchKLL(k int, kllK int, data []BenchSample, w *bufio.Writer) ResultRow {
-	eh := NewExpoHistogramKLL(k, BENCH_WINDOW_SIZE, kllK)
+	// CORRECTNESS ANALYSIS FOR EH:
+	// EH is an approximate data structure.
+	// The oldest bucket might overlap with the window boundary.
+	// EH "Upper Bound" will keep the overlapping bucket, so result > 100.
+	// Max EH error bound is 1/k.
+	// With k=10, error ~10%. So 100 <= result <= 110 is valid.
 
-	var totalInsertTime int64
-	var totalQueryTime int64
-	var totalError float64
-	var queryCount int64
+	expected := int64(100)
+	// Relative error tolerance (due to bucket boundary)
+	// We allow slight over-estimation due to the granular nature of buckets.
+	maxAllowed := expected + int64(float64(expected)/float64(k)) + 2 // 100 + 10 + buffer
 
-	for i, d := range data {
-		start := time.Now()
-		eh.UpdateValue(d.F, d.T)
-		totalInsertTime += time.Since(start).Nanoseconds()
+	if totalAfterSlide < expected || totalAfterSlide > maxAllowed {
+		t.Errorf("Phase 2 Failed (Sliding): Expected approx %d, got %d. (Allowed range: %d-%d)",
+			expected, totalAfterSlide, expected, maxAllowed)
 
-		if int64(i) >= BENCH_WINDOW_SIZE && i%1000 == 0 {
-			startQ := time.Now()
-			sketch, err := eh.QueryInterval(d.T-BENCH_WINDOW_SIZE, d.T)
-			qDuration := time.Since(startQ)
-			totalQueryTime += qDuration.Microseconds()
-
-			if err == nil {
-				kllS := sketch.(*kll.KLLSketch)
-				est := kllS.CDF().Query(0.5)
-
-				windowSlice := make([]float64, 0, BENCH_WINDOW_SIZE)
-				for j := int64(i) - BENCH_WINDOW_SIZE; j < int64(i); j++ {
-					windowSlice = append(windowSlice, data[j].F)
-				}
-				sort.Float64s(windowSlice)
-				gt := windowSlice[len(windowSlice)/2]
-
-				totalError += calcErr(est, gt)
-				queryCount++
+		// Debug: Check bucket structure to see why it exceeded
+		t.Logf("Debug Buckets State:")
+		threshold := int64(150) - windowSize
+		for i, b := range eh.buckets {
+			status := "VALID"
+			if b.MaxTime < threshold {
+				status = "EXPIRED (SHOULD BE DELETED)"
 			}
+			t.Logf("[%d] Range[%d-%d] Count=%d (%s)", i, b.MinTime, b.MaxTime, b.Count, status)
+		}
+	} else {
+		t.Logf("Phase 2 Success: Got %d (Expected %d with approximation tolerance)", totalAfterSlide, expected)
+	}
+
+	// Internal Verification: Ensure truly expired buckets are removed
+	// A bucket is considered totally expired if MaxTime < threshold.
+	if len(eh.buckets) > 0 {
+		// Access struct fields directly (buckets is []Bucket)
+		oldestBucket := eh.buckets[0]
+		threshold := int64(150) - windowSize // 50
+
+		// If MaxTime < 50, it means it's garbage that wasn't collected
+		if oldestBucket.MaxTime < threshold {
+			t.Errorf("Violation: Oldest bucket MaxTime (%d) is strictly older than threshold (%d). It should have been removed.", oldestBucket.MaxTime, threshold)
+		}
+	}
+}
+
+// 2. Test EH Invariants (Exponential Growth & Order)
+// Ensures Datar et al. rules are met:
+// - Buckets sorted by time
+// - Bucket sizes grow exponentially (1, 1, 2, 2, 4, 4...)
+// - Max buckets per size <= k/2 + 2
+func TestLogic_Invariants(t *testing.T) {
+	k := 2 // Very small K forces frequent merges
+	windowSize := int64(10000)
+	eh := NewExpoHistogramCount(k, windowSize)
+
+	// Insert 32 items (1 per ms).
+	// With k=2, we expect buckets to distribute into powers of 2.
+	for i := int64(0); i < 32; i++ {
+		eh.UpdateCount(1, i)
+	}
+
+	t.Log("Inspecting Bucket Structure (k=2, N=32)...")
+
+	// Validation 1: Time Ordering (Monotonic)
+	for i := 0; i < len(eh.buckets)-1; i++ {
+		curr := eh.buckets[i]
+		next := eh.buckets[i+1]
+
+		if curr.MinTime >= next.MinTime {
+			t.Errorf("Invariant Violation: Buckets not sorted by time. B[%d].MinTime (%d) >= B[%d].MinTime (%d)", i, curr.MinTime, i+1, next.MinTime)
 		}
 	}
 
-	return ResultRow{
-		SketchType:    "KLL",
-		WindowSize:    BENCH_WINDOW_SIZE,
-		K:             k,
-		Param:         fmt.Sprintf("kll_k=%d", kllK),
-		AvgInsertTime: float64(totalInsertTime) / float64(len(data)),
-		AvgQueryTime:  float64(totalQueryTime) / float64(queryCount),
-		AvgError:      (totalError / float64(queryCount)) * 100,
-		MemoryKB:      0,
-	}
-}
+	// Validation 2: Bucket Size constraints
+	// Count bucket size histogram
+	sizeCounts := make(map[int64]int)
+	for _, b := range eh.buckets {
+		sizeCounts[b.Count]++
 
-// --- UNIVMON ---
-func runBenchUniv(k int, univK int, data []BenchSample, w *bufio.Writer) ResultRow {
-	// Adjusted: Using univK passed in arguments
-	eh := NewExpoHistogramUniv(k, BENCH_WINDOW_SIZE, univK, 5, 1024, 4)
-
-	var totalInsertTime int64
-	var totalQueryTime int64
-	var totalError float64
-	var queryCount int64
-	var lastMem float64
-
-	for i, d := range data {
-		start := time.Now()
-		eh.UpdateItem(d.S, d.T)
-		totalInsertTime += time.Since(start).Nanoseconds()
-
-		if int64(i) >= BENCH_WINDOW_SIZE && i%1000 == 0 {
-			startQ := time.Now()
-			sketch, err := eh.QueryInterval(d.T-BENCH_WINDOW_SIZE, d.T)
-			qDuration := time.Since(startQ)
-			totalQueryTime += qDuration.Microseconds()
-
-			if err == nil {
-				univ := sketch.(*univmon.UnivSketch)
-				est := univ.GetCardinality()
-				lastMem = univ.GetMemoryKB()
-
-				unique := make(map[float64]bool)
-				for j := int64(i) - BENCH_WINDOW_SIZE; j < int64(i); j++ {
-					unique[data[j].F] = true
-				}
-				gt := float64(len(unique))
-
-				totalError += calcErr(est, gt)
-				queryCount++
-			}
+		// Validation: Size must be Power of 2 (1, 2, 4, 8...)
+		if !isPowerOfTwo(b.Count) {
+			t.Errorf("Invariant Violation: Bucket size %d is not power of 2", b.Count)
 		}
 	}
 
-	return ResultRow{
-		SketchType:    "UnivMon",
-		WindowSize:    BENCH_WINDOW_SIZE,
-		K:             k,
-		Param:         fmt.Sprintf("univ_k=%d", univK),
-		AvgInsertTime: float64(totalInsertTime) / float64(len(data)),
-		AvgQueryTime:  float64(totalQueryTime) / float64(queryCount),
-		AvgError:      (totalError / float64(queryCount)) * 100,
-		MemoryKB:      lastMem,
-	}
-}
-
-// --- HLL ---
-func runBenchHLL(k int, data []BenchSample, w *bufio.Writer) ResultRow {
-	eh := NewExpoHistogramHLL(k, BENCH_WINDOW_SIZE)
-
-	var totalInsertTime int64
-	var totalQueryTime int64
-	var totalError float64
-	var queryCount int64
-
-	for i, d := range data {
-		start := time.Now()
-		eh.UpdateItem(d.S, d.T)
-		totalInsertTime += time.Since(start).Nanoseconds()
-
-		if int64(i) >= BENCH_WINDOW_SIZE && i%2000 == 0 {
-			startQ := time.Now()
-			sketch, err := eh.QueryInterval(d.T-BENCH_WINDOW_SIZE, d.T)
-			qDuration := time.Since(startQ)
-			totalQueryTime += qDuration.Microseconds()
-
-			if err == nil {
-				hllS := sketch.(*hll.HyperLogLog)
-				est := float64(hllS.Estimate())
-
-				unique := make(map[float64]bool)
-				for j := int64(i) - BENCH_WINDOW_SIZE; j < int64(i); j++ {
-					unique[data[j].F] = true
-				}
-				gt := float64(len(unique))
-
-				totalError += calcErr(est, gt)
-				queryCount++
-			}
+	// Validation 3: Max buckets per level
+	// EH Rule: max k/2 + 2 buckets of the same size
+	limit := k/2 + 2
+	for size, count := range sizeCounts {
+		if count > limit {
+			t.Errorf("Invariant Violation: Too many buckets of size %d. Have %d, Max allowed %d", size, count, limit)
 		}
-	}
-
-	return ResultRow{
-		SketchType:    "HLL",
-		WindowSize:    BENCH_WINDOW_SIZE,
-		K:             k,
-		Param:         "Standard",
-		AvgInsertTime: float64(totalInsertTime) / float64(len(data)),
-		AvgQueryTime:  float64(totalQueryTime) / float64(queryCount),
-		AvgError:      (totalError / float64(queryCount)) * 100,
-		MemoryKB:      2.5,
+		t.Logf("Size %d: %d buckets", size, count)
 	}
 }
 
-// --- COUNT SKETCH ---
-func runBenchCountSketch(k int, rows, cols int, data []BenchSample, w *bufio.Writer) ResultRow {
-	eh := NewExpoHistogramCountSketch(k, BENCH_WINDOW_SIZE, rows, cols)
-	targetKey := "1"
+// 3. Test Merge Correctness
+// Ensures 1 + 1 = 2, and no data loss during merge.
+func TestLogic_MergeCorrectness(t *testing.T) {
+	k := 10
+	windowSize := int64(100000) // Infinite window
+	eh := NewExpoHistogramCount(k, windowSize)
 
-	var totalInsertTime int64
-	var totalQueryTime int64
-	var totalError float64
-	var queryCount int64
-
-	for i, d := range data {
-		start := time.Now()
-		eh.UpdateItem(d.S, d.T)
-		totalInsertTime += time.Since(start).Nanoseconds()
-
-		if int64(i) >= BENCH_WINDOW_SIZE && i%2000 == 0 {
-			startQ := time.Now()
-			sketch, err := eh.QueryInterval(d.T-BENCH_WINDOW_SIZE, d.T)
-			qDuration := time.Since(startQ)
-			totalQueryTime += qDuration.Microseconds()
-
-			if err == nil {
-				cs := sketch.(*countsketch.CountSketch)
-				hash := common.FromString(targetKey).Hash
-				est, _ := cs.QueryWithHash(common.QueryFrequency, hash)
-
-				gt := 0.0
-				for j := int64(i) - BENCH_WINDOW_SIZE; j < int64(i); j++ {
-					if data[j].S == targetKey {
-						gt++
-					}
-				}
-
-				totalError += calcErr(est, gt)
-				queryCount++
-			}
-		}
+	n := 1000
+	// Insert 1000 items
+	for i := int64(0); i < int64(n); i++ {
+		eh.UpdateCount(1, i)
 	}
 
-	memEst := float64(rows*cols*8) / 1024.0
+	// Total must be EXACTLY 1000
+	// If merge is wrong, this number will drift (e.g., 999 or 1001)
+	total, _ := eh.GetTotalCount(0, int64(n))
 
-	return ResultRow{
-		SketchType:    "CountSketch",
-		WindowSize:    BENCH_WINDOW_SIZE,
-		K:             k,
-		Param:         fmt.Sprintf("%dx%d", rows, cols),
-		AvgInsertTime: float64(totalInsertTime) / float64(len(data)),
-		AvgQueryTime:  float64(totalQueryTime) / float64(queryCount),
-		AvgError:      (totalError / float64(queryCount)) * 100,
-		MemoryKB:      memEst,
+	if total != int64(n) {
+		t.Errorf("Merge Logic Fail: Inserted %d, Counted %d. Data lost or duplicated during merge.", n, total)
 	}
 }
 
-// ==============================================================================
-// 3. MAIN BENCHMARK RUNNER
-// ==============================================================================
+// 4. Test Query Interval Consistency
+// Ensures sub-interval query returns reasonable results
+// (Based on EH overlap logic)
+func TestLogic_QueryInterval(t *testing.T) {
+	k := 20
+	window := int64(100)
+	eh := NewExpoHistogramCount(k, window)
 
-func TestPerformance_AllSketches(t *testing.T) {
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	// Scenario:
+	// T=10: insert 1
+	// T=20: insert 1
+	// T=30: insert 1
+	// T=40: insert 1
+	// T=50: insert 1
+	times := []int64{10, 20, 30, 40, 50}
+	for _, tm := range times {
+		eh.UpdateCount(1, tm)
+	}
 
-	os.MkdirAll("benchmark_results", os.ModePerm)
-	f, err := os.OpenFile("benchmark_results/performance_metrics.csv", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
+	// Query Interval [15, 45]
+	// Should cover buckets T=20, T=30, T=40. Total = 3.
+	// Note: EH overlap implementation might cover T=10 or T=50 if buckets are merged.
+	// But since N=5 and k=20, no merge yet. Buckets are size=1.
+	// So must be exact 3.
+
+	count, err := eh.GetTotalCount(15, 45)
 	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	w := bufio.NewWriter(f)
-
-	fmt.Fprintf(w, "Sketch,WindowSize,EH_K,Param,AvgInsert(ns),AvgQuery(us),AvgError(%%),Memory(KB)\n")
-	w.Flush()
-
-	fmt.Println(">>> Generating Data Sets...")
-	uniformData := genUniformData(BENCH_TIME_RANGE)
-	zipfData := genZipfData(BENCH_TIME_RANGE)
-	fmt.Println(">>> Data Ready. Starting Benchmarks...")
-
-	ehK_Values := []int{10, 50, 100}
-	// Updated UnivMon EH Values to start at 100 as requested
-	univMonEH_Values := []int{100, 200}
-
-	var wg sync.WaitGroup
-	resultsChan := make(chan ResultRow, 50)
-
-	// --- Benchmark KLL ---
-	for _, k := range ehK_Values {
-		wg.Add(1)
-		go func(k_val int) {
-			defer wg.Done()
-			fmt.Printf("Running KLL (k=%d)...\n", k_val)
-			res := runBenchKLL(k_val, 128, uniformData, w)
-			resultsChan <- res
-		}(k)
+		t.Fatalf("Query failed: %v", err)
 	}
 
-	// --- Benchmark UnivMon (UPDATED) ---
-	// Using univMonEH_Values (100, 200) and Internal K = 1000
-	for _, k := range univMonEH_Values {
-		wg.Add(1)
-		go func(k_val int) {
-			defer wg.Done()
-			fmt.Printf("Running UnivMon (k=%d)...\n", k_val)
-			// Increased internal univK to 1000 to fix accuracy
-			res := runBenchUniv(k_val, 1000, zipfData, w)
-			resultsChan <- res
-		}(k)
+	if count != 3 {
+		t.Errorf("Interval Query Fail: Range [15, 45] should cover {20,30,40}. Expected 3, got %d", count)
+		// Debug print
+		for i, b := range eh.buckets {
+			t.Logf("Bucket %d: Range[%d-%d] Count=%d", i, b.MinTime, b.MaxTime, b.Count)
+		}
+	}
+}
+
+// 5. Test Determinism
+// Ensures 2 EH instances with same input produce identical structure.
+// Must not have race conditions or random factors in bucket logic.
+func TestLogic_Determinism(t *testing.T) {
+	seed := time.Now().UnixNano()
+	r := rand.New(rand.NewSource(seed))
+
+	inputData := make([]int64, 1000)
+	for i := 0; i < 1000; i++ {
+		inputData[i] = r.Int63n(100000) // Random timestamps (monotonic simulation)
+	}
+	sortInt64(inputData) // Ensure monotonicity
+
+	eh1 := NewExpoHistogramCount(5, 50000)
+	eh2 := NewExpoHistogramCount(5, 50000)
+
+	// Feed EH1
+	for _, tm := range inputData {
+		eh1.UpdateCount(1, tm)
+	}
+	// Feed EH2
+	for _, tm := range inputData {
+		eh2.UpdateCount(1, tm)
 	}
 
-	// --- Benchmark HLL ---
-	for _, k := range ehK_Values {
-		wg.Add(1)
-		go func(k_val int) {
-			defer wg.Done()
-			fmt.Printf("Running HLL (k=%d)...\n", k_val)
-			res := runBenchHLL(k_val, zipfData, w)
-			resultsChan <- res
-		}(k)
+	// Compare Structure
+	if len(eh1.buckets) != len(eh2.buckets) {
+		t.Fatalf("Determinism Fail: Bucket count mismatch. EH1=%d, EH2=%d", len(eh1.buckets), len(eh2.buckets))
 	}
 
-	// --- Benchmark CountSketch ---
-	for _, k := range ehK_Values {
-		wg.Add(1)
-		go func(k_val int) {
-			defer wg.Done()
-			fmt.Printf("Running CountSketch (k=%d)...\n", k_val)
-			res := runBenchCountSketch(k_val, 5, 2048, zipfData, w)
-			resultsChan <- res
-		}(k)
+	for i := 0; i < len(eh1.buckets); i++ {
+		b1 := eh1.buckets[i]
+		b2 := eh2.buckets[i]
+
+		if b1.Count != b2.Count || b1.MinTime != b2.MinTime || b1.MaxTime != b2.MaxTime {
+			t.Errorf("Determinism Fail at Bucket %d:\nEH1: [%d-%d] size %d\nEH2: [%d-%d] size %d",
+				i, b1.MinTime, b1.MaxTime, b1.Count, b2.MinTime, b2.MaxTime, b2.Count)
+		}
 	}
+}
 
-	// Collector Routine
-	go func() {
-		wg.Wait()
-		close(resultsChan)
-	}()
+// --- Helpers for Correctness Tests ---
 
-	// Write results as they come in
-	for res := range resultsChan {
-		fmt.Printf("DONE: %s (k=%d) -> Insert: %.0fns, Query: %.0fus, Err: %.2f%%\n",
-			res.SketchType, res.K, res.AvgInsertTime, res.AvgQueryTime, res.AvgError)
+func isPowerOfTwo(x int64) bool {
+	return (x != 0) && ((x & (x - 1)) == 0)
+}
 
-		fmt.Fprintf(w, "%s,%d,%d,%s,%.2f,%.2f,%.4f,%.2f\n",
-			res.SketchType, res.WindowSize, res.K, res.Param,
-			res.AvgInsertTime, res.AvgQueryTime, res.AvgError, res.MemoryKB)
-		w.Flush()
-	}
-
-	fmt.Println(">>> All Benchmarks Complete. Results saved to benchmark_results/performance_metrics.csv")
+func sortInt64(a []int64) {
+	sort.Slice(a, func(i, j int) bool { return a[i] < a[j] })
 }
