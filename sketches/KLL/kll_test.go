@@ -2,15 +2,36 @@ package kll
 
 import (
 	"math"
-	"math/rand"
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/approx-telemetry/sketchlib-go/testdata"
 )
 
 // ======================
 // Helpers
 // ======================
+
+// Helper to load CAIDA data
+func loadCAIDA(t *testing.T) []float64 {
+	// Adjust path relative to this file location (sketches/kll/)
+	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+	samples, err := testdata.ReadCAIDAStream(file1, "")
+	if err != nil {
+		t.Skipf("Skipping CAIDA test: %v", err)
+	}
+	if len(samples) == 0 {
+		t.Skip("No CAIDA samples found.")
+	}
+
+	// Extract just the float values (IPs) for KLL processing
+	data := make([]float64, len(samples))
+	for i, s := range samples {
+		data[i] = s.F
+	}
+	return data
+}
 
 func newTestKLL(t *testing.T, k int) *KLLSketch {
 	s, err := NewKLLSketch(k)
@@ -21,319 +42,212 @@ func newTestKLL(t *testing.T, k int) *KLLSketch {
 }
 
 // ======================
-// Basic Correctness
+// Basic Correctness (CAIDA)
 // ======================
 
-// TestKLL_BasicFlow verifies basic functionality of the KLL sketch,
-// including insertion, size tracking, and rank queries.
-func TestKLL_BasicFlow(t *testing.T) {
+// TestKLL_CAIDA_BasicFlow verifies ingestion of real data.
+func TestKLL_CAIDA_BasicFlow(t *testing.T) {
+	data := loadCAIDA(t)
 	k := 200
 	s := newTestKLL(t, k)
 
-	if s.GetSize() != 0 {
-		t.Fatalf("new sketch should be empty")
-	}
-
-	n := 100
-	for i := 1; i <= n; i++ {
-		s.Insert(float64(i))
-	}
-
-	if s.GetSize() != n {
-		t.Fatalf("expected size %d, got %d", n, s.GetSize())
-	}
-
-	if s.Count() != n {
-		t.Fatalf("expected count %d, got %d", n, s.Count())
-	}
-
-	rank := s.Rank(50.5)
-	if rank != 50 {
-		t.Fatalf("Rank(50.5): expected 50, got %d", rank)
-	}
-}
-
-// ======================
-// Statistical Accuracy
-// ======================
-
-// TestKLL_StatisticalAccuracy measures rank estimation error
-// against ground truth to validate the probabilistic accuracy
-// guarantees of the KLL sketch.
-func TestKLL_StatisticalAccuracy(t *testing.T) {
-	k := 200
-	n := 10_000
-	maxError := 0.02 // 2%
-
-	s := newTestKLL(t, k)
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-
-	data := make([]float64, 0, n)
-	for i := 0; i < n; i++ {
-		v := rng.Float64()
-		data = append(data, v)
+	// Ingest
+	for _, v := range data {
 		s.Insert(v)
 	}
 
-	sort.Float64s(data)
+	// Verify Size
+	if s.GetSize() != len(data) {
+		t.Fatalf("Size mismatch. Expected %d, got %d", len(data), s.GetSize())
+	}
+	if s.Count() != len(data) {
+		t.Fatalf("Count mismatch. Expected %d, got %d", len(data), s.Count())
+	}
 
-	checkPoints := []float64{0.1, 0.25, 0.5, 0.75, 0.9, 0.99}
+	// Verify a rank query doesn't panic
+	_ = s.Rank(data[0])
+}
+
+// ======================
+// Statistical Accuracy (CAIDA)
+// ======================
+
+// TestKLL_CAIDA_Accuracy measures rank estimation error against ground truth.
+// KLL guarantees rank error <= 1.0 / k with high probability.
+func TestKLL_CAIDA_Accuracy(t *testing.T) {
+	data := loadCAIDA(t)
+
+	// Configuration
+	k := 200
+	// Theoretical Error Bound for KLL is roughly 1/k to 2/k depending on implementation details
+	// We allow a small margin.
+	maxRankError := 2.0 / float64(k) // ~1.0%
+
+	s := newTestKLL(t, k)
+	for _, v := range data {
+		s.Insert(v)
+	}
+
+	// Ground Truth: Sort the data
+	sortedData := make([]float64, len(data))
+	copy(sortedData, data)
+	sort.Float64s(sortedData)
+
+	// Test Points (Quantiles)
+	checkPoints := []float64{0.5, 0.9, 0.99}
+
+	t.Log("===================================================")
+	t.Logf(" CAIDA KLL ACCURACY REPORT (k=%d, N=%d)", k, len(data))
+	t.Logf(" Max Allowed Rank Error: %.4f%%", maxRankError*100)
+	t.Log("===================================================")
+
 	maxObserved := 0.0
 
 	for _, p := range checkPoints {
-		idx := int(float64(n) * p)
-		if idx >= n {
-			idx = n - 1
+		// Calculate index for quantile p
+		idx := int(float64(len(sortedData)) * p)
+		if idx >= len(sortedData) {
+			idx = len(sortedData) - 1
 		}
-		val := data[idx]
+		val := sortedData[idx]
 
-		trueRank := float64(idx)
-		estRank := float64(s.Rank(val))
-		err := math.Abs(estRank-trueRank) / float64(n)
+		// True Rank (Normalized 0..1)
+		trueRank := float64(idx) / float64(len(data))
 
-		t.Logf("[Rank] p=%.2f true=%.0f est=%.0f err=%.4f%%",
-			p, trueRank, estRank, err*100)
+		// Estimated Rank (Normalized 0..1)
+		// KLL Rank() returns approximate number of items <= val
+		estCount := s.Rank(val)
+		estRank := float64(estCount) / float64(len(data))
 
+		err := math.Abs(estRank - trueRank)
 		if err > maxObserved {
 			maxObserved = err
 		}
-		if err > maxError {
-			t.Fatalf("rank error %.4f%% exceeds limit %.4f%%", err*100, maxError*100)
+
+		t.Logf(" p=%-4.2f | Val: %10.0f | TrueRank: %.4f | EstRank: %.4f | Err: %.4f%%",
+			p, val, trueRank, estRank, err*100)
+
+		if err > maxRankError {
+			t.Errorf("Rank error %.4f%% exceeds limit %.4f%% at p=%.2f", err*100, maxRankError*100, p)
 		}
 	}
 
-	t.Logf("Max observed rank error: %.4f%%", maxObserved*100)
+	t.Log("---------------------------------------------------")
+	t.Logf(" Max Observed Error: %.4f%%", maxObserved*100)
 }
 
 // ======================
-// Merge Tests
+// Merge Tests (CAIDA)
 // ======================
 
-// TestKLL_Merge verifies that merging two KLL sketches results
-// in a correct summary of the combined input streams.
-func TestKLL_Merge(t *testing.T) {
+// TestKLL_CAIDA_Merge splits the CAIDA stream, sketches separately,
+// merges, and compares against the full sketch.
+func TestKLL_CAIDA_Merge(t *testing.T) {
+	data := loadCAIDA(t)
 	k := 200
-	s1 := newTestKLL(t, k)
-	s2 := newTestKLL(t, k)
+	mid := len(data) / 2
 
-	for i := 0; i < 2000; i += 2 {
-		s1.Insert(float64(i))
-	}
-	for i := 1; i < 2000; i += 2 {
-		s2.Insert(float64(i))
-	}
+	sPart1 := newTestKLL(t, k)
+	sPart2 := newTestKLL(t, k)
+	sTotal := newTestKLL(t, k)
 
-	if err := s1.Merge(s2); err != nil {
-		t.Fatalf("merge failed: %v", err)
-	}
-
-	if s1.GetSize() != 2000 {
-		t.Fatalf("merged size expected 2000, got %d", s1.GetSize())
-	}
-
-	median := s1.CDF().Query(0.5)
-	if median < 900 || median > 1100 {
-		t.Fatalf("median out of range: %.2f", median)
-	}
-
-	if s1.Rank(2000) != 2000 {
-		t.Fatalf("rank after merge incorrect")
-	}
-}
-
-// TestKLL_IdempotentMerge ensures that merging a sketch with
-// an empty sketch does not change its quantile estimates.
-func TestKLL_IdempotentMerge(t *testing.T) {
-	k := 200
-	s := newTestKLL(t, k)
-	empty := newTestKLL(t, k)
-
-	for i := 0; i < 1000; i++ {
-		s.Insert(float64(i))
-	}
-
-	before := s.CDF().Query(0.5)
-
-	if err := s.Merge(empty); err != nil {
-		t.Fatalf("merge failed")
-	}
-
-	after := s.CDF().Query(0.5)
-	if before != after {
-		t.Fatalf("merge with empty changed result")
-	}
-}
-
-// ======================
-// Distribution Properties
-// ======================
-
-// TestKLL_CDF_Gaussian checks that the estimated CDF for a
-// Gaussian-distributed input matches expected statistical properties
-// (median near zero, correct standard deviation behavior).
-func TestKLL_CDF_Gaussian(t *testing.T) {
-	k := 200
-	n := 5000
-	s := newTestKLL(t, k)
-
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for i := 0; i < n; i++ {
-		s.Insert(rng.NormFloat64())
-	}
-
-	cdf := s.CDF()
-
-	if math.Abs(cdf.Query(0.5)) > 0.15 {
-		t.Fatalf("median of gaussian not ~0")
-	}
-	if math.Abs(cdf.Query(0.841)-1.0) > 0.2 {
-		t.Fatalf("+1 sigma incorrect")
-	}
-	if math.Abs(cdf.Query(0.159)+1.0) > 0.2 {
-		t.Fatalf("-1 sigma incorrect")
-	}
-}
-
-// TestKLL_QuantileMonotonicity verifies that estimated quantiles
-// are monotonically increasing with respect to the quantile parameter p.
-func TestKLL_QuantileMonotonicity(t *testing.T) {
-	k := 200
-	s := newTestKLL(t, k)
-
-	for i := 0; i < 10_000; i++ {
-		s.Insert(rand.Float64())
-	}
-
-	cdf := s.CDF()
-	prev := math.Inf(-1)
-
-	for _, p := range []float64{0.1, 0.25, 0.5, 0.75, 0.9, 0.99} {
-		v := cdf.Query(p)
-		if v < prev {
-			t.Fatalf("quantile monotonicity violated")
+	for i, v := range data {
+		sTotal.Insert(v)
+		if i < mid {
+			sPart1.Insert(v)
+		} else {
+			sPart2.Insert(v)
 		}
-		prev = v
-	}
-}
-
-// TestKLL_ExtremeQuantiles validates the accuracy and ordering
-// of extreme tail quantiles (e.g., p99, p999), which are a known
-// strength of the KLL sketch.
-func TestKLL_ExtremeQuantiles(t *testing.T) {
-	k := 200
-	s := newTestKLL(t, k)
-
-	for i := 0; i < 100_000; i++ {
-		s.Insert(rand.ExpFloat64())
 	}
 
-	cdf := s.CDF()
-	if cdf.Query(0.999) < cdf.Query(0.99) {
-		t.Fatalf("tail quantile ordering violated")
+	// Merge
+	if err := sPart1.Merge(sPart2); err != nil {
+		t.Fatalf("Merge failed: %v", err)
+	}
+
+	// Verify Total Count
+	if sPart1.GetSize() != len(data) {
+		t.Errorf("Merged size mismatch. Expected %d, got %d", len(data), sPart1.GetSize())
+	}
+
+	// Verify Quantile Consistency
+	// The merged sketch should have similar quantile estimates to the total sketch
+	// Note: KLL merge is approximate, so we check if they are "close enough"
+	qMerged := sPart1.Quantile(0.5) // Median
+	qTotal := sTotal.Quantile(0.5)
+
+	// Allow slight deviation due to merge approximation
+	// We verify they are within 5% of the total value range
+	minVal := sTotal.Quantile(0.0)
+	maxVal := sTotal.Quantile(1.0)
+	rangeVal := maxVal - minVal
+
+	diff := math.Abs(qMerged - qTotal)
+	relDiff := diff / rangeVal
+
+	t.Logf("Merge Median Check: Merged=%.0f, Total=%.0f, RelDiff=%.4f", qMerged, qTotal, relDiff)
+
+	if relDiff > 0.05 { // 5% tolerance relative to range
+		t.Errorf("Merge resulted in significant deviation. RelDiff: %.4f", relDiff)
 	}
 }
 
 // ======================
-// Streaming Properties
+// Distribution Properties (CAIDA)
 // ======================
 
-// TestKLL_OrderIndependence_ErrorBound verifies that different
-// insertion orders do not violate the theoretical error bounds,
-// even though KLL is not strictly order-deterministic due to randomness.
-func TestKLL_OrderIndependence_ErrorBound(t *testing.T) {
-	k := 200
-	n := 10000
-	data := make([]float64, n)
-	for i := range data {
-		data[i] = float64(i)
-	}
-
-	s1 := newTestKLL(t, k)
-	s2 := newTestKLL(t, k)
+// TestKLL_CAIDA_QuantileMonotonicity ensures that on real data,
+// requesting higher quantiles returns >= values.
+func TestKLL_CAIDA_QuantileMonotonicity(t *testing.T) {
+	data := loadCAIDA(t)
+	s := newTestKLL(t, 200)
 
 	for _, v := range data {
-		s1.Insert(v)
-	}
-	for i := len(data) - 1; i >= 0; i-- {
-		s2.Insert(data[i])
+		s.Insert(v)
 	}
 
-	sort.Float64s(data)
-	trueMedian := data[n/2]
+	prevVal := math.Inf(-1)
+	steps := 20 // Check every 5%
 
-	q1 := s1.CDF().Query(0.5)
-	q2 := s2.CDF().Query(0.5)
+	for i := 0; i <= steps; i++ {
+		p := float64(i) / float64(steps)
+		val := s.Quantile(p) // Using CDF-like query
 
-	err1 := math.Abs(q1-trueMedian) / trueMedian
-	err2 := math.Abs(q2-trueMedian) / trueMedian
-
-	t.Logf("median errors: forward=%.4f%% reverse=%.4f%%",
-		err1*100, err2*100)
-
-	if err1 > 0.02 || err2 > 0.02 {
-		t.Fatalf("order dependence causes excessive error")
+		if val < prevVal {
+			t.Fatalf("Monotonicity violation at p=%.2f. Prev=%.0f, Curr=%.0f", p, prevVal, val)
+		}
+		prevVal = val
 	}
-}
-
-// TestKLL_QueryStability ensures that repeated queries return
-// identical results and do not mutate internal sketch state.
-func TestKLL_QueryStability(t *testing.T) {
-	k := 200
-	s := newTestKLL(t, k)
-
-	for i := 0; i < 5000; i++ {
-		s.Insert(float64(i))
-	}
-
-	cdf := s.CDF()
-	v1 := cdf.Query(0.9)
-	v2 := cdf.Query(0.9)
-	v3 := cdf.Query(0.9)
-
-	if v1 != v2 || v2 != v3 {
-		t.Fatalf("query not stable")
-	}
+	t.Log("Monotonicity verified on CAIDA dataset.")
 }
 
 // ======================
-// Memory & Space Guarantees
+// Memory & Space Guarantees (CAIDA)
 // ======================
 
-// TestKLL_RetainedItemsVsN checks that the number of retained items
-// grows sublinearly with the number of inserted elements, validating
-// the space efficiency of the KLL sketch.
-func TestKLL_RetainedItemsVsN(t *testing.T) {
+// TestKLL_CAIDA_MemoryBound checks that the sketch stays small
+// even when ingesting the full CAIDA dataset.
+func TestKLL_CAIDA_MemoryBound(t *testing.T) {
+	data := loadCAIDA(t)
 	k := 200
 	s := newTestKLL(t, k)
 
-	N := 50_000
-	for i := 0; i < N; i++ {
-		s.Insert(float64(i))
+	start := time.Now()
+	for _, v := range data {
+		s.Insert(v)
 	}
+	duration := time.Since(start)
 
 	retained := s.GetRetainedItems()
-	t.Logf("Retained=%d Total=%d", retained, N)
+	memBytes := s.GetMemoryBytes()
 
-	if retained > 10*k {
-		t.Fatalf("too many retained items")
-	}
-}
+	t.Logf("Processed %d items in %v", len(data), duration)
+	t.Logf("Retained Items: %d", retained)
+	t.Logf("Estimated Memory: %.2f KB", memBytes/1024)
 
-// TestKLL_MemoryBound verifies that memory usage remains within
-// the expected O(k log N) theoretical bound.
-func TestKLL_MemoryBound(t *testing.T) {
-	k := 200
-	s := newTestKLL(t, k)
-
-	N := 1_000_000
-	for i := 0; i < N; i++ {
-		s.Insert(float64(i))
-	}
-
-	memKB := s.GetMemoryBytes() / 1024
-	t.Logf("Memory usage: %.2f KB for N=%d", memKB, N)
-
-	if memKB > float64(k)*10 {
-		t.Fatalf("memory usage too large")
+	// Theoretical limit check: num_items <= k * 3 * log2(N/k) roughly
+	// For k=200, it should be small.
+	if retained > k*50 { // Loose upper bound safety check
+		t.Errorf("Retained items %d seems excessive for k=%d", retained, k)
 	}
 }

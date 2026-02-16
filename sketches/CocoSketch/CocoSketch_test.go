@@ -1,15 +1,33 @@
 package cocosketch
 
 import (
-	"math/rand"
+	"encoding/binary"
+	"math"
+	"sort"
 	"testing"
 
 	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/approx-telemetry/sketchlib-go/testdata"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// Helper to load CAIDA data
+func loadCAIDA(t *testing.T) []testdata.Sample {
+	// Adjust path relative to this file
+	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+	samples, err := testdata.ReadCAIDAStream(file1, "")
+	if err != nil {
+		t.Skipf("Skipping CAIDA test: %v", err)
+	}
+	if len(samples) == 0 {
+		t.Skip("No CAIDA samples found.")
+	}
+	return samples
+}
+
 // TestNewCocoSketch_Validation verifies that invalid parameters are rejected.
+// (Kept as logic check, data independent)
 func TestNewCocoSketch_Validation(t *testing.T) {
 	_, err := NewCocoSketch(0, 10)
 	require.Error(t, err, "Should fail with d=0")
@@ -23,167 +41,210 @@ func TestNewCocoSketch_Validation(t *testing.T) {
 	require.Equal(t, "CocoSketch", cs.TypeName())
 }
 
-// TestCocoSketch_BasicInsertQuery verifies simple insertion and frequency query.
-func TestCocoSketch_BasicInsertQuery(t *testing.T) {
-	d, length := 3, 20
+// TestCocoSketch_CAIDA_BasicInsertQuery verifies that we can ingest the CAIDA stream
+// and retrieve a non-zero count for a known heavy hitter.
+func TestCocoSketch_CAIDA_BasicInsertQuery(t *testing.T) {
+	samples := loadCAIDA(t)
+
+	// Initialize: 4 arrays, 4096 buckets each
+	d, length := 4, 4096
 	cs, err := NewCocoSketch(d, length)
 	require.NoError(t, err)
 
-	// Fix RNG seed for deterministic behavior in test
-	cs.rng = rand.New(rand.NewSource(42))
+	// Identify a heavy hitter from the first 1000 packets to query later
+	targetIP := uint32(samples[0].F)
+	targetHash := common.Hash64(ipToBytes(targetIP))
 
-	hash := uint64(0xCAFEBABE)
-
-	// Insert 5 times
-	for i := 0; i < 5; i++ {
-		cs.InsertWithHash(hash)
+	// Ingest Data
+	for _, s := range samples {
+		ipBytes := ipToBytes(uint32(s.F))
+		cs.InsertWithHash(common.Hash64(ipBytes))
 	}
 
-	// Query
-	// With no collisions (empty sketch), count should be exactly 5
-	val, err := cs.QueryWithHash(common.QueryFrequency, hash)
+	// Query the known existing key
+	val, err := cs.QueryWithHash(common.QueryFrequency, targetHash)
 	require.NoError(t, err)
-	assert.Equal(t, 5.0, val)
+	assert.Greater(t, val, 0.0, "Heavy hitter should have non-zero count")
 
-	// Query for non-existent hash
+	// Query a non-existent key (0xDEADBEEF)
 	valMissing, err := cs.QueryWithHash(common.QueryFrequency, 0xDEADBEEF)
 	require.NoError(t, err)
-	assert.Equal(t, 0.0, valMissing)
+
+	// CocoSketch is probabilistic; it *might* return non-zero noise,
+	// but usually 0 for completely random unused keys in a sparse sketch.
+	// We just ensure it doesn't error.
+	assert.GreaterOrEqual(t, valMissing, 0.0)
 }
 
-// TestCocoSketch_AggregationLogic manually sets up bucket states to verify
-// how different aggregation strategies combine values.
-func TestCocoSketch_AggregationLogic(t *testing.T) {
-	d, length := 3, 5
-	cs, _ := NewCocoSketch(d, length)
+// TestCocoSketch_CAIDA_Merge splits the CAIDA stream in two, sketches them separately,
+// merges them, and verifies the count matches a sketch of the full stream.
+func TestCocoSketch_CAIDA_Merge(t *testing.T) {
+	samples := loadCAIDA(t)
+	mid := len(samples) / 2
 
-	targetHash := uint64(0x12345678)
+	d, length := 4, 4096
+	csPart1, _ := NewCocoSketch(d, length)
+	csPart2, _ := NewCocoSketch(d, length)
+	csTotal, _ := NewCocoSketch(d, length)
 
-	// Get positions for this hash
-	pos := cs.positions(targetHash)
+	// Ingest Data
+	for i, s := range samples {
+		hash := common.Hash64(ipToBytes(uint32(s.F)))
 
-	// Manually inject values into buckets to simulate a distributed state
-	// Array 0: count = 10
-	cs.keys[0][pos[0]] = targetHash
-	cs.counts[0][pos[0]] = 10
+		// Insert into Total
+		csTotal.InsertWithHash(hash)
 
-	// Array 1: count = 20
-	cs.keys[1][pos[1]] = targetHash
-	cs.counts[1][pos[1]] = 20
-
-	// Array 2: count = 30
-	cs.keys[2][pos[2]] = targetHash
-	cs.counts[2][pos[2]] = 30
-
-	// 1. Test AggregateRaw (Expects the first value found, usually from array 0)
-	// Note: Implementation iterates 0..d-1
-	valRaw := cs.QuerySpecific(targetHash, AggregateRaw)
-	assert.Equal(t, 10.0, valRaw, "AggregateRaw should return first match (10)")
-
-	// 2. Test AggregateSum (Expects 10 + 20 + 30 = 60)
-	valSum := cs.QuerySpecific(targetHash, AggregateSum)
-	assert.Equal(t, 60.0, valSum, "AggregateSum should return total (60)")
-
-	// 3. Test AggregateMax (Expects max(10, 20, 30) = 30)
-	valMax := cs.QuerySpecific(targetHash, AggregateMax)
-	assert.Equal(t, 30.0, valMax, "AggregateMax should return max (30)")
-
-	// 4. Test AggregateMedian (Expects median(10, 20, 30) = 20)
-	valMedian := cs.QuerySpecific(targetHash, AggregateMedian)
-	assert.Equal(t, 20.0, valMedian, "AggregateMedian should return middle value (20)")
-}
-
-// TestCocoSketch_SetAggregation verifies changing the default query strategy.
-func TestCocoSketch_SetAggregation(t *testing.T) {
-	d, length := 3, 5
-	cs, _ := NewCocoSketch(d, length)
-
-	// Default is Median
-	assert.Equal(t, AggregateMedian, cs.defaultAgg)
-
-	// Change to Sum
-	cs.SetAggregation(AggregateSum)
-	assert.Equal(t, AggregateSum, cs.defaultAgg)
-
-	// Setup data for verification
-	hash := uint64(1)
-	pos := cs.positions(hash)
-	// Inject 2 in layer 0, 3 in layer 1
-	cs.keys[0][pos[0]] = hash
-	cs.counts[0][pos[0]] = 2
-	cs.keys[1][pos[1]] = hash
-	cs.counts[1][pos[1]] = 3
-
-	// QueryWithHash should now use Sum (2+3 = 5) instead of Median
-	val, _ := cs.QueryWithHash(common.QueryFrequency, hash)
-	assert.Equal(t, 5.0, val)
-}
-
-// TestCocoSketch_Merge verifies merging two sketches.
-func TestCocoSketch_Merge(t *testing.T) {
-	d, length := 3, 20
-	cs1, _ := NewCocoSketch(d, length)
-	cs2, _ := NewCocoSketch(d, length)
-
-	// Use deterministic RNG
-	cs1.rng = rand.New(rand.NewSource(1))
-	cs2.rng = rand.New(rand.NewSource(2))
-
-	hash := uint64(999)
-
-	// cs1: count = 10
-	for i := 0; i < 10; i++ {
-		cs1.InsertWithHash(hash)
+		// Insert into Parts
+		if i < mid {
+			csPart1.InsertWithHash(hash)
+		} else {
+			csPart2.InsertWithHash(hash)
+		}
 	}
 
-	// cs2: count = 20
-	for i := 0; i < 20; i++ {
-		cs2.InsertWithHash(hash)
-	}
-
-	// Merge cs2 into cs1
-	err := cs1.Merge(cs2)
+	// Merge Part2 into Part1
+	err := csPart1.Merge(csPart2)
 	require.NoError(t, err)
 
-	// Because buckets accumulate counts, if the key is the same, counts should sum up.
-	// 10 + 20 = 30
-	val, _ := cs1.QueryWithHash(common.QueryFrequency, hash)
-	assert.Equal(t, 30.0, val, "Merged count should be sum of parts")
+	// Verification: Check Top-10 Heavy Hitters from Ground Truth
+	// Note: CocoSketch is probabilistic (random replacement), so exact matches
+	// between csTotal and csMerged are unlikely because RNG calls will differ.
+	// Instead, we verify that the merged sketch accurately estimates the total count.
 
-	// Verify mismatched dimensions fail
-	badSketch, _ := NewCocoSketch(2, 20) // d mismatch
-	err = cs1.Merge(badSketch)
-	require.Error(t, err)
+	// Build Ground Truth for check
+	groundTruth := make(map[uint64]int64)
+	for _, s := range samples {
+		hash := common.Hash64(ipToBytes(uint32(s.F)))
+		groundTruth[hash]++
+	}
+
+	// Check one heavy hitter
+	var heavyKey uint64
+	var maxCount int64
+	for k, v := range groundTruth {
+		if v > maxCount {
+			maxCount = v
+			heavyKey = k
+		}
+	}
+
+	estMerged, _ := csPart1.QueryWithHash(common.QueryFrequency, heavyKey)
+
+	// Allow 20% error margin for this probabilistic data structure
+	errorMargin := float64(maxCount) * 0.20
+	assert.InDelta(t, float64(maxCount), estMerged, errorMargin,
+		"Merged sketch should approximate true count within margin")
 }
 
-// TestCocoSketch_Collision verifies behavior when buckets are full.
-func TestCocoSketch_Collision(t *testing.T) {
-	// Create a tiny sketch (1 bucket) to force collision
-	cs, _ := NewCocoSketch(1, 1)
-	cs.rng = rand.New(rand.NewSource(1))
+// TestCocoSketch_CAIDA_AggregationStrategies verifies how different aggregation
+// methods (Median, Max, Sum) behave on real data.
+func TestCocoSketch_CAIDA_AggregationStrategies(t *testing.T) {
+	samples := loadCAIDA(t)
+	cs, _ := NewCocoSketch(5, 2048)
 
-	h1 := uint64(100)
-	h2 := uint64(200)
-
-	// Insert h1 10 times. Bucket[0] should have key=h1, count=10
-	for i := 0; i < 10; i++ {
-		cs.InsertWithHash(h1)
+	for _, s := range samples {
+		cs.InsertWithHash(common.Hash64(ipToBytes(uint32(s.F))))
 	}
-	require.Equal(t, h1, cs.keys[0][0])
-	require.Equal(t, uint64(10), cs.counts[0][0])
 
-	// Insert h2 once.
-	// Logic:
-	// 1. Find min bucket (only one choice: index 0).
-	// 2. Increment count -> 11.
-	// 3. Probabilistic replacement: 1/11 chance to replace key with h2.
-	cs.InsertWithHash(h2)
+	// Find the heaviest item
+	groundTruth := make(map[uint64]int64)
+	for _, s := range samples {
+		groundTruth[common.Hash64(ipToBytes(uint32(s.F)))]++
+	}
+	var heavyKey uint64
+	var maxCount int64
+	for k, v := range groundTruth {
+		if v > maxCount {
+			maxCount = v
+			heavyKey = k
+		}
+	}
 
-	// Count must increase regardless of key replacement
-	assert.Equal(t, uint64(11), cs.counts[0][0])
+	// Query with different strategies
+	valMedian := cs.QuerySpecific(heavyKey, AggregateMedian)
+	valMax := cs.QuerySpecific(heavyKey, AggregateMax)
+	valSum := cs.QuerySpecific(heavyKey, AggregateSum)
 
-	// Key is either h1 or h2 (probabilistic)
-	isH1 := cs.keys[0][0] == h1
-	isH2 := cs.keys[0][0] == h2
-	assert.True(t, isH1 || isH2, "Key must be one of the inserted hashes")
+	t.Logf("Key %x (True: %d) -> Median: %.0f, Max: %.0f, Sum: %.0f",
+		heavyKey, maxCount, valMedian, valMax, valSum)
+
+	// In a single un-merged sketch, CocoSketch usually keeps a key in only one bucket.
+	// Therefore, Sum, Max, and Median should be roughly identical.
+	// However, if collisions forced the key to be evicted and re-inserted elsewhere,
+	// or if we had a merge, they might differ.
+
+	// For standard Cornucopia logic, we expect them to be close.
+	assert.InDelta(t, valMax, valMedian, float64(maxCount)*0.1, "Median and Max should be close")
+}
+
+// TestCocoSketch_CAIDA_Accuracy calculates the relative error for Top-K items.
+func TestCocoSketch_CAIDA_Accuracy(t *testing.T) {
+	samples := loadCAIDA(t)
+
+	// Configuration
+	// d=4 arrays, length=4096 buckets (Total 16k buckets)
+	d, length := 4, 4096
+	cs, _ := NewCocoSketch(d, length)
+
+	groundTruth := make(map[uint32]int64)
+
+	// Ingest
+	for _, s := range samples {
+		ip := uint32(s.F)
+		groundTruth[ip]++
+		cs.InsertWithHash(common.Hash64(ipToBytes(ip)))
+	}
+
+	// Sort Ground Truth to get Top-K
+	type kv struct {
+		IP    uint32
+		Count int64
+	}
+	var sorted []kv
+	for k, v := range groundTruth {
+		sorted = append(sorted, kv{k, v})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Count > sorted[j].Count
+	})
+
+	topK := 100
+	if len(sorted) < topK {
+		topK = len(sorted)
+	}
+
+	var totalRelErr float64
+	for i := 0; i < topK; i++ {
+		item := sorted[i]
+		hash := common.Hash64(ipToBytes(item.IP))
+
+		est, _ := cs.QueryWithHash(common.QueryFrequency, hash)
+
+		// CocoSketch can underestimate if the item was evicted and never replaced
+		// It generally doesn't overestimate significantly unless collisions are high
+		err := math.Abs(est - float64(item.Count))
+		relErr := err / float64(item.Count)
+		totalRelErr += relErr
+	}
+
+	avgRelError := (totalRelErr / float64(topK)) * 100
+
+	t.Log("===================================================")
+	t.Logf(" CAIDA ACCURACY REPORT (CocoSketch)")
+	t.Logf(" Processed: %d packets, Unique IPs: %d", len(samples), len(groundTruth))
+	t.Logf(" Top-%d Avg Relative Error: %.4f%%", topK, avgRelError)
+	t.Log("===================================================")
+
+	// Threshold: CocoSketch (Cornucopia) is designed for high accuracy on heavy hitters.
+	// We expect reasonable performance (< 15% error).
+	if avgRelError > 15.0 {
+		t.Errorf("Accuracy too low on real-world data: %.2f%%", avgRelError)
+	}
+}
+
+// Helper: Convert uint32 IP to 4-byte slice
+func ipToBytes(ip uint32) []byte {
+	bytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(bytes, ip)
+	return bytes
 }

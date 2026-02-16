@@ -2,6 +2,7 @@ package countsketch
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"math/bits"
 	"sort"
@@ -17,6 +18,12 @@ const CS_COL_NO_Univ_MICE int = 512
 const TOPK_SIZE int = 100
 const TOPK_SIZE_MICE int = 100
 const TOPK_SIZE2 int = 200
+
+// Default constants if user provides no arguments
+const (
+	DefaultRows = 5
+	DefaultCols = 2048
+)
 
 type CountSketch struct {
 	Rows int
@@ -34,8 +41,28 @@ type CountSketch struct {
 }
 
 // NewCountSketch creates a new CountSketch.
-// Rows and Cols are configurable, but constants are provided for standard sizes.
-func NewCountSketch(rows, cols int) (*CountSketch, error) {
+// Usage:
+//
+//	NewCountSketch()             -> Uses defaults (5, 2048)
+//	NewCountSketch(5, 1024)      -> Uses custom (5, 1024)
+func NewCountSketch(dims ...int) (*CountSketch, error) {
+	// 1. Determine Dimensions
+	var rows, cols int
+
+	switch len(dims) {
+	case 0:
+		// Case A: User didn't specify dimensions -> Use Defaults
+		rows = DefaultRows
+		cols = DefaultCols
+	case 2:
+		// Case B: User specified dimensions -> Use provided values
+		rows = dims[0]
+		cols = dims[1]
+	default:
+		return nil, errors.New("invalid usage: NewCountSketch() takes 0 arguments (defaults) or 2 arguments (rows, cols)")
+	}
+
+	// 2. Validate Dimensions
 	if rows <= 0 || cols <= 0 {
 		return nil, errors.New("rows and cols must be positive")
 	}
@@ -45,11 +72,6 @@ func NewCountSketch(rows, cols int) (*CountSketch, error) {
 		return nil, errors.New("cols must be a power of two")
 	}
 
-	count := make([][]float64, rows)
-	for r := 0; r < rows; r++ {
-		count[r] = make([]float64, cols)
-	}
-
 	// Calculate bits needed per row to derive column index
 	bitsPerRow := uint(bits.TrailingZeros(uint(cols)))
 
@@ -57,7 +79,13 @@ func NewCountSketch(rows, cols int) (*CountSketch, error) {
 	// Need: rows * (bitsPerRow + 1_sign_bit)
 	totalBitsNeeded := uint(rows) * (bitsPerRow + 1)
 	if totalBitsNeeded > 64 {
-		return nil, errors.New("parameters too large for single 64-bit hash derivation")
+		return nil, fmt.Errorf("parameters too large for single 64-bit hash: needed %d bits > 64", totalBitsNeeded)
+	}
+
+	// 3. Initialize Structure
+	count := make([][]float64, rows)
+	for r := 0; r < rows; r++ {
+		count[r] = make([]float64, cols)
 	}
 
 	return &CountSketch{
