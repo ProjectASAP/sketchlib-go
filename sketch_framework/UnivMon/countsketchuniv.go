@@ -21,9 +21,6 @@ func NewCountSketchUniv(row int, col int) (s *CountSketchUniv, err error) {
 		return nil, errors.New("CountSketchUniv New: values of row and col should be positive")
 	}
 
-	// Limit row limit removed (because test cases might request 5, don't force down to 5 if pool logic is correct).
-	// However, common.DeriveIndex indeed has efficiency limits.
-	// We leave this limit if it is indeed needed for hashing, but ensure memory allocation is correct.
 	if row > 5 {
 		row = 5
 	}
@@ -33,7 +30,7 @@ func NewCountSketchUniv(row int, col int) (s *CountSketchUniv, err error) {
 		col: col,
 	}
 
-	// Fixed Pool Logic: Check Row AND Col
+	// Fixed Pool Logic
 	if row == CS_ROW_NO_Univ_ELEPHANT && col == CS_COL_NO_Univ_ELEPHANT {
 		s.count = iarr2Pool_ele.Get()
 		s.l2 = iarrPool_ele.Get()
@@ -41,7 +38,6 @@ func NewCountSketchUniv(row int, col int) (s *CountSketchUniv, err error) {
 		s.count = iarr2Pool_mice.Get()
 		s.l2 = iarrPool_mice.Get()
 	} else {
-		// Fallback: If custom size (like in unit tests), create new array manually
 		s.count = make([][]int64, row)
 		for r := 0; r < row; r++ {
 			s.count[r] = make([]int64, col)
@@ -51,15 +47,14 @@ func NewCountSketchUniv(row int, col int) (s *CountSketchUniv, err error) {
 
 	return s, nil
 }
+
 func (s *CountSketchUniv) TypeName() string {
 	return "CountSketchUniv"
 }
 
-// CleanCountSketchUniv resets counters
 func (s *CountSketchUniv) CleanCountSketchUniv() error {
 	for r := 0; r < s.row; r++ {
 		s.count[r][0] = 0
-		// Array zeroing optimization
 		for c := 1; c < s.col; c *= 2 {
 			copy(s.count[r][c:], s.count[r][:c])
 		}
@@ -68,17 +63,11 @@ func (s *CountSketchUniv) CleanCountSketchUniv() error {
 	return nil
 }
 
-// InsertWithHash implements the common.Sketch interface
-// Default value = 1
 func (s *CountSketchUniv) InsertWithHash(hash uint64) {
 	s.UpdateWithHash(hash, 1)
 }
 
-// QueryWithHash implements the common.Sketch interface
-// Returns Frequency Count estimation
-// QueryWithHash implements the common.Sketch interface
 func (s *CountSketchUniv) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
-	// [FIX] Handle both Frequency (iota 0) and Sum (iota 1) as point queries
 	if q == common.QueryFrequency || q == common.QuerySum {
 		return float64(s.EstimateHash(hash)), nil
 	}
@@ -88,8 +77,9 @@ func (s *CountSketchUniv) QueryWithHash(q common.QueryType, hash uint64) (float6
 	return 0, common.ErrUnsupportedQuery
 }
 
+// Merge combines another sketch into this one.
+// FIX: We must recalculate the L2 norm row by row.
 func (s *CountSketchUniv) Merge(other common.Sketch) error {
-	// Casting check
 	o, ok := other.(*CountSketchUniv)
 	if !ok {
 		return errors.New("cannot merge different sketch types")
@@ -100,19 +90,22 @@ func (s *CountSketchUniv) Merge(other common.Sketch) error {
 	}
 
 	for i := 0; i < s.row; i++ {
+		var rowL2 int64 = 0
 		for j := 0; j < s.col; j++ {
 			s.count[i][j] += o.count[i][j]
+			// Recompute L2 sum-of-squares while we iterate
+			rowL2 += s.count[i][j] * s.count[i][j]
 		}
+		// Update the cached L2 value for this row
+		s.l2[i] = rowL2
 	}
 	return nil
 }
 
-// --- UnivMon Specific Methods (Weighted & Fused Update/Estimate) ---
+// --- UnivMon Specific Methods ---
 
-// UpdateWithHash performs an update with a specific value (weighted)
 func (s *CountSketchUniv) UpdateWithHash(hash uint64, count int64) {
 	for r := 0; r < s.row; r++ {
-		// Use common.DeriveIndex & DeriveSign
 		idx := common.DeriveIndex(hash, r, uint32(s.col))
 		sign := common.DeriveSign(hash, r)
 
@@ -122,8 +115,6 @@ func (s *CountSketchUniv) UpdateWithHash(hash uint64, count int64) {
 	}
 }
 
-// UpdateAndEstimateHash is the core of the UnivMon algorithm: update then return estimate
-// to update the Heavy Hitter Heap in that layer.
 func (s *CountSketchUniv) UpdateAndEstimateHash(hash uint64, count int64) int64 {
 	counters := make([]int64, s.row)
 
@@ -141,7 +132,6 @@ func (s *CountSketchUniv) UpdateAndEstimateHash(hash uint64, count int64) int64 
 	return MedianOfThree(counters[0], counters[1], counters[2])
 }
 
-// Version without L2 update (for optimization in upper UnivMon layers)
 func (s *CountSketchUniv) UpdateAndEstimateHashNoL2(hash uint64, count int64) int64 {
 	counters := make([]int64, s.row)
 	for r := 0; r < s.row; r++ {
@@ -164,7 +154,6 @@ func (s *CountSketchUniv) EstimateHash(hash uint64) int64 {
 	return MedianOfThree(counters[0], counters[1], counters[2])
 }
 
-// Helper to calculate L2 Norm
 func (s *CountSketchUniv) cs_l2() float64 {
 	f2_value := MedianOfThree(s.l2[0], s.l2[1], s.l2[2])
 	return math.Sqrt(float64(f2_value))

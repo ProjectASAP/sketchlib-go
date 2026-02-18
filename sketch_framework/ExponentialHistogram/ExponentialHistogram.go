@@ -2,13 +2,17 @@ package exponentialhistogram
 
 import (
 	"errors"
+	"math"
 	"sync"
 
 	"github.com/approx-telemetry/sketchlib-go/common"
 
 	// Import specific sketch implementations
 	univmon "github.com/approx-telemetry/sketchlib-go/sketch_framework/UnivMon"
+	cocosketch "github.com/approx-telemetry/sketchlib-go/sketches/CocoSketch"
+	countmin "github.com/approx-telemetry/sketchlib-go/sketches/CountMinSketch"
 	countsketch "github.com/approx-telemetry/sketchlib-go/sketches/CountSketch"
+	ddsketch "github.com/approx-telemetry/sketchlib-go/sketches/DDSketch"
 	hll "github.com/approx-telemetry/sketchlib-go/sketches/HLL"
 	kll "github.com/approx-telemetry/sketchlib-go/sketches/KLL"
 )
@@ -18,43 +22,60 @@ import (
 // ==============================================================================
 
 // Resettable allows sketches to be cleared and reused via sync.Pool.
-// Sketches like CocoSketch implement this. KLL/UnivMon should implement this for GC benefits.
+// Only implement this if the sketch has a working Clear/Reset method.
 type Resettable interface {
 	Clear()
 }
 
+// L2Provider interface for sketches that natively support L2 norm retrieval.
+type L2Provider interface {
+	GetL2() float64
+}
+
 // Bucket represents a single storage unit within the histogram.
-// We use a struct value (not pointer) for better cache locality in the slice.
 type Bucket struct {
 	Sketch  common.Sketch
 	MaxTime int64
 	MinTime int64
-	Count   int64 // Weight (powers of 2)
+	Size    int64   // Represents the number of merges/items
+	L2Mass  float64 // L2 Squared (Energy)
 }
+
+// SketchNorm defines the merge behavior.
+type SketchNorm int
+
+const (
+	NormL1 SketchNorm = iota
+	NormL2
+)
 
 // BaseEH is the generic engine for Exponential Histograms.
 type BaseEH struct {
-	buckets    []Bucket // Struct slice for contiguous memory
-	k          int      // Precision parameter
-	windowSize int64    // Sliding window duration
+	buckets    []Bucket
+	k          int
+	windowSize int64
+	norm       SketchNorm
 
-	// Factory function to create new empty sketches
+	// Function to calculate L2 for a sketch (only needed for NormL2).
+	l2Calc func(common.Sketch) float64
+
 	sketchFactory func() (common.Sketch, error)
-
-	// Pool for recycling sketches to reduce GC pressure
-	pool *sync.Pool
-
-	mu sync.RWMutex
+	pool          *sync.Pool
+	mu            sync.RWMutex
 }
 
-// initBase initializes the engine configuration.
-func (eh *BaseEH) initBase(k int, windowSize int64, factory func() (common.Sketch, error)) {
+// initBase initializes the engine.
+func (eh *BaseEH) initBase(k int, windowSize int64, norm SketchNorm, factory func() (common.Sketch, error), l2Calc func(common.Sketch) float64) {
+	if k < 1 {
+		k = 1
+	}
 	eh.k = k
 	eh.windowSize = windowSize
+	eh.norm = norm
+	eh.l2Calc = l2Calc
 	eh.sketchFactory = factory
-	eh.buckets = make([]Bucket, 0, 32) // Pre-allocate some space
+	eh.buckets = make([]Bucket, 0, 32)
 
-	// Initialize sync.Pool
 	eh.pool = &sync.Pool{
 		New: func() interface{} {
 			s, err := factory()
@@ -66,23 +87,32 @@ func (eh *BaseEH) initBase(k int, windowSize int64, factory func() (common.Sketc
 	}
 }
 
-// getSketch retrieves a sketch from the pool or creates a new one.
 func (eh *BaseEH) getSketch() (common.Sketch, error) {
 	if item := eh.pool.Get(); item != nil {
 		return item.(common.Sketch), nil
 	}
-	// Fallback if pool fails (factory error handled in New)
 	return eh.sketchFactory()
 }
 
-// putSketch resets and returns a sketch to the pool.
 func (eh *BaseEH) putSketch(s common.Sketch) {
-	// Only pool if the sketch can be cleared to a clean state.
+	// Only pool if the sketch can be explicitly cleared.
 	if r, ok := s.(Resettable); ok {
 		r.Clear()
 		eh.pool.Put(s)
 	}
-	// If not resettable, let GC handle it.
+}
+
+// computeL2Mass calculates the metric for NormL2 sketches.
+func (eh *BaseEH) computeL2Mass(s common.Sketch) float64 {
+	val := 0.0
+	if eh.l2Calc != nil {
+		val = eh.l2Calc(s)
+	} else if p, ok := s.(L2Provider); ok {
+		val = p.GetL2()
+	} else {
+		val = 1.0
+	}
+	return val * val
 }
 
 // Update inserts a new sketch into the histogram.
@@ -90,195 +120,382 @@ func (eh *BaseEH) Update(newSketch common.Sketch, timestamp int64) error {
 	eh.mu.Lock()
 	defer eh.mu.Unlock()
 
-	// 1. Remove expired buckets
 	eh.expireBuckets(timestamp)
 
-	// 2. Create a new bucket (Size = 1)
+	l2Mass := 0.0
+	if eh.norm == NormL2 {
+		l2Mass = eh.computeL2Mass(newSketch)
+	}
+
 	newBucket := Bucket{
 		Sketch:  newSketch,
 		MaxTime: timestamp,
 		MinTime: timestamp,
-		Count:   1,
+		Size:    1,
+		L2Mass:  l2Mass,
 	}
 
-	// Append to the end (Newest)
 	eh.buckets = append(eh.buckets, newBucket)
 
-	// 3. O(N) Compression
-	return eh.compress()
+	if eh.norm == NormL1 {
+		return eh.compressCountInvariant()
+	}
+	return eh.compressL2Invariant()
 }
 
-// expireBuckets removes buckets older than the window.
 func (eh *BaseEH) expireBuckets(now int64) {
 	threshold := now - eh.windowSize
 	cutIdx := 0
 	for i := range eh.buckets {
-		// buckets[i] is a value type, access fields directly
 		if eh.buckets[i].MaxTime < threshold {
-			// Recycle the sketch before dropping the bucket
 			eh.putSketch(eh.buckets[i].Sketch)
 			cutIdx = i + 1
 		} else {
 			break
 		}
 	}
-
 	if cutIdx > 0 {
-		// Shift remaining buckets to front (copy for struct slice)
-		// This avoids memory leaks in pointer slices, but here it's just data movement.
 		copy(eh.buckets, eh.buckets[cutIdx:])
-		// Truncate length
 		eh.buckets = eh.buckets[:len(eh.buckets)-cutIdx]
 	}
 }
 
-// compress uses O(N) backward scanning to merge buckets.
-// It merges the oldest two buckets of the same size when the limit is exceeded.
-func (eh *BaseEH) compress() error {
-	// Standard EH Limit: k/2 + 1 buckets of the same size.
-	limit := eh.k/2 + 1
-
-	// Scan backwards from newest to oldest
+// compressCountInvariant implements "k/2 + 2" buffer logic for L1 sketches
+func (eh *BaseEH) compressCountInvariant() error {
+	limit := float64(eh.k)/2.0 + 2.0
 	idx := len(eh.buckets) - 1
 
 	for idx > 0 {
-		currentSize := eh.buckets[idx].Count
-
-		// Find the start of the block of 'currentSize' (scanning left)
+		currentSize := eh.buckets[idx].Size
 		startIdx := idx
-		for startIdx > 0 && eh.buckets[startIdx-1].Count == currentSize {
+		for startIdx > 0 && eh.buckets[startIdx-1].Size == currentSize {
 			startIdx--
 		}
+		count := float64(idx - startIdx + 1)
 
-		// Count of buckets with 'currentSize'
-		count := idx - startIdx + 1
+		if count >= limit {
+			// Merge the two OLDEST buckets of this size block
+			targetIdx := startIdx
+			sourceIdx := startIdx + 1
 
-		if count > limit {
-			// Merge the two OLDEST buckets of this size (startIdx and startIdx+1).
-			// We merge buckets[startIdx] INTO buckets[startIdx+1] to reuse the newer sketch.
-			// buckets is sorted Old -> New.
+			bTarget := &eh.buckets[targetIdx]
+			bSource := &eh.buckets[sourceIdx]
 
-			// Note: Accessing slice directly modifies the struct if we use pointers,
-			// but here we have a slice of structs. We need to be careful with updates.
-
-			// Target: buckets[startIdx+1] (Newer)
-			// Source: buckets[startIdx]   (Older)
-
-			err := eh.buckets[startIdx+1].Sketch.Merge(eh.buckets[startIdx].Sketch)
+			err := bTarget.Sketch.Merge(bSource.Sketch)
 			if err != nil {
 				return err
 			}
 
-			// Update metadata of the survivor (Newer)
-			eh.buckets[startIdx+1].Count += eh.buckets[startIdx].Count
-			eh.buckets[startIdx+1].MinTime = eh.buckets[startIdx].MinTime // Extend range backwards
+			bTarget.Size += bSource.Size
+			bTarget.L2Mass += bSource.L2Mass
 
-			// Recycle the consumed sketch
-			eh.putSketch(eh.buckets[startIdx].Sketch)
+			if bSource.MaxTime > bTarget.MaxTime {
+				bTarget.MaxTime = bSource.MaxTime
+			}
+			if bSource.MinTime < bTarget.MinTime {
+				bTarget.MinTime = bSource.MinTime
+			}
 
-			// Remove buckets[startIdx] from the slice
-			// Shift everything left by 1 starting from startIdx
-			copy(eh.buckets[startIdx:], eh.buckets[startIdx+1:])
+			eh.putSketch(bSource.Sketch)
+			copy(eh.buckets[sourceIdx:], eh.buckets[sourceIdx+1:])
 			eh.buckets = eh.buckets[:len(eh.buckets)-1]
 
-			// The merged bucket is now at startIdx. It has double the size.
-			// We must re-evaluate the block at startIdx because it might now cascade.
-			// Reset idx to startIdx (clamped) to check the new size group.
 			idx = startIdx
 			if idx >= len(eh.buckets) {
 				idx = len(eh.buckets) - 1
 			}
 			continue
 		}
-
-		// Move to the next block (older buckets)
 		idx = startIdx - 1
 	}
 	return nil
 }
 
-// QueryInterval returns a merged Sketch covering [t1, t2] with symmetric boundary adjustment.
+// compressL2Invariant implements error threshold logic for L2 sketches
+func (eh *BaseEH) compressL2Invariant() error {
+	sumL2Newer := 0.0
+	thresholdFactor := 1.0 / float64(eh.k)
+	epsilon := 1e-9
+
+	for {
+		mergeIdx := -1
+		sumL2Newer = 0.0
+
+		for i := len(eh.buckets) - 2; i >= 0; i-- {
+			bOlder := &eh.buckets[i]
+			bNewer := &eh.buckets[i+1]
+
+			pairL2 := bOlder.L2Mass + bNewer.L2Mass
+			threshold := sumL2Newer * thresholdFactor
+
+			if pairL2 <= threshold+epsilon {
+				mergeIdx = i
+				break
+			}
+			sumL2Newer += bNewer.L2Mass
+		}
+
+		if mergeIdx == -1 {
+			break
+		}
+
+		targetIdx := mergeIdx
+		sourceIdx := mergeIdx + 1
+
+		bTarget := &eh.buckets[targetIdx]
+		bSource := &eh.buckets[sourceIdx]
+
+		err := bTarget.Sketch.Merge(bSource.Sketch)
+		if err != nil {
+			return err
+		}
+
+		bTarget.Size += bSource.Size
+		bTarget.MaxTime = bSource.MaxTime
+		bTarget.L2Mass = eh.computeL2Mass(bTarget.Sketch)
+
+		eh.putSketch(bSource.Sketch)
+		copy(eh.buckets[sourceIdx:], eh.buckets[sourceIdx+1:])
+		eh.buckets = eh.buckets[:len(eh.buckets)-1]
+	}
+	return nil
+}
+
 func (eh *BaseEH) QueryInterval(t1, t2 int64) (common.Sketch, error) {
 	eh.mu.RLock()
 	defer eh.mu.RUnlock()
 
-	// 1. Find overlapping range [startIdx, endIdx]
-	startIdx := -1
-	endIdx := -1
+	if len(eh.buckets) == 0 {
+		return nil, errors.New("no data found")
+	}
 
-	for i := range eh.buckets {
-		b := &eh.buckets[i]
-		// Overlap condition: Bucket [Min, Max] intersects [t1, t2]
-		// i.e., Max >= t1 AND Min <= t2
-		if b.MaxTime >= t1 && b.MinTime <= t2 {
-			if startIdx == -1 {
-				startIdx = i
-			}
-			endIdx = i
+	fromVolume := 0
+	toVolume := 0
+	foundStart := false
+
+	for i, b := range eh.buckets {
+		if t1 >= b.MinTime && t1 <= b.MaxTime {
+			fromVolume = i
+			foundStart = true
+		}
+		if t2 >= b.MinTime && t2 <= b.MaxTime {
+			toVolume = i
 		}
 	}
 
-	if startIdx == -1 {
-		return nil, errors.New("no data found in interval")
+	lastIdx := len(eh.buckets) - 1
+	if t2 > eh.buckets[lastIdx].MaxTime {
+		toVolume = lastIdx
+	}
+	if t1 < eh.buckets[0].MinTime {
+		fromVolume = 0
+		foundStart = true
 	}
 
-	// 2. Symmetric Boundary Adjustment Heuristic
-	// "If (t - Min) > (bucket_size / 2)" logic
+	if foundStart {
+		b := &eh.buckets[fromVolume]
+		diffMin := math.Abs(float64(t1 - b.MinTime))
+		diffMax := math.Abs(float64(t1 - b.MaxTime))
 
-	// A. Adjust Start (t1)
-	// If t1 cuts off more than half of the first bucket, skip it.
-	firstB := &eh.buckets[startIdx]
-	bucketSizeStart := firstB.MaxTime - firstB.MinTime
-	if (t1 - firstB.MinTime) > (bucketSizeStart / 2) {
-		startIdx++
+		if diffMin > diffMax && fromVolume+1 < len(eh.buckets) {
+			fromVolume++
+		}
 	}
 
-	// Check if range became invalid
-	if startIdx > endIdx {
-		return nil, errors.New("no data found after start boundary adjustment")
+	if toVolume >= len(eh.buckets) {
+		toVolume = len(eh.buckets) - 1
 	}
 
-	// B. Adjust End (t2)
-	// If t2 includes less than half of the last bucket, ignore it.
-	// We want the part [Min, t2]. If (t2 - Min) < Size/2, it's too small.
-	lastB := &eh.buckets[endIdx]
-	bucketSizeEnd := lastB.MaxTime - lastB.MinTime
-	if (t2 - lastB.MinTime) < (bucketSizeEnd / 2) {
-		endIdx--
+	if fromVolume > toVolume {
+		if fromVolume < len(eh.buckets) {
+			res, err := eh.getSketch()
+			if err != nil {
+				return nil, err
+			}
+			res.Merge(eh.buckets[fromVolume].Sketch)
+			return res, nil
+		}
+		return nil, errors.New("invalid interval")
 	}
 
-	if startIdx > endIdx {
-		return nil, errors.New("no data found after end boundary adjustment")
-	}
-
-	// 3. Create Result Accumulator from Pool
 	res, err := eh.getSketch()
 	if err != nil {
 		return nil, err
 	}
 
-	// 4. Merge applicable buckets
-	// Note: If 'res' comes from pool, it might be the same type but we need to ensure
-	// it's empty. putSketch calls Clear(), so getSketch returns clean sketches (if Resettable).
-	// If not resettable, getSketch calls factory, so it's fresh.
+	if err := res.Merge(eh.buckets[fromVolume].Sketch); err != nil {
+		return nil, err
+	}
 
-	count := 0
-	for i := startIdx; i <= endIdx; i++ {
+	for i := fromVolume + 1; i <= toVolume; i++ {
 		if err := res.Merge(eh.buckets[i].Sketch); err != nil {
-			// On error, try to return sketch to pool (optional, simplified here)
 			return nil, err
 		}
-		count++
 	}
 
 	return res, nil
 }
 
 // ==============================================================================
-// 2. IMPLEMENTATION WRAPPERS
+// 2. HYBRID SKETCH (Map -> UnivMon)
 // ==============================================================================
 
-// --- A. ExpoHistogramKLL (Quantiles) ---
+const DefaultMaxMapSize = 512
+
+type HybridSketch struct {
+	isSketch   bool
+	mapCounts  map[uint64]uint64
+	l2         float64
+	univSketch *univmon.UnivSketch
+
+	k, row, col, layer int
+	maxMapSize         int
+}
+
+func NewHybridSketch(k, row, col, layer, maxMapSize int) *HybridSketch {
+	return &HybridSketch{
+		isSketch:   false,
+		mapCounts:  make(map[uint64]uint64),
+		l2:         0.0,
+		k:          k,
+		row:        row,
+		col:        col,
+		layer:      layer,
+		maxMapSize: maxMapSize,
+	}
+}
+
+func (h *HybridSketch) InsertWithHash(hash uint64) {
+	if h.isSketch {
+		h.univSketch.InsertWithHash(hash)
+		return
+	}
+
+	v := h.mapCounts[hash]
+	h.mapCounts[hash]++
+	h.l2 += 2*float64(v) + 1
+
+	if 2*len(h.mapCounts) >= h.maxMapSize {
+		h.promoteToSketch()
+	}
+}
+
+func (h *HybridSketch) promoteToSketch() {
+	if h.isSketch {
+		return
+	}
+	sk, _ := univmon.NewUnivSketchPyramid(h.k, h.row, h.col, h.layer)
+	for hash, count := range h.mapCounts {
+		for i := uint64(0); i < count; i++ {
+			sk.InsertWithHash(hash)
+		}
+	}
+	h.univSketch = sk
+	h.mapCounts = nil
+	h.isSketch = true
+}
+
+func (h *HybridSketch) GetL2() float64 {
+	if h.isSketch {
+		l2, _ := h.univSketch.QueryWithHash(common.QuerySum2, 0)
+		return l2
+	}
+	return math.Sqrt(h.l2)
+}
+
+func (h *HybridSketch) GetL2Sq() float64 {
+	if h.isSketch {
+		l2, _ := h.univSketch.QueryWithHash(common.QuerySum2, 0)
+		return l2 * l2
+	}
+	return h.l2
+}
+
+func (h *HybridSketch) Merge(other common.Sketch) error {
+	o, ok := other.(*HybridSketch)
+	if !ok {
+		return errors.New("type mismatch")
+	}
+
+	if h.isSketch && o.isSketch {
+		return h.univSketch.Merge(o.univSketch)
+	}
+	if h.isSketch && !o.isSketch {
+		o.promoteToSketch()
+		return h.univSketch.Merge(o.univSketch)
+	}
+	if !h.isSketch && o.isSketch {
+		h.promoteToSketch()
+		return h.univSketch.Merge(o.univSketch)
+	}
+
+	for hash, countB := range o.mapCounts {
+		countA := h.mapCounts[hash]
+		oldSq := float64(countA * countA)
+		newSq := float64((countA + countB) * (countA + countB))
+		h.l2 = h.l2 - oldSq + newSq
+		h.mapCounts[hash] = countA + countB
+	}
+
+	if 2*len(h.mapCounts) >= h.maxMapSize {
+		h.promoteToSketch()
+	}
+	return nil
+}
+
+func (h *HybridSketch) TypeName() string { return "HybridSketch" }
+func (h *HybridSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+	if h.isSketch {
+		return h.univSketch.QueryWithHash(q, hash)
+	}
+	switch q {
+	case common.QueryFrequency:
+		return float64(h.mapCounts[hash]), nil
+	case common.QuerySum2:
+		return math.Sqrt(h.l2), nil
+	default:
+		return 0, nil
+	}
+}
+func (h *HybridSketch) Clear() {
+	h.isSketch = false
+	h.mapCounts = make(map[uint64]uint64)
+	h.l2 = 0
+	h.univSketch = nil
+}
+
+// ==============================================================================
+// 3. IMPLEMENTATION WRAPPERS
+// ==============================================================================
+
+// --- A. ExpoHistogramKLL (L1) ---
+
+type KLLAdapter struct {
+	*kll.KLLSketch
+}
+
+func (k *KLLAdapter) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+	if q == common.QueryQuantile {
+		qt := math.Float64frombits(hash)
+		// [FIX] Use CDF().Query() to retrieve the Value at Quantile (Inverse CDF)
+		// kll.Quantile(qt) returns the Rank of value 'qt', which is not what we want here.
+		return k.KLLSketch.CDF().Query(qt), nil
+	}
+	return 0, common.ErrUnsupportedQuery
+}
+
+func (k *KLLAdapter) Merge(other common.Sketch) error {
+	o, ok := other.(*KLLAdapter)
+	if !ok {
+		return errors.New("cannot merge different sketch types")
+	}
+	k.KLLSketch.Merge(o.KLLSketch)
+	return nil
+}
+
+func (k *KLLAdapter) InsertWithHash(hash uint64) {}
+
+// NOTE: KLLAdapter does NOT implement Clear(), disabling pooling.
 
 type ExpoHistogramKLL struct {
 	BaseEH
@@ -288,46 +505,57 @@ type ExpoHistogramKLL struct {
 func NewExpoHistogramKLL(ehK int, windowSize int64, kllK int) *ExpoHistogramKLL {
 	eh := &ExpoHistogramKLL{kllK: kllK}
 	factory := func() (common.Sketch, error) {
-		return kll.NewKLLSketch(kllK)
+		sk, err := kll.NewKLLSketch(kllK)
+		if err != nil {
+			return nil, err
+		}
+		return &KLLAdapter{KLLSketch: sk}, nil
 	}
-	eh.initBase(ehK, windowSize, factory)
+	eh.initBase(ehK, windowSize, NormL1, factory, nil)
 	return eh
 }
 
 func (eh *ExpoHistogramKLL) UpdateValue(val float64, timestamp int64) error {
-	// We could optimize this by pooling the single-item sketches too,
-	// but usually Update is dominated by compression, not the single insert.
 	s, _ := kll.NewKLLSketch(eh.kllK)
 	s.Insert(val)
-	return eh.Update(s, timestamp)
+	return eh.Update(&KLLAdapter{KLLSketch: s}, timestamp)
 }
 
-// --- B. ExpoHistogramUniv (Heavy Hitters, Entropy) ---
-
+// --- B. ExpoHistogramUniv (L2 / Hybrid) ---
 type ExpoHistogramUniv struct {
 	BaseEH
 	univK, univRow, univCol, univLayer int
+	maxMapSize                         int
 }
 
 func NewExpoHistogramUniv(ehK int, windowSize int64, k, row, col, layer int) *ExpoHistogramUniv {
 	eh := &ExpoHistogramUniv{
-		univK: k, univRow: row, univCol: col, univLayer: layer,
+		univK:      k,
+		univRow:    row,
+		univCol:    col,
+		univLayer:  layer,
+		maxMapSize: DefaultMaxMapSize,
 	}
 	factory := func() (common.Sketch, error) {
-		return univmon.NewUnivSketchPyramid(k, row, col, layer)
+		return NewHybridSketch(k, row, col, layer, eh.maxMapSize), nil
 	}
-	eh.initBase(ehK, windowSize, factory)
+	l2Calc := func(s common.Sketch) float64 {
+		if h, ok := s.(*HybridSketch); ok {
+			return h.GetL2()
+		}
+		return 1.0
+	}
+	eh.initBase(ehK, windowSize, NormL2, factory, l2Calc)
 	return eh
 }
 
 func (eh *ExpoHistogramUniv) UpdateItem(key string, timestamp int64) error {
-	s, _ := univmon.NewUnivSketchPyramid(eh.univK, eh.univRow, eh.univCol, eh.univLayer)
-	s.Update(common.FromString(key), 1)
+	s := NewHybridSketch(eh.univK, eh.univRow, eh.univCol, eh.univLayer, eh.maxMapSize)
+	s.InsertWithHash(common.FromString(key).Hash)
 	return eh.Update(s, timestamp)
 }
 
-// --- C. ExpoHistogramCountSketch (Frequency) ---
-
+// --- C. ExpoHistogramCountSketch (L1) ---
 type ExpoHistogramCountSketch struct {
 	BaseEH
 	rows int
@@ -337,7 +565,7 @@ type ExpoHistogramCountSketch struct {
 func NewExpoHistogramCountSketch(ehK int, windowSize int64, rows, cols int) *ExpoHistogramCountSketch {
 	eh := &ExpoHistogramCountSketch{rows: rows, cols: cols}
 	factory := func() (common.Sketch, error) { return countsketch.NewCountSketch(rows, cols) }
-	eh.initBase(ehK, windowSize, factory)
+	eh.initBase(ehK, windowSize, NormL1, factory, nil)
 	return eh
 }
 
@@ -347,8 +575,29 @@ func (eh *ExpoHistogramCountSketch) UpdateItem(key string, timestamp int64) erro
 	return eh.Update(s, timestamp)
 }
 
-// --- D. ExpoHistogramHLL (Cardinality) ---
+// --- D. ExpoHistogramCountMin (L1) ---
+type ExpoHistogramCountMin struct {
+	BaseEH
+	rows int
+	cols int
+}
 
+func NewExpoHistogramCountMin(ehK int, windowSize int64, rows, cols int) *ExpoHistogramCountMin {
+	eh := &ExpoHistogramCountMin{rows: rows, cols: cols}
+	factory := func() (common.Sketch, error) {
+		return countmin.NewCountMinSketch(rows, cols)
+	}
+	eh.initBase(ehK, windowSize, NormL1, factory, nil)
+	return eh
+}
+
+func (eh *ExpoHistogramCountMin) UpdateItem(key string, timestamp int64) error {
+	s, _ := countmin.NewCountMinSketch(eh.rows, eh.cols)
+	s.InsertWithHash(common.FromString(key).Hash)
+	return eh.Update(s, timestamp)
+}
+
+// --- E. ExpoHistogramHLL (L1) ---
 type ExpoHistogramHLL struct {
 	BaseEH
 }
@@ -358,7 +607,7 @@ func NewExpoHistogramHLL(ehK int, windowSize int64) *ExpoHistogramHLL {
 	factory := func() (common.Sketch, error) {
 		return hll.NewHyperLogLog(), nil
 	}
-	eh.initBase(ehK, windowSize, factory)
+	eh.initBase(ehK, windowSize, NormL1, factory, nil)
 	return eh
 }
 
@@ -368,8 +617,81 @@ func (eh *ExpoHistogramHLL) UpdateItem(key string, timestamp int64) error {
 	return eh.Update(s, timestamp)
 }
 
-// --- E. ExpoHistogramCount (Exact Counting) ---
+// --- F. ExpoHistogramDDS (L1) ---
+type DDAdapter struct {
+	*ddsketch.DDSketch
+}
 
+func (d *DDAdapter) Merge(other common.Sketch) error {
+	o, ok := other.(*DDAdapter)
+	if !ok {
+		return errors.New("cannot merge different sketch types")
+	}
+	return d.DDSketch.Merge(o.DDSketch)
+}
+func (d *DDAdapter) InsertWithHash(hash uint64) { /* No-op */ }
+
+// Supports QueryQuantile via bit-casting
+func (d *DDAdapter) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+	if q == common.QueryQuantile {
+		qt := math.Float64frombits(hash)
+		val, ok := d.DDSketch.GetValueAtQuantile(qt)
+		if !ok {
+			return 0, errors.New("ddsketch empty or invalid quantile")
+		}
+		return val, nil
+	}
+	return 0, errors.New("unsupported")
+}
+
+func (d *DDAdapter) TypeName() string { return "DDSketch" }
+
+// NOTE: Clear() REMOVED to disable pooling.
+
+type ExpoHistogramDDS struct {
+	BaseEH
+	alpha float64
+}
+
+func NewExpoHistogramDDS(ehK int, windowSize int64, alpha float64) *ExpoHistogramDDS {
+	eh := &ExpoHistogramDDS{alpha: alpha}
+	factory := func() (common.Sketch, error) {
+		return &DDAdapter{DDSketch: ddsketch.NewDDSketch(alpha)}, nil
+	}
+	eh.initBase(ehK, windowSize, NormL1, factory, nil)
+	return eh
+}
+
+func (eh *ExpoHistogramDDS) UpdateValue(val float64, timestamp int64) error {
+	adapter := &DDAdapter{DDSketch: ddsketch.NewDDSketch(eh.alpha)}
+	adapter.Add(val)
+	return eh.Update(adapter, timestamp)
+}
+
+// --- G. ExpoHistogramCoco (L1) ---
+type ExpoHistogramCoco struct {
+	BaseEH
+	d      int
+	length int
+}
+
+func NewExpoHistogramCoco(ehK int, windowSize int64, d, length int) *ExpoHistogramCoco {
+	eh := &ExpoHistogramCoco{d: d, length: length}
+	factory := func() (common.Sketch, error) {
+		return cocosketch.NewCocoSketch(d, length)
+	}
+	eh.initBase(ehK, windowSize, NormL1, factory, nil)
+	return eh
+}
+
+func (eh *ExpoHistogramCoco) UpdateItem(key string, timestamp int64) error {
+	s, _ := cocosketch.NewCocoSketch(eh.d, eh.length)
+	h := common.FromString(key).Hash
+	s.InsertWithHash(h)
+	return eh.Update(s, timestamp)
+}
+
+// --- H. ExpoHistogramCount (L1) ---
 type SimpleCounter struct {
 	Val int64
 }
@@ -387,7 +709,7 @@ func (s *SimpleCounter) QueryWithHash(q common.QueryType, h uint64) (float64, er
 	return float64(s.Val), nil
 }
 func (s *SimpleCounter) TypeName() string { return "simple_counter" }
-func (s *SimpleCounter) Clear()           { s.Val = 0 } // Implement Resettable
+func (s *SimpleCounter) Clear()           { s.Val = 0 }
 
 type ExpoHistogramCount struct {
 	BaseEH
@@ -396,7 +718,7 @@ type ExpoHistogramCount struct {
 func NewExpoHistogramCount(ehK int, windowSize int64) *ExpoHistogramCount {
 	eh := &ExpoHistogramCount{}
 	factory := func() (common.Sketch, error) { return &SimpleCounter{Val: 0}, nil }
-	eh.initBase(ehK, windowSize, factory)
+	eh.initBase(ehK, windowSize, NormL1, factory, nil)
 	return eh
 }
 
