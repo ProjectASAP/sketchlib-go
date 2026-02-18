@@ -1,17 +1,49 @@
 package univmon
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
-	"math/rand"
-	"strconv"
 	"testing"
 	"time"
 
 	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/approx-telemetry/sketchlib-go/testdata"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// =====================================================
+// HELPER: Load CAIDA Data (Local to this file)
+// =====================================================
+
+func loadCaidaCS(t *testing.T) ([]string, int) {
+	// Adjust path relative to where test is run (sketch_framework/UnivMon)
+	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+
+	samples, err := testdata.ReadCAIDAStream(file1, "")
+	if err != nil {
+		t.Skipf("Skipping CAIDA test: %v", err)
+	}
+	if len(samples) == 0 {
+		t.Fatal("No samples loaded from CAIDA files")
+	}
+
+	keys := make([]string, len(samples))
+	for i, s := range samples {
+		// Use raw IP bytes as unique key source (formatted as hex string for consistency)
+		ipUint := uint32(s.F)
+		ipBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(ipBytes, ipUint)
+		keys[i] = fmt.Sprintf("%x", ipBytes)
+	}
+
+	return keys, len(samples)
+}
+
+// =====================================================
+// UNIT TESTS
+// =====================================================
 
 // TestCountSketchUniv_Basic verifies basic operations: Create, Update, Query, Clean
 func TestCountSketchUniv_Basic(t *testing.T) {
@@ -44,7 +76,6 @@ func TestCountSketchUniv_Basic(t *testing.T) {
 	// 3. Update Loop
 	for _, c := range cases {
 		input := common.FromString(c.key)
-		// Using UpdateWithHash (can also use InsertWithHash for count=1)
 		cs.UpdateWithHash(input.Hash, c.cnt)
 	}
 
@@ -70,71 +101,6 @@ func TestCountSketchUniv_Basic(t *testing.T) {
 	require.NoError(t, err)
 	estAppleAfterClean, _ := cs.QueryWithHash(common.QueryFrequency, common.FromString("apple").Hash)
 	assert.Equal(t, 0.0, estAppleAfterClean, "Sketch must be empty after Clean")
-}
-
-// TestCSL2 tests L2 Norm estimation accuracy (Second Frequency Moment)
-// Adapted from your original test to match new API
-func TestCSL2(t *testing.T) {
-
-	// Setup Sketch
-	row := CS_ROW_NO_Univ_ELEPHANT
-	col := CS_COL_NO_Univ_ELEPHANT
-
-	t_now := time.Now()
-	cs, err := NewCountSketchUniv(row, col)
-	require.NoError(t, err)
-	t.Log("Setup time:", time.Since(t_now))
-
-	// Setup Synthetic Data (Zipf)
-	s_zipf := 2.0
-	v_zipf := 1.0
-	value_scale_local := 50000 // Adjust scale
-
-	// Using local random source for Zipf (Correct way)
-	zipf := rand.NewZipf(rand.New(rand.NewSource(time.Now().Unix())), s_zipf, v_zipf, uint64(value_scale_local))
-
-	// Ground Truth Calculation
-	l1Map := make(map[float64]float64)
-	t2 := 100000 // Number of items
-
-	// Generate & Update Sketch via streaming
-	start := time.Now()
-	for i := 0; i < t2; i++ {
-		val := float64(zipf.Uint64())
-
-		// Update Ground Truth
-		l1Map[val]++
-
-		// Update Sketch
-		// Convert float to string key to be consistent with old method,
-		// or use common.FromF64(val) if you want to hash raw float bytes.
-		// Here we follow the old pattern: strconv key
-		key := strconv.FormatFloat(val, 'f', -1, 64)
-		input := common.FromString(key)
-
-		cs.UpdateWithHash(input.Hash, 1)
-	}
-	t.Log("Update time:", time.Since(start))
-
-	// Calculate Exact L2
-	var l2_exact_sq float64 = 0.0
-	for _, count := range l1Map {
-		l2_exact_sq += count * count
-	}
-	l2_exact := math.Sqrt(l2_exact_sq)
-
-	// Query Sketch L2
-	// Using QueryWithHash with QuerySum2 type
-	l2_est, _ := cs.QueryWithHash(common.QuerySum2, 0) // Hash argument ignored for L2 query
-
-	// Evaluate Error
-	fmt.Printf("Exact L2: %.4f, Est L2: %.4f\n", l2_exact, l2_est)
-
-	l2_err := math.Abs(l2_est-l2_exact) / l2_exact
-	fmt.Printf("L2 Error Rate: %.4f%%\n", l2_err*100)
-
-	// Assert reasonable error rate (e.g. < 5% for this setting)
-	assert.Less(t, l2_err, 0.05, "L2 Error rate too high")
 }
 
 // TestCountSketchUniv_Merge verifies Merge function
@@ -173,4 +139,63 @@ func TestUpdateAndEstimate(t *testing.T) {
 	// Update 2: return value must be new estimate (1+2=3)
 	est2 := cs.UpdateAndEstimateHash(input.Hash, 2)
 	assert.Equal(t, int64(3), est2)
+}
+
+// =====================================================
+// CAIDA REAL-WORLD L2 ACCURACY TEST
+// =====================================================
+
+// TestCountSketchUniv_L2_CAIDA tests L2 Norm (Second Frequency Moment) estimation
+func TestCountSketchUniv_L2_CAIDA(t *testing.T) {
+	// 1. Setup Sketch
+	row := CS_ROW_NO_Univ_ELEPHANT
+	col := CS_COL_NO_Univ_ELEPHANT // Ensure this is large enough (e.g., 2048 or 4096) for good L2 accuracy
+
+	cs, err := NewCountSketchUniv(row, col)
+	require.NoError(t, err)
+
+	// 2. Load CAIDA Data
+	keys, n := loadCaidaCS(t)
+	t.Logf("Processing %d packets for L2 estimation...", n)
+
+	// 3. Process Stream & Compute Ground Truth
+	gtCounts := make(map[string]int64)
+
+	start := time.Now()
+	for _, key := range keys {
+		// Ground Truth
+		gtCounts[key]++
+
+		// Update Sketch
+		input := common.FromString(key)
+		cs.UpdateWithHash(input.Hash, 1)
+	}
+	duration := time.Since(start)
+	t.Logf("Updates completed in %v", duration)
+
+	// 4. Calculate Exact L2
+	var l2SumSq float64
+	for _, count := range gtCounts {
+		l2SumSq += float64(count * count)
+	}
+	l2Exact := math.Sqrt(l2SumSq)
+
+	// 5. Query Sketch L2
+	// FIX: The sketch implementation of QuerySum2 ALREADY returns the L2 Norm (Sqrt),
+	// so we do NOT need to Sqrt it again.
+	l2Est, _ := cs.QueryWithHash(common.QuerySum2, 0)
+
+	// 6. Evaluate Error
+	l2Err := math.Abs(l2Est-l2Exact) / l2Exact
+
+	t.Logf("Exact L2: %.4f", l2Exact)
+	t.Logf("Est L2:   %.4f", l2Est)
+	t.Logf("Error:    %.4f%%", l2Err*100)
+
+	// Assert reasonable error rate (e.g. < 5%)
+	if l2Err > 0.05 {
+		t.Errorf("L2 Error rate too high: %.2f%% > 5%%", l2Err*100)
+	} else {
+		t.Log("L2 Accuracy Test Passed")
+	}
 }

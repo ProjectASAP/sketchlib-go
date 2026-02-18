@@ -1,29 +1,66 @@
 package univmon
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
-	"math/rand"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/approx-telemetry/sketchlib-go/testdata"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+// =====================================================
+// HELPER: Load CAIDA Data
+// =====================================================
+
+func LoadCAIDA(t *testing.T) ([]string, int) {
+	// Adjust path relative to where test is run (sketch_framework/UnivMon)
+	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+
+	samples, err := testdata.ReadCAIDAStream(file1, "")
+	if err != nil {
+		t.Skipf("Skipping CAIDA test: %v", err)
+	}
+	if len(samples) == 0 {
+		t.Fatal("No samples loaded from CAIDA files")
+	}
+
+	// Convert IPs to string keys for UnivMon
+	keys := make([]string, len(samples))
+	for i, s := range samples {
+		// Convert float IP to uint32 to string (or just use raw bytes if preferred)
+		// For consistency with other tests, we'll format the uint32 IP as a string key
+		ipUint := uint32(s.F)
+		ipBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(ipBytes, ipUint)
+
+		// Use hex string or simple string representation to act as the "Key"
+		keys[i] = fmt.Sprintf("%x", ipBytes)
+	}
+
+	return keys, len(samples)
+}
+
+// =====================================================
+// STANDARD TESTS
+// =====================================================
+
 // TestUnivSketch_Basic verifies basic operations and statistical queries (L1, Card, Entropy)
 func TestUnivSketch_Basic(t *testing.T) {
 	// Configuration
-	k := TOPK_SIZE
-	row := CS_ROW_NO_Univ_ELEPHANT
-	col := CS_COL_NO_Univ_ELEPHANT
-	layer := CS_LVLS
+	k := 100
+	row := 5
+	col := 1024
+	layer := 8
 
-	// 1. Initialization (No manual Seed, handled internally/common)
+	// 1. Initialization
 	us, err := NewUnivSketchPyramid(k, row, col, layer)
 	require.NoError(t, err)
-	defer us.Free()
 
 	// 2. Prepare Simple Data
 	cases := []struct {
@@ -37,32 +74,26 @@ func TestUnivSketch_Basic(t *testing.T) {
 		{"mango", 5},
 	}
 
-	// 3. Insert Loop (Using New API: Update)
+	// 3. Insert Loop
 	totalExpected := int64(0)
 	distinctExpected := 4 // apple, banana, orange, mango
 
 	for _, c := range cases {
-		// Create SketchInput from string
 		input := common.FromString(c.key)
-		// Update sketch
 		us.Update(input, c.cnt)
 		totalExpected += c.cnt
 	}
 
 	// 4. Verify L1 (Total Count)
-	// Since GetL1() is missing, we check bucket_size directly (Exact Count)
 	assert.Equal(t, totalExpected, us.bucket_size, "Bucket size (Exact L1) mismatch")
 
 	// 5. Verify Cardinality
 	cardEst := us.GetCardinality()
-	fmt.Printf("Actual Distinct: %d, Estimated: %.4f\n", distinctExpected, cardEst)
-	// Error tolerance slightly loose for very small data
+	// Error tolerance loose for tiny data
 	assert.InDelta(t, float64(distinctExpected), cardEst, 1.5, "Cardinality estimation inaccurate")
 
 	// 6. Verify Entropy
-	// Calculate entropy manually:
 	// Total=18. P(apple)=2/18, P(banana)=1/18, P(orange)=10/18, P(mango)=5/18
-	// Entropy = -Sum(p * log2(p))
 	probs := []float64{2.0 / 18.0, 1.0 / 18.0, 10.0 / 18.0, 5.0 / 18.0}
 	expectedEntropy := 0.0
 	for _, p := range probs {
@@ -70,42 +101,12 @@ func TestUnivSketch_Basic(t *testing.T) {
 	}
 
 	entropyEst := us.GetEntropy()
-	fmt.Printf("Actual Entropy: %.4f, Estimated: %.4f\n", expectedEntropy, entropyEst)
 	assert.InDelta(t, expectedEntropy, entropyEst, 0.5, "Entropy estimation inaccurate")
 }
 
-// TestUnivSketch_TopK verifies Heavy Hitters accuracy
-func TestUnivSketch_TopK(t *testing.T) {
-	us, _ := NewUnivSketchPyramid(TOPK_SIZE, CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT, CS_LVLS)
-
-	// Scenario: "elephant" appears 1000 times, "mouse" appears 10 times
-	targetKey := "elephant"
-	targetCount := int64(1000)
-
-	inputHeavy := common.FromString(targetKey)
-	us.Update(inputHeavy, targetCount)
-
-	inputLight := common.FromString("mouse")
-	us.Update(inputLight, 10)
-
-	// Query TopK
-	topk := us.QueryTopK(5) // Get top 5
-
-	// Check if elephant exists
-	idx, found := topk.Find(targetKey)
-	require.True(t, found, "Heavy hitter 'elephant' must be found in TopK")
-
-	// Check count accuracy
-	estCount := topk.Heap[idx].Count
-	fmt.Printf("Heavy Hitter '%s': Real=%d, Est=%d\n", targetKey, targetCount, estCount)
-
-	// Error tolerance 5%
-	assert.InDelta(t, float64(targetCount), float64(estCount), float64(targetCount)*0.05, "TopK count estimation inaccurate")
-}
-
-// TestUnivSketch_Merge verifies sketch merging
+// TestUnivSketch_Merge verifies sketch merging logic
 func TestUnivSketch_Merge(t *testing.T) {
-	k, row, col, layer := TOPK_SIZE, 5, 2048, 8
+	k, row, col, layer := 100, 5, 2048, 8
 
 	us1, _ := NewUnivSketchPyramid(k, row, col, layer)
 	us2, _ := NewUnivSketchPyramid(k, row, col, layer)
@@ -117,7 +118,7 @@ func TestUnivSketch_Merge(t *testing.T) {
 	us2.Update(common.FromString("A"), 20)
 	us2.Update(common.FromString("B"), 5)
 
-	// Merge US2 to US1
+	// Merge US2 into US1
 	us1.Merge(us2)
 
 	// Expectation in US1:
@@ -139,50 +140,91 @@ func TestUnivSketch_Merge(t *testing.T) {
 	assert.InDelta(t, 5.0, float64(topk.Heap[idxB].Count), 1.0, "Count B after merge is incorrect")
 }
 
-// TestAccuracy_Syntethic similar to your original test using Zipf distribution
-func TestAccuracy_Syntethic(t *testing.T) {
+// =====================================================
+// CAIDA REAL-WORLD ACCURACY TEST
+// =====================================================
 
-	us, _ := NewUnivSketchPyramid(100, 5, 4096, 16)
+func TestUnivSketch_CAIDA_Accuracy(t *testing.T) {
+	// 1. Load Data
+	keys, n := LoadCAIDA(t)
 
-	// Create Zipf distribution
-	zipfS := 2.0
-	zipfV := 1.0
-	// Using standard math/rand for Zipf with local source
-	zipf := rand.NewZipf(rand.New(rand.NewSource(time.Now().UnixNano())), zipfS, zipfV, 10000) // N=10000 items
+	// 2. Configure Sketch
+	// UnivMon needs decent resources for real traffic
+	// k=200 heavy hitters, 5 rows, 4096 cols, 16 layers
+	us, _ := NewUnivSketchPyramid(200, 5, 4096, 16)
 
-	totalItems := 100000
+	// 3. Ground Truth Map
 	gtCounts := make(map[string]int64)
 
+	// 4. Process Stream
+	t.Logf("Processing %d CAIDA packets...", n)
 	start := time.Now()
-	for i := 0; i < totalItems; i++ {
-		num := zipf.Uint64()
-		key := fmt.Sprintf("key-%d", num)
 
+	for _, key := range keys {
+		// Update Ground Truth
 		gtCounts[key]++
+
+		// Update Sketch
 		us.Update(common.FromString(key), 1)
 	}
+
 	duration := time.Since(start)
+	t.Logf("Processed in %v (%.2f ns/op)", duration, float64(duration.Nanoseconds())/float64(n))
 
-	fmt.Printf("Processed %d items in %v (%.2f us/op)\n", totalItems, duration, float64(duration.Microseconds())/float64(totalItems))
-
-	// Evaluate Heavy Hitters
+	// 5. Evaluate Heavy Hitters (Top-100)
+	t.Log("Querying Top-K Heavy Hitters...")
 	topk := us.QueryTopK(100)
 
-	// Get actual Top 1 item (Most Frequent Item)
-	maxKey := ""
-	maxVal := int64(0)
+	// Sort Ground Truth to find true Top-K
+	type kv struct {
+		Key   string
+		Count int64
+	}
+	var sortedGT []kv
 	for k, v := range gtCounts {
-		if v > maxVal {
-			maxVal = v
-			maxKey = k
-		}
+		sortedGT = append(sortedGT, kv{k, v})
+	}
+	sort.Slice(sortedGT, func(i, j int) bool {
+		return sortedGT[i].Count > sortedGT[j].Count
+	})
+
+	// 6. Accuracy Check
+	// Check the top 10 heavy hitters specifically
+	checkCount := 10
+	if len(sortedGT) < checkCount {
+		checkCount = len(sortedGT)
 	}
 
-	idx, found := topk.Find(maxKey)
-	if assert.True(t, found, "Most frequent item (%s) must be in TopK", maxKey) {
+	var totalErrRate float64
+
+	t.Logf("%-20s | %-10s | %-10s | %-10s", "IP Key", "Real", "Est", "Error %")
+	t.Log("---------------------------------------------------------------")
+
+	for i := 0; i < checkCount; i++ {
+		trueItem := sortedGT[i]
+
+		// Find in Sketch Heap
+		idx, found := topk.Find(trueItem.Key)
+
+		if !found {
+			// If it's a very heavy hitter, it SHOULD be found.
+			// UnivMon guarantees finding items with freq > epsilon * N
+			t.Errorf("Heavy Hitter %s (Count: %d) MISSING from TopK heap", trueItem.Key, trueItem.Count)
+			continue
+		}
+
 		estVal := topk.Heap[idx].Count
-		errRate := math.Abs(float64(estVal-maxVal)) / float64(maxVal)
-		fmt.Printf("Top Item '%s': Real=%d, Est=%d, Error=%.2f%%\n", maxKey, maxVal, estVal, errRate*100)
-		assert.Less(t, errRate, 0.05, "Error rate for top item must be < 5%")
+		errRate := math.Abs(float64(estVal-trueItem.Count)) / float64(trueItem.Count)
+		totalErrRate += errRate
+
+		t.Logf("%-20s | %-10d | %-10d | %.2f%%", trueItem.Key, trueItem.Count, estVal, errRate*100)
+	}
+
+	avgErr := totalErrRate / float64(checkCount)
+	t.Logf("Average Error for Top-%d: %.2f%%", checkCount, avgErr*100)
+
+	// Assert reasonable accuracy (e.g., < 5% avg error for top items)
+	if avgErr > 0.05 {
+		t.Errorf("Accuracy too low! Avg Error %.2f%% > 5%%", avgErr*100)
 	}
 }
