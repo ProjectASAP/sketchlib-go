@@ -3,6 +3,8 @@ package ddsketch
 import (
 	"errors"
 	"math"
+
+	"github.com/approx-telemetry/sketchlib-go/common"
 )
 
 const GrowChunk = 128
@@ -106,7 +108,6 @@ func (b Buckets) Clone() Buckets {
 // ---------------- DDSketch ----------------
 
 // High-performance latency quantile sketch (v > 0 only)
-
 type DDSketch struct {
 	mapping IndexMapping
 	store   Buckets
@@ -125,7 +126,13 @@ func NewDDSketch(alpha float64) *DDSketch {
 	}
 }
 
-// Strictly positive values only
+// TypeName returns the name of the sketch.
+func (d *DDSketch) TypeName() string {
+	return "DDSketch"
+}
+
+// Add inserts a float64 value directly.
+// Strictly positive values only.
 func (d *DDSketch) Add(v float64) {
 	if !(v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)) {
 		return // ignore invalid or non-positive
@@ -145,37 +152,55 @@ func (d *DDSketch) Add(v float64) {
 	d.store.addOne(k)
 }
 
+// InsertWithHash implements common.Sketch.
+// It interprets the hash as a numerical value (casting uint64 to float64).
+// This allows tracking distributions of integer-like values (e.g., latencies in ns).
+func (d *DDSketch) InsertWithHash(hash uint64) {
+	d.Add(float64(hash))
+}
+
 func (d *DDSketch) GetCount() uint64 {
 	return d.count
 }
 
 // ---------------- Safe Merge ----------------
 
-func (d *DDSketch) Merge(other *DDSketch) error {
+// Merge implements common.Sketch.
+func (d *DDSketch) Merge(other common.Sketch) error {
+	o, ok := other.(*DDSketch)
+	if !ok {
+		return errors.New("cannot merge different sketch types")
+	}
 
-	if !d.mapping.Equals(other.mapping) {
+	if !d.mapping.Equals(o.mapping) {
 		return errors.New("cannot merge sketches with different index mappings")
 	}
 
-	if other.count == 0 {
+	if o.count == 0 {
 		return nil
 	}
 	if d.count == 0 {
-		*d = *other.Clone()
+		// Clone fundamental fields
+		d.count = o.count
+		d.sum = o.sum
+		d.min = o.min
+		d.max = o.max
+		d.store = o.store.Clone()
+		// Mapping is already equal
 		return nil
 	}
 
-	d.count += other.count
-	d.sum += other.sum
+	d.count += o.count
+	d.sum += o.sum
 
-	if other.min < d.min {
-		d.min = other.min
+	if o.min < d.min {
+		d.min = o.min
 	}
-	if other.max > d.max {
-		d.max = other.max
+	if o.max > d.max {
+		d.max = o.max
 	}
 
-	d.mergeBuckets(&d.store, &other.store)
+	d.mergeBuckets(&d.store, &o.store)
 
 	return nil
 }
@@ -214,8 +239,8 @@ func (d *DDSketch) mergeBuckets(a *Buckets, b *Buckets) {
 
 // ---------------- Quantile ----------------
 
+// GetValueAtQuantile returns the value at quantile q (0 <= q <= 1).
 func (d *DDSketch) GetValueAtQuantile(q float64) (float64, bool) {
-
 	if d.count == 0 || q < 0 || q > 1 {
 		return 0, false
 	}
@@ -252,6 +277,28 @@ func (d *DDSketch) GetValueAtQuantile(q float64) (float64, bool) {
 	}
 
 	return d.max, true
+}
+
+// QueryWithHash implements common.Sketch.
+// For QueryQuantile: interprets 'hash' as the float64 bits of the quantile 'q' (0.0 to 1.0).
+// For QueryFrequency: returns the total count in the sketch.
+func (d *DDSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+	switch q {
+	case common.QueryQuantile:
+		// Reinterpret bits as float64
+		qVal := math.Float64frombits(hash)
+		val, ok := d.GetValueAtQuantile(qVal)
+		if !ok {
+			return 0, errors.New("invalid quantile or empty sketch")
+		}
+		return val, nil
+
+	case common.QueryFrequency:
+		return float64(d.count), nil
+
+	default:
+		return 0, common.ErrUnsupportedQuery
+	}
 }
 
 func (d *DDSketch) Clone() *DDSketch {

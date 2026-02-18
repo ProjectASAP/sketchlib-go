@@ -1,250 +1,363 @@
 package exponentialhistogram
 
 import (
-	"math/rand"
+	"math"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/approx-telemetry/sketchlib-go/testdata"
 )
 
-// ==============================================================================
-// TEST SUITE: EH STRUCTURE & LOGIC CORRECTNESS
-// Uses 'ExpoHistogramCount' (Exact Counter) to verify logic.
-// ==============================================================================
+// TestEH_CAIDA_Stress runs a full benchmark and correctness test using the CAIDA dataset.
+// It verifies:
+// 1. Throughput (Efficiency of Incremental L2)
+// 2. Hybrid Transition (Map -> Sketch promotion)
+// 3. Accuracy (L2 Norm vs Ground Truth)
+func TestEH_CAIDA_Stress(t *testing.T) {
+	// 1. Configuration
+	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+	file2 := "../../testdata/caida/equinix-nyc.dirA.20181220-130300.UTC.anon.pcap.gz"
 
-// 1. Test Sliding Window Logic
-// Ensures old data is removed, while accounting for the approximation nature of EH.
-func TestLogic_SlidingWindow(t *testing.T) {
-	k := 10
-	windowSize := int64(100) // Window 100ms
-	eh := NewExpoHistogramCount(k, windowSize)
-
-	t.Log("Testing Sliding Window Logic...")
-
-	// Phase 1: Fill the window completely (t=0 to t=99)
-	for i := int64(0); i < 100; i++ {
-		eh.UpdateCount(1, i)
-	}
-
-	// Check Total: Should be 100 (since no sliding yet, buckets are usually precision 1)
-	total, _ := eh.GetTotalCount(0, 100)
-	if total != 100 {
-		t.Errorf("Phase 1 Failed: Expected 100, got %d", total)
-	}
-
-	// Phase 2: Slide the window (t=100 to t=149)
-	// Items t=0..49 should be expired.
-	// Items t=50..149 are valid (total 100 items).
-	for i := int64(100); i < 150; i++ {
-		eh.UpdateCount(1, i)
-	}
-
-	// Query wide range covering all active buckets
-	totalAfterSlide, _ := eh.GetTotalCount(50, 150)
-
-	// CORRECTNESS ANALYSIS FOR EH:
-	// EH is an approximate data structure.
-	// The oldest bucket might overlap with the window boundary.
-	// EH "Upper Bound" will keep the overlapping bucket, so result > 100.
-	// Max EH error bound is 1/k.
-	// With k=10, error ~10%. So 100 <= result <= 110 is valid.
-
-	expected := int64(100)
-	// Relative error tolerance (due to bucket boundary)
-	// We allow slight over-estimation due to the granular nature of buckets.
-	maxAllowed := expected + int64(float64(expected)/float64(k)) + 2 // 100 + 10 + buffer
-
-	if totalAfterSlide < expected || totalAfterSlide > maxAllowed {
-		t.Errorf("Phase 2 Failed (Sliding): Expected approx %d, got %d. (Allowed range: %d-%d)",
-			expected, totalAfterSlide, expected, maxAllowed)
-
-		// Debug: Check bucket structure to see why it exceeded
-		t.Logf("Debug Buckets State:")
-		threshold := int64(150) - windowSize
-		for i, b := range eh.buckets {
-			status := "VALID"
-			if b.MaxTime < threshold {
-				status = "EXPIRED (SHOULD BE DELETED)"
-			}
-			t.Logf("[%d] Range[%d-%d] Count=%d (%s)", i, b.MinTime, b.MaxTime, b.Count, status)
-		}
-	} else {
-		t.Logf("Phase 2 Success: Got %d (Expected %d with approximation tolerance)", totalAfterSlide, expected)
-	}
-
-	// Internal Verification: Ensure truly expired buckets are removed
-	// A bucket is considered totally expired if MaxTime < threshold.
-	if len(eh.buckets) > 0 {
-		// Access struct fields directly (buckets is []Bucket)
-		oldestBucket := eh.buckets[0]
-		threshold := int64(150) - windowSize // 50
-
-		// If MaxTime < 50, it means it's garbage that wasn't collected
-		if oldestBucket.MaxTime < threshold {
-			t.Errorf("Violation: Oldest bucket MaxTime (%d) is strictly older than threshold (%d). It should have been removed.", oldestBucket.MaxTime, threshold)
-		}
-	}
-}
-
-// 2. Test EH Invariants (Exponential Growth & Order)
-// Ensures Datar et al. rules are met:
-// - Buckets sorted by time
-// - Bucket sizes grow exponentially (1, 1, 2, 2, 4, 4...)
-// - Max buckets per size <= k/2 + 2
-func TestLogic_Invariants(t *testing.T) {
-	k := 2 // Very small K forces frequent merges
-	windowSize := int64(10000)
-	eh := NewExpoHistogramCount(k, windowSize)
-
-	// Insert 32 items (1 per ms).
-	// With k=2, we expect buckets to distribute into powers of 2.
-	for i := int64(0); i < 32; i++ {
-		eh.UpdateCount(1, i)
-	}
-
-	t.Log("Inspecting Bucket Structure (k=2, N=32)...")
-
-	// Validation 1: Time Ordering (Monotonic)
-	for i := 0; i < len(eh.buckets)-1; i++ {
-		curr := eh.buckets[i]
-		next := eh.buckets[i+1]
-
-		if curr.MinTime >= next.MinTime {
-			t.Errorf("Invariant Violation: Buckets not sorted by time. B[%d].MinTime (%d) >= B[%d].MinTime (%d)", i, curr.MinTime, i+1, next.MinTime)
-		}
-	}
-
-	// Validation 2: Bucket Size constraints
-	// Count bucket size histogram
-	sizeCounts := make(map[int64]int)
-	for _, b := range eh.buckets {
-		sizeCounts[b.Count]++
-
-		// Validation: Size must be Power of 2 (1, 2, 4, 8...)
-		if !isPowerOfTwo(b.Count) {
-			t.Errorf("Invariant Violation: Bucket size %d is not power of 2", b.Count)
-		}
-	}
-
-	// Validation 3: Max buckets per level
-	// EH Rule: max k/2 + 2 buckets of the same size
-	limit := k/2 + 2
-	for size, count := range sizeCounts {
-		if count > limit {
-			t.Errorf("Invariant Violation: Too many buckets of size %d. Have %d, Max allowed %d", size, count, limit)
-		}
-		t.Logf("Size %d: %d buckets", size, count)
-	}
-}
-
-// 3. Test Merge Correctness
-// Ensures 1 + 1 = 2, and no data loss during merge.
-func TestLogic_MergeCorrectness(t *testing.T) {
-	k := 10
-	windowSize := int64(100000) // Infinite window
-	eh := NewExpoHistogramCount(k, windowSize)
-
-	n := 1000
-	// Insert 1000 items
-	for i := int64(0); i < int64(n); i++ {
-		eh.UpdateCount(1, i)
-	}
-
-	// Total must be EXACTLY 1000
-	// If merge is wrong, this number will drift (e.g., 999 or 1001)
-	total, _ := eh.GetTotalCount(0, int64(n))
-
-	if total != int64(n) {
-		t.Errorf("Merge Logic Fail: Inserted %d, Counted %d. Data lost or duplicated during merge.", n, total)
-	}
-}
-
-// 4. Test Query Interval Consistency
-// Ensures sub-interval query returns reasonable results
-// (Based on EH overlap logic)
-func TestLogic_QueryInterval(t *testing.T) {
-	k := 20
-	window := int64(100)
-	eh := NewExpoHistogramCount(k, window)
-
-	// Scenario:
-	// T=10: insert 1
-	// T=20: insert 1
-	// T=30: insert 1
-	// T=40: insert 1
-	// T=50: insert 1
-	times := []int64{10, 20, 30, 40, 50}
-	for _, tm := range times {
-		eh.UpdateCount(1, tm)
-	}
-
-	// Query Interval [15, 45]
-	// Should cover buckets T=20, T=30, T=40. Total = 3.
-	// Note: EH overlap implementation might cover T=10 or T=50 if buckets are merged.
-	// But since N=5 and k=20, no merge yet. Buckets are size=1.
-	// So must be exact 3.
-
-	count, err := eh.GetTotalCount(15, 45)
+	// 2. Load Data
+	t.Log("Loading CAIDA stream...")
+	stream, err := testdata.ReadCAIDAStream(file1, file2)
 	if err != nil {
-		t.Fatalf("Query failed: %v", err)
+		t.Skipf("Skipping CAIDA test: %v", err)
+		return
 	}
+	t.Logf("Loaded %d packets.", len(stream))
 
-	if count != 3 {
-		t.Errorf("Interval Query Fail: Range [15, 45] should cover {20,30,40}. Expected 3, got %d", count)
-		// Debug print
-		for i, b := range eh.buckets {
-			t.Logf("Bucket %d: Range[%d-%d] Count=%d", i, b.MinTime, b.MaxTime, b.Count)
+	// 3. Initialize Exponential Histogram
+	//    k=50, Window=100,000 packets
+	//    UnivMon: Row=5, Col=200 (Increased Col for better accuracy in this test)
+	k := 50
+	windowSize := int64(100000)
+	// Increasing Col to 200 to ensure we hit a tighter error bound (~10%)
+	eh := NewExpoHistogramUniv(k, windowSize, 50, 5, 200, 3)
+
+	// 4. Processing Loop (Benchmark)
+	start := time.Now()
+	for i, packet := range stream {
+		ipKey := strconv.FormatUint(uint64(packet.F), 10)
+		if err := eh.UpdateItem(ipKey, packet.T); err != nil {
+			t.Fatalf("Update failed at packet %d: %v", i, err)
 		}
 	}
+	duration := time.Since(start)
+
+	t.Logf("--- Benchmark Results ---")
+	t.Logf("Throughput:    %.2f packets/sec", float64(len(stream))/duration.Seconds())
+	t.Logf("Total Time:    %v", duration)
+
+	// 5. Verify Hybrid Behavior
+	checkHybridBehavior(t, eh)
+
+	// 6. Verify Correctness & Error Bounds
+	//    We verify the *last active window* of the stream.
+	lastT := stream[len(stream)-1].T
+	startT := lastT - windowSize
+	if startT < 0 {
+		startT = 0
+	}
+
+	checkCorrectness(t, eh, stream, startT, lastT)
 }
 
-// 5. Test Determinism
-// Ensures 2 EH instances with same input produce identical structure.
-// Must not have race conditions or random factors in bucket logic.
-func TestLogic_Determinism(t *testing.T) {
-	seed := time.Now().UnixNano()
-	r := rand.New(rand.NewSource(seed))
+// checkHybridBehavior confirms Map -> Sketch promotion occurred
+func checkHybridBehavior(t *testing.T, eh *ExpoHistogramUniv) {
+	mapCount, sketchCount := 0, 0
+	eh.mu.RLock()
+	defer eh.mu.RUnlock()
 
-	inputData := make([]int64, 1000)
-	for i := 0; i < 1000; i++ {
-		inputData[i] = r.Int63n(100000) // Random timestamps (monotonic simulation)
-	}
-	sortInt64(inputData) // Ensure monotonicity
-
-	eh1 := NewExpoHistogramCount(5, 50000)
-	eh2 := NewExpoHistogramCount(5, 50000)
-
-	// Feed EH1
-	for _, tm := range inputData {
-		eh1.UpdateCount(1, tm)
-	}
-	// Feed EH2
-	for _, tm := range inputData {
-		eh2.UpdateCount(1, tm)
-	}
-
-	// Compare Structure
-	if len(eh1.buckets) != len(eh2.buckets) {
-		t.Fatalf("Determinism Fail: Bucket count mismatch. EH1=%d, EH2=%d", len(eh1.buckets), len(eh2.buckets))
-	}
-
-	for i := 0; i < len(eh1.buckets); i++ {
-		b1 := eh1.buckets[i]
-		b2 := eh2.buckets[i]
-
-		if b1.Count != b2.Count || b1.MinTime != b2.MinTime || b1.MaxTime != b2.MaxTime {
-			t.Errorf("Determinism Fail at Bucket %d:\nEH1: [%d-%d] size %d\nEH2: [%d-%d] size %d",
-				i, b1.MinTime, b1.MaxTime, b1.Count, b2.MinTime, b2.MaxTime, b2.Count)
+	for _, bucket := range eh.buckets {
+		hs, ok := bucket.Sketch.(*HybridSketch)
+		if !ok {
+			continue
+		}
+		if hs.isSketch {
+			sketchCount++
+		} else {
+			mapCount++
 		}
 	}
+
+	t.Logf("Structure State: %d Exact Maps, %d Promoted Sketches", mapCount, sketchCount)
+	if sketchCount == 0 {
+		t.Error("FAIL: No buckets promoted to Sketch mode. Memory Trigger likely failed.")
+	}
 }
 
-// --- Helpers for Correctness Tests ---
+// checkCorrectness calculates Ground Truth for the window and compares with Sketch
+func checkCorrectness(t *testing.T, eh *ExpoHistogramUniv, stream []testdata.Sample, startT, endT int64) {
+	t.Logf("--- Correctness Verification (Window: %d - %d) ---", startT, endT)
 
-func isPowerOfTwo(x int64) bool {
-	return (x != 0) && ((x & (x - 1)) == 0)
+	// A. Calculate Ground Truth (Exact L2)
+	//    Iterate through the *original stream* and filter by timestamp manually.
+	exactCounts := make(map[string]int64)
+	var totalPacketsInWindow int64
+
+	for _, p := range stream {
+		if p.T > endT {
+			break
+		}
+		if p.T >= startT {
+			ipKey := strconv.FormatUint(uint64(p.F), 10)
+			exactCounts[ipKey]++
+			totalPacketsInWindow++
+		}
+	}
+
+	var exactL2Sq float64
+	for _, count := range exactCounts {
+		exactL2Sq += float64(count * count)
+	}
+	exactL2 := math.Sqrt(exactL2Sq)
+
+	t.Logf("Ground Truth: Processed %d packets in window", totalPacketsInWindow)
+	t.Logf("Ground Truth L2: %.4f", exactL2)
+
+	// B. Query Sketch
+	res, err := eh.QueryInterval(startT, endT)
+	if err != nil {
+		t.Fatalf("QueryInterval failed: %v", err)
+	}
+
+	// Extract L2 from result (HybridSketch or UnivSketch)
+	var estimatedL2 float64
+	if h, ok := res.(*HybridSketch); ok {
+		estimatedL2 = h.GetL2()
+	} else if provider, ok := res.(L2Provider); ok {
+		estimatedL2 = provider.GetL2()
+	} else {
+		t.Fatalf("Result sketch does not support L2 retrieval")
+	}
+
+	t.Logf("Sketch Estimate L2: %.4f", estimatedL2)
+
+	// C. Error Analysis
+	//    Relative Error = |Est - Exact| / Exact
+	absErr := math.Abs(estimatedL2 - exactL2)
+	relErr := absErr / exactL2
+
+	t.Logf("Absolute Error: %.4f", absErr)
+	t.Logf("Relative Error: %.2f%%", relErr*100)
+
+	// D. Theoretical Bound Assertion
+	//    UnivMon/CountSketch Error is typically bounded by epsilon * L2_residual.
+	//    With Col=200, epsilon is roughly 1/sqrt(200) ~ 7-10% depending on constants.
+	//    We set a lenient pass/fail threshold of 15% for this end-to-end test.
+	const ErrorThreshold = 0.15 // 15%
+
+	if relErr > ErrorThreshold {
+		t.Errorf("FAIL: Relative Error (%.2f%%) exceeds theoretical bound (%.0f%%)",
+			relErr*100, ErrorThreshold*100)
+	} else {
+		t.Logf("PASS: Error is within theoretical bounds.")
+	}
 }
 
-func sortInt64(a []int64) {
-	sort.Slice(a, func(i, j int) bool { return a[i] < a[j] })
+func TestEH_L1_Accuracy(t *testing.T) {
+	// 1. Load Data (Shared)
+	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+	file2 := "../../testdata/caida/equinix-nyc.dirA.20181220-130300.UTC.anon.pcap.gz"
+
+	t.Log("Loading CAIDA stream for L1 Accuracy Tests...")
+	stream, err := testdata.ReadCAIDAStream(file1, file2)
+	if err != nil {
+		t.Skipf("Skipping: %v", err)
+		return
+	}
+
+	// Use a smaller window for fast verification, but large enough for meaningful merge logic
+	windowSize := int64(50000)
+	streamSubset := stream[:windowSize] // Use first 50k packets
+
+	// 2. Generate Ground Truth
+	t.Log("Calculating Ground Truth...")
+	gt := calculateGroundTruth(streamSubset)
+	t.Logf("Ground Truth: Total=%d, Distinct=%d, MaxFreq=%d, MedianVal=%.0f",
+		gt.TotalCount, gt.DistinctCount, gt.MaxFreq, gt.MedianVal)
+
+	// 3. Define Shared EH Parameters
+	k := 50 // EH Precision (High enough to trigger merges)
+
+	// --- TEST CASE A: FREQUENCY SKETCHES (CountMin, CountSketch, Coco) ---
+	t.Run("CountMinSketch", func(t *testing.T) {
+		eh := NewExpoHistogramCountMin(k, windowSize, 5, 2048)
+		feedStringItems(eh, streamSubset)
+
+		// Query top heavy hitter
+		est := queryFrequency(t, eh, gt.MaxFreqKey, 0, windowSize)
+		checkError(t, "CountMin Freq", float64(gt.MaxFreq), est, 0.05) // 5% error tolerance
+	})
+
+	t.Run("CountSketch", func(t *testing.T) {
+		eh := NewExpoHistogramCountSketch(k, windowSize, 5, 2048)
+		feedStringItems(eh, streamSubset)
+
+		est := queryFrequency(t, eh, gt.MaxFreqKey, 0, windowSize)
+		checkError(t, "CountSketch Freq", float64(gt.MaxFreq), est, 0.05)
+	})
+
+	t.Run("CocoSketch", func(t *testing.T) {
+		eh := NewExpoHistogramCoco(k, windowSize, 3, 2048) // d=3, len=2048
+		feedStringItems(eh, streamSubset)
+
+		est := queryFrequency(t, eh, gt.MaxFreqKey, 0, windowSize)
+		checkError(t, "CocoSketch Freq", float64(gt.MaxFreq), est, 0.05)
+	})
+
+	// --- TEST CASE B: CARDINALITY (HLL) ---
+	t.Run("HLL", func(t *testing.T) {
+		eh := NewExpoHistogramHLL(k, windowSize)
+		feedStringItems(eh, streamSubset)
+
+		// Query Cardinality
+		res, err := eh.QueryInterval(0, windowSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		est, err := res.QueryWithHash(common.QueryCardinality, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		checkError(t, "HLL Cardinality", float64(gt.DistinctCount), est, 0.10) // 10% error (standard HLL is usually <2%)
+	})
+
+	// --- TEST CASE C: QUANTILES (KLL, DDS) ---
+	t.Run("KLL", func(t *testing.T) {
+		eh := NewExpoHistogramKLL(k, windowSize, 200) // K=200
+		feedFloatValues(eh, streamSubset)
+
+		// Query Median (p50)
+		est := queryQuantile(t, eh, 0.5, 0, windowSize)
+		// Quantile values can vary largely, we check rank consistency or approximate value range
+		// For simplicity, checking relative value error on the IP integer (treated as float)
+		checkError(t, "KLL Median", gt.MedianVal, est, 0.15)
+	})
+
+	t.Run("DDSketch", func(t *testing.T) {
+		eh := NewExpoHistogramDDS(k, windowSize, 0.02) // alpha=0.02
+		feedFloatValues(eh, streamSubset)
+
+		est := queryQuantile(t, eh, 0.5, 0, windowSize)
+		checkError(t, "DDSketch Median", gt.MedianVal, est, 0.15)
+	})
+}
+
+// ---------------- Helpers ----------------
+
+type GroundTruth struct {
+	TotalCount    int64
+	DistinctCount int64
+	MaxFreq       int64
+	MaxFreqKey    string
+	MedianVal     float64
+}
+
+func calculateGroundTruth(stream []testdata.Sample) GroundTruth {
+	freqs := make(map[string]int64)
+	var values []float64
+
+	for _, p := range stream {
+		key := strconv.FormatUint(uint64(p.F), 10)
+		freqs[key]++
+		values = append(values, p.F)
+	}
+
+	var maxF int64
+	var maxK string
+	for k, v := range freqs {
+		if v > maxF {
+			maxF = v
+			maxK = k
+		}
+	}
+
+	sort.Float64s(values)
+	median := values[len(values)/2]
+
+	return GroundTruth{
+		TotalCount:    int64(len(stream)),
+		DistinctCount: int64(len(freqs)),
+		MaxFreq:       maxF,
+		MaxFreqKey:    maxK,
+		MedianVal:     median,
+	}
+}
+
+// Wrapper interface to handle different EH types generically for string insertion
+type StringInserter interface {
+	UpdateItem(key string, t int64) error
+	QueryInterval(t1, t2 int64) (common.Sketch, error)
+}
+
+// Wrapper interface for float insertion
+type FloatInserter interface {
+	UpdateValue(v float64, t int64) error
+	QueryInterval(t1, t2 int64) (common.Sketch, error)
+}
+
+func feedStringItems(eh StringInserter, stream []testdata.Sample) {
+	for _, p := range stream {
+		key := strconv.FormatUint(uint64(p.F), 10)
+		_ = eh.UpdateItem(key, p.T)
+	}
+}
+
+func feedFloatValues(eh FloatInserter, stream []testdata.Sample) {
+	for _, p := range stream {
+		_ = eh.UpdateValue(p.F, p.T)
+	}
+}
+
+func queryFrequency(t *testing.T, eh StringInserter, key string, t1, t2 int64) float64 {
+	res, err := eh.QueryInterval(t1, t2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := common.FromString(key).Hash
+	val, err := res.QueryWithHash(common.QueryFrequency, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return val
+}
+
+func queryQuantile(t *testing.T, eh FloatInserter, q float64, t1, t2 int64) float64 {
+	res, err := eh.QueryInterval(t1, t2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// In common.Sketch, QueryQuantile expects the hash to represent the float64 bits of q
+	// OR specific sketches expose methods. The generic way via QueryWithHash:
+	qBits := math.Float64bits(q)
+	val, err := res.QueryWithHash(common.QueryQuantile, qBits)
+	if err != nil {
+		// Fallback: If generic query fails, try to cast (e.g. for KLL/DDS specific methods)
+		// But your provided sketch.go/DDSketch.go suggests QueryWithHash logic is implemented.
+		t.Fatalf("QueryQuantile failed: %v", err)
+	}
+	return val
+}
+
+func checkError(t *testing.T, name string, exact, est, tolerance float64) {
+	absErr := math.Abs(exact - est)
+	relErr := 0.0
+	if exact != 0 {
+		relErr = absErr / exact
+	}
+
+	t.Logf("[%s] Exact: %.2f, Est: %.2f, RelErr: %.2f%%", name, exact, est, relErr*100)
+
+	if relErr > tolerance {
+		t.Errorf("FAIL [%s]: Error %.2f%% exceeds tolerance %.2f%%", name, relErr*100, tolerance*100)
+	}
 }

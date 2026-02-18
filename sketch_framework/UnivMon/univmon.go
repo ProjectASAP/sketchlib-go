@@ -142,10 +142,11 @@ func (us *UnivSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, e
 	case common.QueryCardinality:
 		return us.GetCardinality(), nil
 	case common.QuerySum:
-		// Return the estimate from the first layer (CountSketch)
 		return us.cs_layers[0].QueryWithHash(q, hash)
 	case common.QueryFrequency:
-		// [FIX] Added support for QueryFrequency
+		return us.cs_layers[0].QueryWithHash(q, hash)
+	case common.QuerySum2: // FIX: ADD THIS CASE
+		// Retrieve L2 from the first CountSketch layer
 		return us.cs_layers[0].QueryWithHash(q, hash)
 	default:
 		return 0, common.ErrUnsupportedQuery
@@ -167,6 +168,7 @@ func (us *UnivSketch) Merge(other common.Sketch) error {
 
 	for i := 0; i < us.layer; i++ {
 		// A. Merge CountSketch Layer
+		// This now calls the FIXED CountSketchUniv.Merge which handles L2 correctly
 		if err := us.cs_layers[i].Merge(o.cs_layers[i]); err != nil {
 			return fmt.Errorf("error merging CS layer %d: %v", i, err)
 		}
