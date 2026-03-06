@@ -232,3 +232,61 @@ func (s *CountSketch) EstimateStringCount(key string) int64 {
 	est, _ := s.QueryWithHash(common.QueryFrequency, hash)
 	return int64(est)
 }
+
+type countSketchSnapshot struct {
+	Rows  int
+	Cols  int
+	Count [][]float64
+	L2    []float64
+	TopK  *common.TopKHeap
+}
+
+// SerializeToBytes serializes CountSketch into bytes.
+func (s *CountSketch) SerializeToBytes() ([]byte, error) {
+	return common.EncodeToBytes(countSketchSnapshot{
+		Rows:  s.Rows,
+		Cols:  s.Cols,
+		Count: s.Count,
+		L2:    s.L2,
+		TopK:  s.TopK,
+	})
+}
+
+// DeserializeCountSketchFromBytes restores CountSketch from serialized bytes.
+func DeserializeCountSketchFromBytes(data []byte) (*CountSketch, error) {
+	var snap countSketchSnapshot
+	if err := common.DecodeFromBytes(data, &snap); err != nil {
+		return nil, err
+	}
+	if snap.Rows <= 0 || snap.Cols <= 0 {
+		return nil, errors.New("invalid snapshot dimensions")
+	}
+	if snap.Cols&(snap.Cols-1) != 0 {
+		return nil, errors.New("invalid snapshot: cols must be power-of-two")
+	}
+	if len(snap.Count) != snap.Rows {
+		return nil, errors.New("invalid snapshot matrix row count")
+	}
+	for r := 0; r < snap.Rows; r++ {
+		if len(snap.Count[r]) != snap.Cols {
+			return nil, errors.New("invalid snapshot matrix col count")
+		}
+	}
+	if len(snap.L2) != snap.Rows {
+		return nil, errors.New("invalid snapshot l2 size")
+	}
+	topk := snap.TopK
+	if topk == nil {
+		topk = common.NewTopKHeap(TOPK_SIZE)
+	}
+
+	return &CountSketch{
+		Rows:       snap.Rows,
+		Cols:       snap.Cols,
+		Count:      snap.Count,
+		L2:         snap.L2,
+		TopK:       topk,
+		bitsPerRow: uint(bits.TrailingZeros(uint(snap.Cols))),
+		mask:       uint64(snap.Cols - 1),
+	}, nil
+}

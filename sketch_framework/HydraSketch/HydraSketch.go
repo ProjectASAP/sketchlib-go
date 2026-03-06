@@ -294,3 +294,97 @@ func partition(a []int64, l, r int) int {
 	a[i], a[r] = a[r], a[i]
 	return i
 }
+
+type hydraSnapshot struct {
+	D       int
+	W       int
+	SeedCM1 uint64
+	SeedCM2 uint64
+	Grid    [][][]byte
+	Big     []byte
+}
+
+// SerializeToBytes serializes Hydra into bytes.
+func (h *Hydra) SerializeToBytes() ([]byte, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	grid := make([][][]byte, h.D)
+	for i := 0; i < h.D; i++ {
+		grid[i] = make([][]byte, h.W)
+		for j := 0; j < h.W; j++ {
+			if h.Grid[i][j] == nil {
+				continue
+			}
+			b, err := h.Grid[i][j].SerializeToBytes()
+			if err != nil {
+				return nil, err
+			}
+			grid[i][j] = b
+		}
+	}
+
+	var bigBytes []byte
+	if h.Big != nil {
+		b, err := h.Big.SerializeToBytes()
+		if err != nil {
+			return nil, err
+		}
+		bigBytes = b
+	}
+
+	return common.EncodeToBytes(hydraSnapshot{
+		D:       h.D,
+		W:       h.W,
+		SeedCM1: h.seedCM1,
+		SeedCM2: h.seedCM2,
+		Grid:    grid,
+		Big:     bigBytes,
+	})
+}
+
+// DeserializeHydraFromBytes restores Hydra from serialized bytes.
+func DeserializeHydraFromBytes(data []byte) (*Hydra, error) {
+	var snap hydraSnapshot
+	if err := common.DecodeFromBytes(data, &snap); err != nil {
+		return nil, err
+	}
+	if snap.D <= 0 || snap.W <= 0 {
+		return nil, errors.New("invalid snapshot dimensions")
+	}
+	if len(snap.Grid) != snap.D {
+		return nil, errors.New("invalid snapshot grid depth")
+	}
+
+	h := &Hydra{
+		D:       snap.D,
+		W:       snap.W,
+		seedCM1: snap.SeedCM1,
+		seedCM2: snap.SeedCM2,
+		Grid:    make([][]*univmon.UnivSketch, snap.D),
+	}
+
+	for i := 0; i < snap.D; i++ {
+		if len(snap.Grid[i]) != snap.W {
+			return nil, errors.New("invalid snapshot grid width")
+		}
+		h.Grid[i] = make([]*univmon.UnivSketch, snap.W)
+		for j := 0; j < snap.W; j++ {
+			um, err := univmon.DeserializeUnivSketchFromBytes(snap.Grid[i][j])
+			if err != nil {
+				return nil, err
+			}
+			h.Grid[i][j] = um
+		}
+	}
+
+	if len(snap.Big) > 0 {
+		um, err := univmon.DeserializeUnivSketchFromBytes(snap.Big)
+		if err != nil {
+			return nil, err
+		}
+		h.Big = um
+	}
+
+	return h, nil
+}

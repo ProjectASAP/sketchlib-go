@@ -237,3 +237,51 @@ func (c *CocoSketch) Clear() {
 		}
 	}
 }
+
+type cocoSnapshot struct {
+	D          int
+	Length     int
+	Keys       [][]uint64
+	Counts     [][]uint64
+	DefaultAgg Aggregation
+}
+
+// SerializeToBytes serializes CocoSketch into bytes.
+func (c *CocoSketch) SerializeToBytes() ([]byte, error) {
+	return common.EncodeToBytes(cocoSnapshot{
+		D:          c.d,
+		Length:     c.length,
+		Keys:       c.keys,
+		Counts:     c.counts,
+		DefaultAgg: c.defaultAgg,
+	})
+}
+
+// DeserializeCocoSketchFromBytes restores CocoSketch from serialized bytes.
+func DeserializeCocoSketchFromBytes(data []byte) (*CocoSketch, error) {
+	var snap cocoSnapshot
+	if err := common.DecodeFromBytes(data, &snap); err != nil {
+		return nil, err
+	}
+	if snap.D <= 0 || snap.Length <= 0 {
+		return nil, errors.New("invalid snapshot dimensions")
+	}
+	if len(snap.Keys) != snap.D || len(snap.Counts) != snap.D {
+		return nil, errors.New("invalid snapshot depth")
+	}
+	for i := 0; i < snap.D; i++ {
+		if len(snap.Keys[i]) != snap.Length || len(snap.Counts[i]) != snap.Length {
+			return nil, errors.New("invalid snapshot row length")
+		}
+	}
+
+	src := rand.NewSource(time.Now().UnixNano())
+	return &CocoSketch{
+		d:          snap.D,
+		length:     snap.Length,
+		keys:       snap.Keys,
+		counts:     snap.Counts,
+		rng:        rand.New(src),
+		defaultAgg: snap.DefaultAgg,
+	}, nil
+}

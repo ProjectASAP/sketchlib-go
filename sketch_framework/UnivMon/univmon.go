@@ -1,6 +1,7 @@
 package univmon
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -319,4 +320,92 @@ func (us *UnivSketch) GetMemoryKB() float64 {
 	}
 	csSize := float64(CS_COL_NO_Univ_ELEPHANT) * float64(CS_ROW_NO_Univ_ELEPHANT) * float64(us.layer) * 8
 	return (csSize + total_topk) / 1024
+}
+
+type topKHeapSnapshot struct {
+	Heap []common.Item
+	K    int
+}
+
+type univSketchSnapshot struct {
+	K          int
+	Row        int
+	Col        int
+	Layer      int
+	BucketSize int64
+	CSLayers   [][]byte
+	HHLayers   []topKHeapSnapshot
+}
+
+// SerializeToBytes serializes UnivSketch into bytes.
+func (us *UnivSketch) SerializeToBytes() ([]byte, error) {
+	csLayers := make([][]byte, len(us.cs_layers))
+	for i, cs := range us.cs_layers {
+		b, err := cs.SerializeToBytes()
+		if err != nil {
+			return nil, err
+		}
+		csLayers[i] = b
+	}
+
+	hhLayers := make([]topKHeapSnapshot, len(us.HH_layers))
+	for i, hh := range us.HH_layers {
+		if hh == nil {
+			continue
+		}
+		heapCp := append([]common.Item(nil), hh.Heap...)
+		hhLayers[i] = topKHeapSnapshot{
+			Heap: heapCp,
+			K:    hh.K,
+		}
+	}
+
+	return common.EncodeToBytes(univSketchSnapshot{
+		K:          us.k,
+		Row:        us.row,
+		Col:        us.col,
+		Layer:      us.layer,
+		BucketSize: us.bucket_size,
+		CSLayers:   csLayers,
+		HHLayers:   hhLayers,
+	})
+}
+
+// DeserializeUnivSketchFromBytes restores UnivSketch from serialized bytes.
+func DeserializeUnivSketchFromBytes(data []byte) (*UnivSketch, error) {
+	var snap univSketchSnapshot
+	if err := common.DecodeFromBytes(data, &snap); err != nil {
+		return nil, err
+	}
+	if snap.Layer <= 0 {
+		return nil, errors.New("invalid snapshot: layer must be positive")
+	}
+	if len(snap.CSLayers) != snap.Layer || len(snap.HHLayers) != snap.Layer {
+		return nil, errors.New("invalid snapshot: layer payload mismatch")
+	}
+
+	us := &UnivSketch{
+		k:           snap.K,
+		row:         snap.Row,
+		col:         snap.Col,
+		layer:       snap.Layer,
+		bucket_size: snap.BucketSize,
+		cs_layers:   make([]*CountSketchUniv, snap.Layer),
+		HH_layers:   make([]*common.TopKHeap, snap.Layer),
+	}
+
+	for i := 0; i < snap.Layer; i++ {
+		cs, err := DeserializeCountSketchUnivFromBytes(snap.CSLayers[i])
+		if err != nil {
+			return nil, err
+		}
+		us.cs_layers[i] = cs
+
+		hh := common.NewTopKHeap(snap.HHLayers[i].K)
+		hh.Heap = append([]common.Item(nil), snap.HHLayers[i].Heap...)
+		hh.RecomputeMemory()
+		us.HH_layers[i] = hh
+	}
+
+	return us, nil
 }

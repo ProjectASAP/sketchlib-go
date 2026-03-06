@@ -185,3 +185,17 @@ func (h *HyperLogLog) Merge(other common.Sketch) error {
 	}
 	return nil
 }
+
+// SerializeToBytes serializes HyperLogLog into bytes.
+func (h *HyperLogLog) SerializeToBytes() ([]byte, error) {
+	return common.EncodeToBytes(h.Registers)
+}
+
+// DeserializeHyperLogLogFromBytes restores HyperLogLog from serialized bytes.
+func DeserializeHyperLogLogFromBytes(data []byte) (*HyperLogLog, error) {
+	var regs [HLLRegisterCount]uint8
+	if err := common.DecodeFromBytes(data, &regs); err != nil {
+		return nil, err
+	}
+	return &HyperLogLog{Registers: regs}, nil
+}

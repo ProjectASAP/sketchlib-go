@@ -281,6 +281,41 @@ func TestCMS_RealWorld_CAIDA_Accuracy(t *testing.T) {
 	}
 }
 
+func TestCountMinSketchSerializeRoundTrip(t *testing.T) {
+	s, err := NewCountMinSketch(3, 1024)
+	if err != nil {
+		t.Fatalf("new countmin: %v", err)
+	}
+
+	for i := 0; i < 100; i++ {
+		s.InsertWithHash(common.FromString("hot-key").Hash)
+	}
+
+	before, err := s.QueryWithHash(common.QueryFrequency, common.FromString("hot-key").Hash)
+	if err != nil {
+		t.Fatalf("query before: %v", err)
+	}
+
+	data, err := s.SerializeToBytes()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	restored, err := DeserializeCountMinSketchFromBytes(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+
+	after, err := restored.QueryWithHash(common.QueryFrequency, common.FromString("hot-key").Hash)
+	if err != nil {
+		t.Fatalf("query after: %v", err)
+	}
+
+	if before != after {
+		t.Fatalf("round-trip mismatch: before=%v after=%v", before, after)
+	}
+}
+
 // TestCMS_Merge_ElementWise verifies that merging sums every counter individually.
 func TestCMS_Merge_ElementWise(t *testing.T) {
 	rows, cols := 2, 16

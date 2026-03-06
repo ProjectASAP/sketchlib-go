@@ -195,3 +195,63 @@ func (s *CountMinSketch) Merge(other common.Sketch) error {
 	}
 	return nil
 }
+
+type countMinSnapshot struct {
+	Rows  int
+	Cols  int
+	Count [][]float64
+	Sum   [][]float64
+	Sum2  [][]float64
+	L1    []float64
+	L2    []float64
+}
+
+// SerializeToBytes serializes CountMinSketch into bytes.
+func (s *CountMinSketch) SerializeToBytes() ([]byte, error) {
+	return common.EncodeToBytes(countMinSnapshot{
+		Rows:  s.Rows,
+		Cols:  s.Cols,
+		Count: s.Count,
+		Sum:   s.Sum,
+		Sum2:  s.Sum2,
+		L1:    s.L1,
+		L2:    s.L2,
+	})
+}
+
+// DeserializeCountMinSketchFromBytes restores CountMinSketch from serialized bytes.
+func DeserializeCountMinSketchFromBytes(data []byte) (*CountMinSketch, error) {
+	var snap countMinSnapshot
+	if err := common.DecodeFromBytes(data, &snap); err != nil {
+		return nil, err
+	}
+	if snap.Rows <= 0 || snap.Cols <= 0 {
+		return nil, errors.New("invalid snapshot dimensions")
+	}
+	if snap.Cols&(snap.Cols-1) != 0 {
+		return nil, errors.New("invalid snapshot: cols must be power-of-two")
+	}
+	if len(snap.Count) != snap.Rows || len(snap.Sum) != snap.Rows || len(snap.Sum2) != snap.Rows {
+		return nil, errors.New("invalid snapshot matrix row count")
+	}
+	for r := 0; r < snap.Rows; r++ {
+		if len(snap.Count[r]) != snap.Cols || len(snap.Sum[r]) != snap.Cols || len(snap.Sum2[r]) != snap.Cols {
+			return nil, errors.New("invalid snapshot matrix col count")
+		}
+	}
+	if len(snap.L1) != snap.Rows || len(snap.L2) != snap.Rows {
+		return nil, errors.New("invalid snapshot l1/l2 size")
+	}
+
+	return &CountMinSketch{
+		Rows:       snap.Rows,
+		Cols:       snap.Cols,
+		Count:      snap.Count,
+		Sum:        snap.Sum,
+		Sum2:       snap.Sum2,
+		L1:         snap.L1,
+		L2:         snap.L2,
+		bitsPerRow: uint(bits.TrailingZeros(uint(snap.Cols))),
+		mask:       uint64(snap.Cols - 1),
+	}, nil
+}

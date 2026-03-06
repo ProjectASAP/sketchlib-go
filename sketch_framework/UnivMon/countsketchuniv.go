@@ -158,3 +158,49 @@ func (s *CountSketchUniv) cs_l2() float64 {
 	f2_value := MedianOfThree(s.l2[0], s.l2[1], s.l2[2])
 	return math.Sqrt(float64(f2_value))
 }
+
+type countSketchUnivSnapshot struct {
+	Row   int
+	Col   int
+	Count [][]int64
+	L2    []int64
+}
+
+// SerializeToBytes serializes CountSketchUniv into bytes.
+func (s *CountSketchUniv) SerializeToBytes() ([]byte, error) {
+	return common.EncodeToBytes(countSketchUnivSnapshot{
+		Row:   s.row,
+		Col:   s.col,
+		Count: s.count,
+		L2:    s.l2,
+	})
+}
+
+// DeserializeCountSketchUnivFromBytes restores CountSketchUniv from serialized bytes.
+func DeserializeCountSketchUnivFromBytes(data []byte) (*CountSketchUniv, error) {
+	var snap countSketchUnivSnapshot
+	if err := common.DecodeFromBytes(data, &snap); err != nil {
+		return nil, err
+	}
+	if snap.Row <= 0 || snap.Col <= 0 {
+		return nil, errors.New("invalid snapshot dimensions")
+	}
+	if len(snap.Count) != snap.Row {
+		return nil, errors.New("invalid snapshot count rows")
+	}
+	for i := 0; i < snap.Row; i++ {
+		if len(snap.Count[i]) != snap.Col {
+			return nil, errors.New("invalid snapshot count cols")
+		}
+	}
+	if len(snap.L2) != snap.Row {
+		return nil, errors.New("invalid snapshot l2 length")
+	}
+
+	return &CountSketchUniv{
+		row:   snap.Row,
+		col:   snap.Col,
+		count: snap.Count,
+		l2:    snap.L2,
+	}, nil
+}

@@ -334,3 +334,54 @@ func maxInt32(a, b int32) int32 {
 	}
 	return b
 }
+
+type ddSketchSnapshot struct {
+	MappingGamma       float64
+	MappingInvLogGamma float64
+	StoreCounts        []uint64
+	StoreOffset        int32
+	Count              uint64
+	Sum                float64
+	Min                float64
+	Max                float64
+}
+
+// SerializeToBytes serializes DDSketch into bytes.
+func (d *DDSketch) SerializeToBytes() ([]byte, error) {
+	return common.EncodeToBytes(ddSketchSnapshot{
+		MappingGamma:       d.mapping.gamma,
+		MappingInvLogGamma: d.mapping.invLogGamma,
+		StoreCounts:        append([]uint64(nil), d.store.counts...),
+		StoreOffset:        d.store.offset,
+		Count:              d.count,
+		Sum:                d.sum,
+		Min:                d.min,
+		Max:                d.max,
+	})
+}
+
+// DeserializeDDSketchFromBytes restores DDSketch from serialized bytes.
+func DeserializeDDSketchFromBytes(data []byte) (*DDSketch, error) {
+	var snap ddSketchSnapshot
+	if err := common.DecodeFromBytes(data, &snap); err != nil {
+		return nil, err
+	}
+	if snap.MappingGamma <= 1 || snap.MappingInvLogGamma <= 0 {
+		return nil, errors.New("invalid snapshot mapping")
+	}
+
+	return &DDSketch{
+		mapping: IndexMapping{
+			gamma:       snap.MappingGamma,
+			invLogGamma: snap.MappingInvLogGamma,
+		},
+		store: Buckets{
+			counts: snap.StoreCounts,
+			offset: snap.StoreOffset,
+		},
+		count: snap.Count,
+		sum:   snap.Sum,
+		min:   snap.Min,
+		max:   snap.Max,
+	}, nil
+}
