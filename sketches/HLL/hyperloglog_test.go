@@ -166,3 +166,34 @@ func TestHyperLogLog_CAIDA_Idempotency(t *testing.T) {
 	}
 	t.Logf("Idempotency verified. Estimate remains %d after duplicate ingestion.", est1)
 }
+
+func TestHyperLogLogSerializeRoundTrip(t *testing.T) {
+	h := NewHyperLogLog()
+	for i := 0; i < 1000; i++ {
+		h.InsertWithHash(common.FromU64(uint64(i)).Hash)
+	}
+
+	before, err := h.QueryWithHash(common.QueryCardinality, 0)
+	if err != nil {
+		t.Fatalf("query before: %v", err)
+	}
+
+	data, err := h.SerializeToBytes()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	restored, err := DeserializeHyperLogLogFromBytes(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+
+	after, err := restored.QueryWithHash(common.QueryCardinality, 0)
+	if err != nil {
+		t.Fatalf("query after: %v", err)
+	}
+
+	if before != after {
+		t.Fatalf("round-trip mismatch: before=%v after=%v", before, after)
+	}
+}
