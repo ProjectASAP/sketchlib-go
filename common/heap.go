@@ -23,6 +23,15 @@ func (topkheap *TopKHeap) GetMemoryBytes() float64 {
 	return topkheap.totalMem
 }
 
+// RecomputeMemory recalculates the approximate memory usage from heap contents.
+func (topkheap *TopKHeap) RecomputeMemory() {
+	total := 0.0
+	for _, item := range topkheap.Heap {
+		total += float64(len(item.Key)) + 8
+	}
+	topkheap.totalMem = total
+}
+
 func NewTopKHeap(k int) (topkheap *TopKHeap) {
 	topkheap = &TopKHeap{
 		Heap:     make([]Item, 0, k),

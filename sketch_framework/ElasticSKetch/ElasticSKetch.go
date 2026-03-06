@@ -2,9 +2,11 @@ package elasticsketch
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 
+	"github.com/approx-telemetry/sketchlib-go/common"
 	"github.com/cespare/xxhash/v2"
 )
 
@@ -276,4 +278,51 @@ func (cfg *Config) normalize() error {
 	}
 
 	return nil
+}
+
+type elasticSketchSnapshot struct {
+	Config  Config
+	Buckets []bucket
+	Sketch  []float64
+}
+
+// SerializeToBytes serializes ElasticSketch into bytes.
+func (es *ElasticSketch) SerializeToBytes() ([]byte, error) {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	return common.EncodeToBytes(elasticSketchSnapshot{
+		Config:  es.cfg,
+		Buckets: es.buckets,
+		Sketch:  es.sketch,
+	})
+}
+
+// DeserializeElasticSketchFromBytes restores ElasticSketch from serialized bytes.
+func DeserializeElasticSketchFromBytes(data []byte) (*ElasticSketch, error) {
+	var snap elasticSketchSnapshot
+	if err := common.DecodeFromBytes(data, &snap); err != nil {
+		return nil, err
+	}
+	if err := snap.Config.normalize(); err != nil {
+		return nil, err
+	}
+	if len(snap.Buckets) != snap.Config.BucketCount {
+		return nil, errors.New("invalid snapshot buckets length")
+	}
+	if len(snap.Sketch) != snap.Config.SketchSize {
+		return nil, errors.New("invalid snapshot sketch size")
+	}
+	for i := range snap.Buckets {
+		if len(snap.Buckets[i].slots) != snap.Config.SlotsPerBucket {
+			return nil, errors.New("invalid snapshot slot count")
+		}
+	}
+
+	es := &ElasticSketch{
+		cfg:     snap.Config,
+		buckets: snap.Buckets,
+		sketch:  snap.Sketch,
+	}
+	es.flushCh = make(chan ElasticEntry, snap.Config.FlushChanSize)
+	return es, nil
 }

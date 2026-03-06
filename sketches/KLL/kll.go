@@ -379,3 +379,61 @@ func (q CDF) QueryLI(p float64) float64 {
 	b, bq := q[idx].V, q[idx].Q
 	return ((aq-p)*b + (p-bq)*a) / (aq - bq)
 }
+
+type kllSnapshot struct {
+	K          int
+	Compactors [][]float64
+	CoinState  uint64
+	CoinMask   uint64
+}
+
+// SerializeToBytes serializes KLLSketch into bytes.
+func (s *KLLSketch) SerializeToBytes() ([]byte, error) {
+	compactors := make([][]float64, len(s.Compactors))
+	for i := range s.Compactors {
+		compactors[i] = append([]float64(nil), s.Compactors[i]...)
+	}
+
+	return common.EncodeToBytes(kllSnapshot{
+		K:          s.k,
+		Compactors: compactors,
+		CoinState:  s.co.st,
+		CoinMask:   s.co.mask,
+	})
+}
+
+// DeserializeKLLSketchFromBytes restores KLLSketch from serialized bytes.
+func DeserializeKLLSketchFromBytes(data []byte) (*KLLSketch, error) {
+	var snap kllSnapshot
+	if err := common.DecodeFromBytes(data, &snap); err != nil {
+		return nil, err
+	}
+	if snap.K <= 0 {
+		return nil, errors.New("invalid snapshot k")
+	}
+	if len(snap.Compactors) == 0 {
+		return nil, errors.New("invalid snapshot compactors")
+	}
+
+	compactors := make([]Compactor, len(snap.Compactors))
+	for i := range snap.Compactors {
+		compactors[i] = append(Compactor(nil), snap.Compactors[i]...)
+	}
+
+	s := &KLLSketch{
+		Compactors: compactors,
+		k:          snap.K,
+		H:          len(compactors),
+		co: coin{
+			st:   snap.CoinState,
+			mask: snap.CoinMask,
+		},
+	}
+
+	s.maxSize = 0
+	for h := 0; h < s.H; h++ {
+		s.maxSize += s.capacity(h)
+	}
+	s.updateRetainedSize()
+	return s, nil
+}

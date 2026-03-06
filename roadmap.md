@@ -47,10 +47,10 @@ This roadmap summarizes:
 
 These items unlock immediate architecture and production-readiness improvements.
 
-- [ ] Serialization/Deserialization Layer
-  - [ ] Add standard encode/decode support for all core sketches and frameworks
-  - [ ] Recommended formats: MessagePack first, optional JSON/Protobuf adapters
-  - [ ] Goal: checkpointing, network transfer, cross-service reuse
+- [x] Serialization/Deserialization Layer
+  - [x] Add standard encode/decode support for all core sketches and frameworks
+  - [x] Recommended formats: MessagePack first, optional JSON/Protobuf adapters
+  - [x] Goal: checkpointing, network transfer, cross-service reuse
 
 - [ ] API Maturity and Compatibility Matrix
   - [ ] Document supported query types per sketch/framework
