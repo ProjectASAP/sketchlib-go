@@ -122,9 +122,13 @@ func TestCountSketch_Memory_Usage(t *testing.T) {
 	runtime.ReadMemStats(&m1)
 
 	// Allocate Sketch
+	// CountSketch requires cols to be power-of-two.
 	// CountSketch uses float64 counters (8 bytes) + L2 Array (Rows * 8 bytes)
-	rows, cols := 5, 100_000
-	cs, _ := countsketch.NewCountSketch(rows, cols)
+	rows, cols := 5, 131_072
+	cs, err := countsketch.NewCountSketch(rows, cols)
+	if err != nil {
+		t.Fatalf("NewCountSketch failed: %v", err)
+	}
 
 	// Snapshot after allocation
 	runtime.ReadMemStats(&m2)
@@ -158,7 +162,10 @@ func TestCountSketch_Memory_Usage(t *testing.T) {
 	t.Logf(" Dynamic Growth:  %d bytes (Expected ~0 for static matrix)", dynamicGrowth)
 
 	// Check Memory After Merge
-	cs2, _ := countsketch.NewCountSketch(rows, cols)
+	cs2, err := countsketch.NewCountSketch(rows, cols)
+	if err != nil {
+		t.Fatalf("NewCountSketch for merge failed: %v", err)
+	}
 	runtime.ReadMemStats(&m1)
 	_ = cs.Merge(cs2)
 	runtime.ReadMemStats(&m2)
