@@ -5,6 +5,7 @@ import (
 	"math"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
 const GrowChunk = 128
@@ -44,65 +45,74 @@ func (m IndexMapping) Value(k int32) float64 {
 // ---------------- Buckets ----------------
 
 type Buckets struct {
-	counts []uint64
+	counts *storage.Vector1D[uint64]
 	offset int32
 }
 
 func (b *Buckets) IsEmpty() bool {
-	return len(b.counts) == 0
+	return b.counts == nil || b.counts.Len() == 0
 }
 
 func (b *Buckets) Range() (int32, int32, bool) {
-	if len(b.counts) == 0 {
+	if b.IsEmpty() {
 		return 0, 0, false
 	}
+	counts := b.counts.AsSlice()
 	left := b.offset
-	right := b.offset + int32(len(b.counts)) - 1
+	right := b.offset + int32(len(counts)) - 1
 	return left, right, true
 }
 
 func (b *Buckets) ensure(k int32) {
-	if len(b.counts) == 0 {
-		b.counts = make([]uint64, GrowChunk)
+	if b.IsEmpty() {
+		filled, _ := storage.FilledVector1D[uint64](GrowChunk, 0)
+		b.counts = filled
 		b.offset = k - int32(GrowChunk/2)
 		return
 	}
 
+	counts := b.counts.AsSlice()
 	left, right, _ := b.Range()
 
 	if k < left {
 		needed := int(left - k)
 		grow := maxInt(needed, GrowChunk)
 
-		newCounts := make([]uint64, grow+len(b.counts))
-		copy(newCounts[grow:], b.counts)
-		b.counts = newCounts
+		newCounts := make([]uint64, grow+len(counts))
+		copy(newCounts[grow:], counts)
+		b.counts = storage.Vector1DFromVec(newCounts)
 		b.offset -= int32(grow)
 
 	} else if k > right {
 		needed := int(k - right)
 		grow := maxInt(needed, GrowChunk)
-		b.counts = append(b.counts, make([]uint64, grow)...)
+		b.counts.ExtendFromSlice(make([]uint64, grow))
 	}
 }
 
 func (b *Buckets) addOne(k int32) {
+	if b.IsEmpty() {
+		b.ensure(k)
+	}
+	counts := b.counts.AsMutSlice()
 	idx := k - b.offset
 	if idx >= 0 {
 		i := int(idx)
-		if i < len(b.counts) {
-			b.counts[i]++
+		if i < len(counts) {
+			counts[i]++
 			return
 		}
 	}
 	b.ensure(k)
-	b.counts[int(k-b.offset)]++
+	b.counts.AsMutSlice()[int(k-b.offset)]++
 }
 
 func (b Buckets) Clone() Buckets {
-	cp := make([]uint64, len(b.counts))
-	copy(cp, b.counts)
-	return Buckets{counts: cp, offset: b.offset}
+	if b.IsEmpty() {
+		return Buckets{offset: b.offset}
+	}
+	cp := append([]uint64(nil), b.counts.AsSlice()...)
+	return Buckets{counts: storage.Vector1DFromVec(cp), offset: b.offset}
 }
 
 // ---------------- DDSketch ----------------
@@ -247,16 +257,16 @@ func (d *DDSketch) mergeBuckets(a *Buckets, b *Buckets) {
 
 	merged := make([]uint64, newLen)
 
-	for i, c := range a.counts {
+	for i, c := range a.counts.AsSlice() {
 		k := al + int32(i)
 		merged[int(k-newL)] += c
 	}
-	for i, c := range b.counts {
+	for i, c := range b.counts.AsSlice() {
 		k := bl + int32(i)
 		merged[int(k-newL)] += c
 	}
 
-	a.counts = merged
+	a.counts = storage.Vector1DFromVec(merged)
 	a.offset = newL
 }
 
@@ -279,7 +289,10 @@ func (d *DDSketch) GetValueAtQuantile(q float64) (float64, bool) {
 
 	var seen uint64
 
-	for i, c := range d.store.counts {
+	if d.store.counts == nil {
+		return d.max, true
+	}
+	for i, c := range d.store.counts.AsSlice() {
 		if c == 0 {
 			continue
 		}
@@ -371,10 +384,14 @@ type ddSketchSnapshot struct {
 
 // SerializeToBytes serializes DDSketch into bytes.
 func (d *DDSketch) SerializeToBytes() ([]byte, error) {
+	storeCounts := []uint64(nil)
+	if d.store.counts != nil {
+		storeCounts = append([]uint64(nil), d.store.counts.AsSlice()...)
+	}
 	return common.EncodeToBytes(ddSketchSnapshot{
 		MappingGamma:       d.mapping.gamma,
 		MappingInvLogGamma: d.mapping.invLogGamma,
-		StoreCounts:        append([]uint64(nil), d.store.counts...),
+		StoreCounts:        storeCounts,
 		StoreOffset:        d.store.offset,
 		Count:              d.count,
 		Sum:                d.sum,
@@ -399,7 +416,7 @@ func DeserializeDDSketchFromBytes(data []byte) (*DDSketch, error) {
 			invLogGamma: snap.MappingInvLogGamma,
 		},
 		store: Buckets{
-			counts: snap.StoreCounts,
+			counts: storage.Vector1DFromVec(snap.StoreCounts),
 			offset: snap.StoreOffset,
 		},
 		count: snap.Count,

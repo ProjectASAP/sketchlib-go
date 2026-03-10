@@ -135,14 +135,18 @@ func TestDDSketch_CAIDA_Merge(t *testing.T) {
 	// We cannot compare len(counts) because Add() adds padding (GrowChunk)
 	// while Merge() allocates exact fit. We must compare counts at every index.
 
-	// Helper to safely get count at a specific global index
-	getCount := func(b *Buckets, k int32) uint64 {
-		idx := k - b.offset
-		if idx >= 0 && int(idx) < len(b.counts) {
-			return b.counts[idx]
+		// Helper to safely get count at a specific global index
+		getCount := func(b *Buckets, k int32) uint64 {
+			if b.counts == nil {
+				return 0
+			}
+			counts := b.counts.AsSlice()
+			idx := k - b.offset
+			if idx >= 0 && int(idx) < len(counts) {
+				return counts[idx]
+			}
+			return 0
 		}
-		return 0
-	}
 
 	// Determine the global range covering both sketches
 	l1, r1, _ := sPart1.store.Range()
