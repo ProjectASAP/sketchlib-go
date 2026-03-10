@@ -256,11 +256,14 @@ func TestCountSketchSerializeRoundTrip(t *testing.T) {
 		t.Fatalf("new countsketch: %v", err)
 	}
 
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 200; i++ {
 		cs.UpdateString("hot-key", 1)
 	}
 
-	before := cs.EstimateStringCount("hot-key")
+	before, err := cs.QueryWithHash(common.QueryFrequency, common.FromString("hot-key").Hash)
+	if err != nil {
+		t.Fatalf("query before: %v", err)
+	}
 
 	data, err := cs.SerializeToBytes()
 	if err != nil {
@@ -272,7 +275,11 @@ func TestCountSketchSerializeRoundTrip(t *testing.T) {
 		t.Fatalf("deserialize: %v", err)
 	}
 
-	after := restored.EstimateStringCount("hot-key")
+	after, err := restored.QueryWithHash(common.QueryFrequency, common.FromString("hot-key").Hash)
+	if err != nil {
+		t.Fatalf("query after: %v", err)
+	}
+
 	if before != after {
 		t.Fatalf("round-trip mismatch: before=%v after=%v", before, after)
 	}
