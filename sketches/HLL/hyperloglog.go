@@ -43,6 +43,11 @@ func NewHyperLogLog() *HyperLogLog {
 	return &HyperLogLog{}
 }
 
+// New mirrors the Rust constructor naming.
+func New() *HyperLogLog {
+	return NewHyperLogLog()
+}
+
 // Debug prints raw register values (for inspection only).
 func (h *HyperLogLog) Debug() {
 	fmt.Println(h.Registers)
@@ -64,6 +69,26 @@ func (h *HyperLogLog) Insert(x float64) {
 	buf := common.Float64ToBytes(x)
 	hash := common.HashIt(0, buf)
 	h.InsertWithHash(hash)
+}
+
+// InsertInput mirrors the Rust API while preserving the legacy float64 Insert.
+func (h *HyperLogLog) InsertInput(input *common.SketchInput) {
+	if input == nil {
+		return
+	}
+	h.InsertWithHash(input.Hash)
+}
+
+func (h *HyperLogLog) InsertMany(inputs []*common.SketchInput) {
+	for _, input := range inputs {
+		h.InsertInput(input)
+	}
+}
+
+func (h *HyperLogLog) InsertManyWithHashes(hashes []uint64) {
+	for _, hash := range hashes {
+		h.InsertWithHash(hash)
+	}
 }
 
 // InsertWithHash is the FAST PATH (execution layer).

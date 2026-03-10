@@ -126,6 +126,11 @@ func NewDDSketch(alpha float64) *DDSketch {
 	}
 }
 
+// New mirrors the Rust constructor naming.
+func New(alpha float64) *DDSketch {
+	return NewDDSketch(alpha)
+}
+
 // TypeName returns the name of the sketch.
 func (d *DDSketch) TypeName() string {
 	return "DDSketch"
@@ -161,6 +166,24 @@ func (d *DDSketch) InsertWithHash(hash uint64) {
 
 func (d *DDSketch) GetCount() uint64 {
 	return d.count
+}
+
+func (d *DDSketch) Count() uint64 {
+	return d.count
+}
+
+func (d *DDSketch) Min() (float64, bool) {
+	if d.count == 0 {
+		return 0, false
+	}
+	return d.min, true
+}
+
+func (d *DDSketch) Max() (float64, bool) {
+	if d.count == 0 {
+		return 0, false
+	}
+	return d.max, true
 }
 
 // ---------------- Safe Merge ----------------

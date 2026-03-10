@@ -152,6 +152,24 @@ func TestCMS_QueryNoSideEffect(t *testing.T) {
 	}
 }
 
+func TestCMS_RustStyleAPI(t *testing.T) {
+	s, err := New()
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if s.RowCount() != DefaultRowNum || s.ColCount() != DefaultColNum {
+		t.Fatalf("unexpected default dimensions: got (%d,%d)", s.RowCount(), s.ColCount())
+	}
+
+	input := common.FromString("rust-api")
+	s.Insert(input)
+	s.InsertMany(input, 4)
+
+	if got := s.Estimate(input); got < 5 {
+		t.Fatalf("estimate too small: got %v", got)
+	}
+}
+
 // ==============================================================================
 // 2. STATISTICAL & REAL-WORLD TESTS (New)
 // ==============================================================================

@@ -251,3 +251,20 @@ func TestKLL_CAIDA_MemoryBound(t *testing.T) {
 		t.Errorf("Retained items %d seems excessive for k=%d", retained, k)
 	}
 }
+
+func TestKLLRustStyleAPI(t *testing.T) {
+	s := InitKLL(64)
+	values := []float64{1, 2, 3, 4, 5}
+	for _, value := range values {
+		s.Update(value)
+	}
+
+	if got := s.Count(); got != len(values) {
+		t.Fatalf("unexpected count: got %d", got)
+	}
+
+	median := s.Quantile(0.5)
+	if median < 2 || median > 4 {
+		t.Fatalf("unexpected median: got %v", median)
+	}
+}
