@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	"github.com/approx-telemetry/sketchlib-go/common/storage"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 type legacyCountMinSketch struct {

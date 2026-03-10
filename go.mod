@@ -1,4 +1,4 @@
-module github.com/approx-telemetry/sketchlib-go
+module github.com/ProjectASAP/sketchlib-go
 
 go 1.24.0
 

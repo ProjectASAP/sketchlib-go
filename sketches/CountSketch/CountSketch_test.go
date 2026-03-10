@@ -6,8 +6,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 // Helper to load CAIDA data for tests
@@ -282,5 +282,9 @@ func TestCountSketchSerializeRoundTrip(t *testing.T) {
 
 	if before != after {
 		t.Fatalf("round-trip mismatch: before=%v after=%v", before, after)
+	}
+
+	if restored.TopK == nil {
+		t.Fatal("restored TopK should not be nil")
 	}
 }

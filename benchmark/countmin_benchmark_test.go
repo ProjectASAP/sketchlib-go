@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	countminsketch "github.com/approx-telemetry/sketchlib-go/sketches/CountMinSketch"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	countminsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 const (

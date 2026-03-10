@@ -14,7 +14,7 @@ import (
 	"math"
 	"math/bits"
 
-	common "github.com/approx-telemetry/sketchlib-go/common"
+	common "github.com/ProjectASAP/sketchlib-go/common"
 )
 
 const (

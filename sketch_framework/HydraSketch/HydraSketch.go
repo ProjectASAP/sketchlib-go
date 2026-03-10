@@ -5,8 +5,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	univmon "github.com/approx-telemetry/sketchlib-go/sketch_framework/UnivMon"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
 )
 
 // Pair represents a Key-Value pair for TopK results.

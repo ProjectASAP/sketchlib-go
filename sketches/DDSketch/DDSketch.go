@@ -4,7 +4,7 @@ import (
 	"errors"
 	"math"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
 const GrowChunk = 128

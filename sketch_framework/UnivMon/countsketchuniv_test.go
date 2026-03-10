@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

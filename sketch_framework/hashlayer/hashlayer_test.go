@@ -4,7 +4,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
 // MockSketch is a lightweight dummy implementation for benchmarking

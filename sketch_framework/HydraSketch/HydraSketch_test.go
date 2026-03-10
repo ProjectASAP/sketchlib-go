@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common"
 	"github.com/golang/glog"
 )
 

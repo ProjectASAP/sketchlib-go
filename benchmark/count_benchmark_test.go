@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	countsketch "github.com/approx-telemetry/sketchlib-go/sketches/CountSketch"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
 )
 
 const (

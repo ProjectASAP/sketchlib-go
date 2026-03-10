@@ -5,8 +5,8 @@ import (
 	"math"
 	"math/bits"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	"github.com/approx-telemetry/sketchlib-go/common/storage"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
 // CountMinSketch with single-hash multi-row derivation.

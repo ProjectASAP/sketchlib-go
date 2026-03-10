@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	kll "github.com/approx-telemetry/sketchlib-go/sketches/KLL"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	kll "github.com/ProjectASAP/sketchlib-go/sketches/KLL"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 const (

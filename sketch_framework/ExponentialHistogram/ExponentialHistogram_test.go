@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 // TestEH_CAIDA_Stress runs a full benchmark and correctness test using the CAIDA dataset.

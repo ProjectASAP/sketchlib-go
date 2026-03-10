@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 // ======================
