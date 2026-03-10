@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	cocosketch "github.com/approx-telemetry/sketchlib-go/sketches/CocoSketch"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	cocosketch "github.com/ProjectASAP/sketchlib-go/sketches/CocoSketch"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 const (

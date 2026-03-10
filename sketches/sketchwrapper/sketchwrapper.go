@@ -3,7 +3,7 @@ package sketch
 import (
 	"errors"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
 // AnySketch is a thin runtime wrapper.

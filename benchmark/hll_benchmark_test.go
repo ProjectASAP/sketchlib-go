@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	hll "github.com/approx-telemetry/sketchlib-go/sketches/HLL"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 // =====================================================

@@ -6,8 +6,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 // Helper to load CAIDA data for tests
@@ -247,5 +247,37 @@ func TestCS_CAIDA_Accuracy(t *testing.T) {
 
 	if avgRelError > 20.0 {
 		t.Errorf("Accuracy too low on real-world data: %.2f%%", avgRelError)
+	}
+}
+
+func TestCountSketchSerializeRoundTrip(t *testing.T) {
+	cs, err := NewCountSketch(5, 1024)
+	if err != nil {
+		t.Fatalf("new countsketch: %v", err)
+	}
+
+	for i := 0; i < 100; i++ {
+		cs.UpdateString("hot-key", 1)
+	}
+
+	before := cs.EstimateStringCount("hot-key")
+
+	data, err := cs.SerializeToBytes()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	restored, err := DeserializeCountSketchFromBytes(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+
+	after := restored.EstimateStringCount("hot-key")
+	if before != after {
+		t.Fatalf("round-trip mismatch: before=%v after=%v", before, after)
+	}
+
+	if restored.TopK == nil {
+		t.Fatal("restored TopK should not be nil")
 	}
 }

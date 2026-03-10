@@ -8,7 +8,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
 type KLLSketch struct {

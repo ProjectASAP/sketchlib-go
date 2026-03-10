@@ -7,7 +7,7 @@ import (
 	"math/bits"
 	"sort"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
 const CS_ROW_NO_Univ_ELEPHANT int = 5

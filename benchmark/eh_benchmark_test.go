@@ -5,16 +5,16 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	eh "github.com/approx-telemetry/sketchlib-go/sketch_framework/ExponentialHistogram"
-	univmon "github.com/approx-telemetry/sketchlib-go/sketch_framework/UnivMon"
-	cocosketch "github.com/approx-telemetry/sketchlib-go/sketches/CocoSketch"
-	countmin "github.com/approx-telemetry/sketchlib-go/sketches/CountMinSketch"
-	countsketch "github.com/approx-telemetry/sketchlib-go/sketches/CountSketch"
-	ddsketch "github.com/approx-telemetry/sketchlib-go/sketches/DDSketch"
-	hll "github.com/approx-telemetry/sketchlib-go/sketches/HLL"
-	kll "github.com/approx-telemetry/sketchlib-go/sketches/KLL"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	eh "github.com/ProjectASAP/sketchlib-go/sketch_framework/ExponentialHistogram"
+	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
+	cocosketch "github.com/ProjectASAP/sketchlib-go/sketches/CocoSketch"
+	countmin "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
+	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
+	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
+	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
+	kll "github.com/ProjectASAP/sketchlib-go/sketches/KLL"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 const (

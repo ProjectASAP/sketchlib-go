@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	ddsketch "github.com/approx-telemetry/sketchlib-go/sketches/DDSketch"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 const (

@@ -1,6 +1,6 @@
 package hashlayer
 
-import "github.com/approx-telemetry/sketchlib-go/common"
+import "github.com/ProjectASAP/sketchlib-go/common"
 
 // HashLayer computes hash once and dispatches to sketches.
 type HashLayer struct {

@@ -5,8 +5,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
-	"github.com/approx-telemetry/sketchlib-go/testdata"
+	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 // Tolerance for HLL (Standard Error for 14-bit HLL is ~0.8%, we allow 2% margin)

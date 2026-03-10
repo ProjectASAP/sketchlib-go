@@ -5,16 +5,16 @@ import (
 	"math"
 	"sync"
 
-	"github.com/approx-telemetry/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common"
 
 	// Import specific sketch implementations
-	univmon "github.com/approx-telemetry/sketchlib-go/sketch_framework/UnivMon"
-	cocosketch "github.com/approx-telemetry/sketchlib-go/sketches/CocoSketch"
-	countmin "github.com/approx-telemetry/sketchlib-go/sketches/CountMinSketch"
-	countsketch "github.com/approx-telemetry/sketchlib-go/sketches/CountSketch"
-	ddsketch "github.com/approx-telemetry/sketchlib-go/sketches/DDSketch"
-	hll "github.com/approx-telemetry/sketchlib-go/sketches/HLL"
-	kll "github.com/approx-telemetry/sketchlib-go/sketches/KLL"
+	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
+	cocosketch "github.com/ProjectASAP/sketchlib-go/sketches/CocoSketch"
+	countmin "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
+	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
+	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
+	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
+	kll "github.com/ProjectASAP/sketchlib-go/sketches/KLL"
 )
 
 // ==============================================================================
