@@ -249,3 +249,38 @@ func TestCS_CAIDA_Accuracy(t *testing.T) {
 		t.Errorf("Accuracy too low on real-world data: %.2f%%", avgRelError)
 	}
 }
+
+func TestCountSketchSerializeRoundTrip(t *testing.T) {
+	cs, err := NewCountSketch(5, 1024)
+	if err != nil {
+		t.Fatalf("new countsketch: %v", err)
+	}
+
+	for i := 0; i < 200; i++ {
+		cs.UpdateString("hot-key", 1)
+	}
+
+	before, err := cs.QueryWithHash(common.QueryFrequency, common.FromString("hot-key").Hash)
+	if err != nil {
+		t.Fatalf("query before: %v", err)
+	}
+
+	data, err := cs.SerializeToBytes()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	restored, err := DeserializeCountSketchFromBytes(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+
+	after, err := restored.QueryWithHash(common.QueryFrequency, common.FromString("hot-key").Hash)
+	if err != nil {
+		t.Fatalf("query after: %v", err)
+	}
+
+	if before != after {
+		t.Fatalf("round-trip mismatch: before=%v after=%v", before, after)
+	}
+}
