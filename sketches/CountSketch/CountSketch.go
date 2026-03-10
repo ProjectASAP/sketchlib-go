@@ -4,7 +4,6 @@ import (
 	"errors"
 	"math"
 	"math/bits"
-	"sort"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	"github.com/ProjectASAP/sketchlib-go/common/storage"
@@ -21,8 +20,10 @@ const TOPK_SIZE2 int = 200
 
 // Default constants if user provides no arguments
 const (
-	DefaultRows = 5
-	DefaultCols = 2048
+	DefaultRows     = 5
+	DefaultCols     = 2048
+	RustDefaultRows = 3
+	RustDefaultCols = 4096
 )
 
 type CountSketch struct {
@@ -129,6 +130,27 @@ func NewCountSketch(dims ...int) (*CountSketch, error) {
 	}, nil
 }
 
+// New returns a Count sketch using the Rust default dimensions.
+func New() (*CountSketch, error) {
+	return NewCountSketch(RustDefaultRows, RustDefaultCols)
+}
+
+// WithDimensions mirrors the Rust constructor naming.
+func WithDimensions(rows, cols int) (*CountSketch, error) {
+	return NewCountSketch(rows, cols)
+}
+
+func (s *CountSketch) RowCount() int { return s.Rows }
+func (s *CountSketch) ColCount() int { return s.Cols }
+
+func (s *CountSketch) AsStorage() *storage.DenseMatrixStorage {
+	return s.countStore
+}
+
+func (s *CountSketch) AsStorageMut() *storage.DenseMatrixStorage {
+	return s.countStore
+}
+
 // derivePosAndSign computes row index and sign (+1/-1) from base hash.
 // Kept for backward-compatibility with existing tests.
 func (s *CountSketch) derivePosAndSign(hash uint64, row int) (int, float64) {
@@ -158,6 +180,28 @@ func (s *CountSketch) fastPacked64PosAndSign(packed uint64, row int) (int, float
 // Use UpdateString if TopK is required.
 func (s *CountSketch) InsertWithHash(hash uint64) {
 	s.InsertWithHashAndValue(hash, 1.0)
+}
+
+func (s *CountSketch) Insert(input *common.SketchInput) {
+	if input == nil {
+		return
+	}
+	s.InsertWithHash(input.Hash)
+}
+
+func (s *CountSketch) InsertMany(input *common.SketchInput, many float64) {
+	if input == nil || many == 0 {
+		return
+	}
+	s.InsertWithHashAndValue(input.Hash, many)
+}
+
+func (s *CountSketch) FastInsertWithHashValue(hash uint64) {
+	s.InsertWithHash(hash)
+}
+
+func (s *CountSketch) FastInsertManyWithHashValue(hash uint64, many float64) {
+	s.InsertWithHashAndValue(hash, many)
 }
 
 // InsertWithHashAndValue supports weighted updates.
@@ -210,43 +254,41 @@ func (s *CountSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, e
 				c, sign := s.fastPacked64PosAndSign(packed, r)
 				estimates[r] = count[r][c] * sign
 			}
-			sort.Float64s(estimates)
-			mid := s.Rows / 2
-			if s.Rows%2 == 1 {
-				return estimates[mid], nil
-			}
-			return (estimates[mid-1] + estimates[mid]) / 2.0, nil
+			return common.ComputeMedianInlineF64(estimates), nil
 		}
 
 		for r := 0; r < s.Rows; r++ {
 			c, sign := s.derivePosAndSignFromHashed(hashed, r)
 			estimates[r] = count[r][c] * sign
 		}
-		sort.Float64s(estimates)
-
-		// Return Median
-		mid := s.Rows / 2
-		if s.Rows%2 == 1 {
-			return estimates[mid], nil
-		}
-		return (estimates[mid-1] + estimates[mid]) / 2.0, nil
+		return common.ComputeMedianInlineF64(estimates), nil
 
 	case common.QuerySum2:
-		// Return Median of L2 arrays
-		l2s := make([]float64, s.Rows)
-		copy(l2s, s.L2)
-		sort.Float64s(l2s)
-
-		mid := s.Rows / 2
-		val := l2s[mid]
-		if s.Rows%2 == 0 {
-			val = (l2s[mid-1] + l2s[mid]) / 2.0
+		var l2Stack [16]float64
+		l2s := l2Stack[:0]
+		if s.Rows > len(l2Stack) {
+			l2s = make([]float64, s.Rows)
+		} else {
+			l2s = l2Stack[:s.Rows]
 		}
-		return math.Sqrt(val), nil
+		copy(l2s, s.L2)
+		return math.Sqrt(common.ComputeMedianInlineF64(l2s)), nil
 
 	default:
 		return 0, common.ErrUnsupportedQuery
 	}
+}
+
+func (s *CountSketch) Estimate(input *common.SketchInput) float64 {
+	if input == nil {
+		return 0
+	}
+	return s.FastEstimateWithHash(input.Hash)
+}
+
+func (s *CountSketch) FastEstimateWithHash(hash uint64) float64 {
+	est, _ := s.QueryWithHash(common.QueryFrequency, hash)
+	return est
 }
 
 func (s *CountSketch) Merge(other common.Sketch) error {
@@ -261,8 +303,10 @@ func (s *CountSketch) Merge(other common.Sketch) error {
 	// 1. Merge Matrix and L2
 	for r := 0; r < s.Rows; r++ {
 		s.L2[r] += o.L2[r]
+		sRow := s.Count[r]
+		oRow := o.Count[r]
 		for c := 0; c < s.Cols; c++ {
-			s.countStore.UpdateOneCounter(r, c, o.countStore.QueryOneCounter(r, c))
+			sRow[c] += oRow[c]
 		}
 	}
 

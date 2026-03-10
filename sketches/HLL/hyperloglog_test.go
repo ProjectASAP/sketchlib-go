@@ -197,3 +197,14 @@ func TestHyperLogLogSerializeRoundTrip(t *testing.T) {
 		t.Fatalf("round-trip mismatch: before=%v after=%v", before, after)
 	}
 }
+
+func TestHyperLogLogRustStyleAPI(t *testing.T) {
+	h := New()
+	h.InsertInput(common.FromString("a"))
+	h.InsertMany([]*common.SketchInput{common.FromString("b"), common.FromString("c")})
+	h.InsertManyWithHashes([]uint64{common.FromString("d").Hash})
+
+	if got := h.Estimate(); got < 4 {
+		t.Fatalf("estimate too small: got %d", got)
+	}
+}

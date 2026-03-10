@@ -3,7 +3,6 @@ package kll
 import (
 	"errors"
 	"math"
-	"math/rand"
 	"sort"
 	"time"
 	"unsafe"
@@ -11,314 +10,380 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
+const (
+	capacityCacheLen = 20
+	maxCacheableK    = 26602
+	capacityDecay    = 2.0 / 3.0
+	defaultK         = 200
+	defaultM         = 8
+)
+
 type KLLSketch struct {
-	Compactors []Compactor
-	k          int
-	H          int
-
-	// size tracks the number of items strictly retained in memory.
-	// This is used for internal compaction logic.
-	// For total stream length, use Count() or GetSize().
-	size    int
-	maxSize int
-
-	co coin
+	items         []float64
+	levels        []int
+	k             int
+	m             int
+	numLevels     int
+	co            coin
+	capacityCache [capacityCacheLen]uint32
+	topHeight     int
+	level0Cap     int
 }
 
-// NewKLLSketch creates a new KLLSketch.
-// k controls the maximum memory used by the stream, which is 3*k + lg(n).
+type KLL = KLLSketch
+
+type coin struct {
+	state         uint64
+	bitCache      uint64
+	remainingBits uint8
+}
+
+func newCoin() coin {
+	seed := uint64(time.Now().UnixNano())
+	return coinFromSeed(seed)
+}
+
+func coinFromSeed(seed uint64) coin {
+	return coin{state: normalizeSeed(seed)}
+}
+
+func normalizeSeed(seed uint64) uint64 {
+	if seed == 0 {
+		return 0x9e3779b97f4a7c15
+	}
+	return seed
+}
+
+func xorshiftMult64(x uint64) uint64 {
+	x ^= x >> 12
+	x ^= x << 25
+	x ^= x >> 27
+	return x * 2685821657736338717
+}
+
+func (c *coin) refill() {
+	c.state = normalizeSeed(xorshiftMult64(c.state))
+	c.bitCache = c.state
+	c.remainingBits = 64
+}
+
+func (c *coin) toss() bool {
+	if c.remainingBits == 0 {
+		c.refill()
+	}
+	bit := (c.bitCache & 1) != 0
+	c.bitCache >>= 1
+	c.remainingBits--
+	return bit
+}
+
+// NewKLLSketch creates a new KLL sketch using the Rust default minimum buffer.
 func NewKLLSketch(k int) (*KLLSketch, error) {
 	if k <= 0 {
 		return nil, errors.New("k must be positive")
 	}
-
-	// Initialize coin state using time
-	// We use a non-zero seed for xorshift
-	seed := uint64(time.Now().UnixNano())
-	if seed == 0 {
-		seed = 0xCAFEBABE // Fallback for safety
-	}
-
-	s := KLLSketch{
-		k:  k,
-		co: coin{st: seed, mask: 0},
-	}
-	s.grow()
-	return &s, nil
+	return Init(k, defaultM), nil
 }
 
-// ================= API IMPLEMENTATION (common.Sketch) =================
+// New returns a sketch using the Rust default K.
+func New() *KLLSketch {
+	return InitKLL(defaultK)
+}
 
-// TypeName returns the unique name of the sketch type.
+// Init mirrors the Rust constructor naming.
+func Init(k, m int) *KLLSketch {
+	normM := m
+	if normM < 2 {
+		normM = 2
+	}
+	if normM > maxCacheableK {
+		normM = maxCacheableK
+	}
+	normK := k
+	if normK < normM {
+		normK = normM
+	}
+	if normK > maxCacheableK {
+		normK = maxCacheableK
+	}
+
+	s := &KLLSketch{
+		items:     make([]float64, 0, normK*3),
+		levels:    []int{0, 0},
+		k:         normK,
+		m:         normM,
+		numLevels: 1,
+		co:        newCoin(),
+	}
+	s.rebuildCapacityCache()
+	return s
+}
+
+// InitKLL mirrors the Rust helper naming.
+func InitKLL(k int) *KLLSketch {
+	return Init(k, defaultM)
+}
+
 func (s *KLLSketch) TypeName() string {
 	return "kll"
 }
 
-// InsertWithHash implements common.Sketch.
-// For KLL, we treat the hash as the float64 value to track distribution.
 func (s *KLLSketch) InsertWithHash(hash uint64) {
 	s.Insert(float64(hash))
 }
 
-// QueryWithHash implements common.Sketch.
-// KLL does not support frequency queries by hash.
 func (s *KLLSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
-	return 0, common.ErrUnsupportedQuery
+	switch q {
+	case common.QueryQuantile:
+		return s.Quantile(math.Float64frombits(hash)), nil
+	case common.QueryFrequency:
+		return float64(s.Count()), nil
+	default:
+		return 0, common.ErrUnsupportedQuery
+	}
 }
 
-// Merge combines another sketch into this one.
 func (s *KLLSketch) Merge(other common.Sketch) error {
 	o, ok := other.(*KLLSketch)
 	if !ok {
 		return errors.New("cannot merge: incompatible sketch type")
 	}
-
-	// Grow this sketch if the other sketch is deeper
-	for s.H < o.H {
-		s.grow()
-	}
-
-	// Merge compactors
-	for h, c := range o.Compactors {
-		s.Compactors[h] = append(s.Compactors[h], c...)
-	}
-
-	// Recalculate retained size and perform compaction if needed
-	s.updateRetainedSize()
-	s.compact()
+	s.mergePacked(o)
 	return nil
 }
 
-// ================= PUBLIC METHODS =================
-
-// Insert adds a value x to the stream.
+// Insert adds a value to the sketch.
 func (s *KLLSketch) Insert(x float64) {
-	s.Compactors[0] = append(s.Compactors[0], x)
-	s.size++
-	s.compact()
+	s.pushValue(x)
 }
 
-// GetSize returns the total number of items seen in the stream (N).
-// NOTE: This fixes the test failure "expected 2000, got 319".
+// Update mirrors the Rust naming.
+func (s *KLLSketch) Update(x float64) {
+	s.Insert(x)
+}
+
+// Clear resets the sketch while preserving allocation.
+func (s *KLLSketch) Clear() {
+	s.items = s.items[:0]
+	s.levels = []int{0, 0}
+	s.numLevels = 1
+	s.co = newCoin()
+	s.rebuildCapacityCache()
+}
+
+// GetSize returns the total number of inserted items.
 func (s *KLLSketch) GetSize() int {
 	return s.Count()
 }
 
-// GetRetainedItems returns the number of items actually stored in memory.
-// Use this to check memory pressure.
+// GetRetainedItems returns the number of items physically stored in memory.
 func (s *KLLSketch) GetRetainedItems() int {
-	return s.size
+	return len(s.items)
 }
 
 // GetMemoryBytes returns the approximate memory usage in bytes.
 func (s *KLLSketch) GetMemoryBytes() float64 {
-	var totalMem float64 = 0
-	totalMem += float64(unsafe.Sizeof(*s))
-	for i := range s.Compactors {
-		totalMem += float64(len(s.Compactors[i])) * 8 // float64 is 8 bytes
-	}
-	return totalMem
+	return float64(unsafe.Sizeof(*s)) +
+		float64(len(s.items))*8 +
+		float64(len(s.levels))*float64(unsafe.Sizeof(int(0)))
 }
 
-// Rank estimates the rank of the value x in the stream.
+// Rank estimates the number of inserted values less than or equal to x.
 func (s *KLLSketch) Rank(x float64) int {
-	var r int
-	for h, c := range s.Compactors {
-		for _, v := range c {
-			if v <= x {
-				r += 1 << uint(h)
+	rank := 0
+	for h := 0; h < s.numLevels; h++ {
+		weight := 1 << h
+		for _, value := range s.levelValues(h) {
+			if value <= x {
+				rank += weight
 			}
 		}
 	}
-	return r
+	return rank
 }
 
-// Count returns the total number of items inserted (Approximate N).
+// Count returns the total number of inserted items represented by the sketch.
 func (s *KLLSketch) Count() int {
-	var n int
-	for h, c := range s.Compactors {
-		n += len(c) * (1 << uint(h))
+	total := 0
+	for h := 0; h < s.numLevels; h++ {
+		total += s.levelSize(h) * (1 << h)
 	}
-	return n
+	return total
 }
 
-// Quantile estimates the quantile of the value x in the stream.
-func (s *KLLSketch) Quantile(x float64) float64 {
-	var r, n int
-	for h, c := range s.Compactors {
-		for _, v := range c {
-			w := 1 << uint(h)
-			if v <= x {
-				r += w
-			}
-			n += w
-		}
-	}
-	if n == 0 {
-		return 0
-	}
-	return float64(r) / float64(n)
+// Quantile returns the estimated value at quantile q.
+func (s *KLLSketch) Quantile(q float64) float64 {
+	return s.CDF().Query(q)
 }
 
-// CDF returns the Cumulative Distribution Function representation.
+// CDF builds the sketch CDF representation.
 func (s *KLLSketch) CDF() CDF {
-	q := make(CDF, 0, s.size)
+	cdf := make(CDF, 0, len(s.items))
+	totalWeight := 0
 
-	var totalW float64
-	for h, c := range s.Compactors {
-		weight := float64(int(1 << uint(h)))
-		for _, v := range c {
-			q = append(q, Quantile{Q: weight, V: v})
+	for h := 0; h < s.numLevels; h++ {
+		weightInt := 1 << h
+		weight := float64(weightInt)
+		values := s.levelValues(h)
+		for _, value := range values {
+			cdf = append(cdf, Quantile{Q: weight, V: value})
 		}
-		totalW += float64(len(c)) * weight
+		totalWeight += len(values) * weightInt
+	}
+	if totalWeight == 0 {
+		return cdf
 	}
 
-	sort.Sort(q)
-
-	var curW float64
-	for i := range q {
-		curW += q[i].Q
-		q[i].Q = curW / totalW
+	sort.Sort(cdf)
+	acc := 0.0
+	for i := range cdf {
+		acc += cdf[i].Q
+		cdf[i].Q = acc / float64(totalWeight)
 	}
-
-	return q
+	return cdf
 }
 
-// ================= INTERNAL LOGIC =================
-
-func (s *KLLSketch) grow() {
-	s.Compactors = append(s.Compactors, Compactor{})
-	s.H = len(s.Compactors)
-
-	s.maxSize = 0
-	for h := 0; h < s.H; h++ {
-		s.maxSize += s.capacity(h)
+func (s *KLLSketch) pushValue(value float64) {
+	s.items = append(s.items, value)
+	s.levels[s.numLevels] = len(s.items)
+	if len(s.items)-s.levels[s.numLevels-1] > s.level0Cap {
+		s.compressWhileNeeded()
 	}
 }
 
-// capacity calculates the capacity of a specific layer h.
-// OPTIMIZATION: Uses computeHeight() from capacity.go (same package)
-// to avoid expensive math.Pow() calls.
-func (s *KLLSketch) capacity(h int) int {
-	// Standard decay: k * (2/3)^(H - h - 1)
-	decay := computeHeight(s.H - h - 1)
-	return int(math.Ceil(float64(s.k)*decay)) + 1
-}
-
-func (s *KLLSketch) compact() {
-	for s.size >= s.maxSize {
-		for h := 0; h < len(s.Compactors); h++ {
-			if len(s.Compactors[h]) >= s.capacity(h) {
-				if h+1 >= s.H {
-					s.grow()
-				}
-
-				prevH := len(s.Compactors[h])
-				prevH1 := len(s.Compactors[h+1])
-
-				s.Compactors[h+1] = s.Compactors[h].compact(
-					&s.co, s.Compactors[h+1])
-
-				s.size += len(s.Compactors[h]) - prevH
-				s.size += len(s.Compactors[h+1]) - prevH1
-
-				if s.size < s.maxSize {
-					break
-				}
-			}
+func (s *KLLSketch) compressWhileNeeded() {
+	for h := 0; ; h++ {
+		if h >= s.numLevels {
+			break
 		}
-	}
-}
-
-// updateRetainedSize recalculates the number of items stored in memory.
-func (s *KLLSketch) updateRetainedSize() {
-	s.size = 0
-	for _, c := range s.Compactors {
-		s.size += len(c)
-	}
-}
-
-// ================= HELPERS & TYPES =================
-
-// 64-bit xorshift multiply rng
-func xorshiftMult64(x uint64) uint64 {
-	x ^= x >> 12 // a
-	x ^= x << 25 // b
-	x ^= x >> 27 // c
-	return x * 2685821657736338717
-}
-
-type coin struct {
-	st   uint64
-	mask uint64
-}
-
-// v is either 0 or 1
-func (c *coin) toss() (v int) {
-	if c.mask == 0 {
-		if c.st == 0 {
-			c.st = uint64(rand.Int63())
+		if s.levelSize(h) <= s.capacityForLevel(h) {
+			break
 		}
-		c.st = xorshiftMult64(c.st)
-		c.mask = 1
-	}
-	if c.st&c.mask > 0 {
-		v = 1
-	}
-	c.mask <<= 1
-	return v
-}
-
-type Compactor []float64
-
-func (c *Compactor) compact(co *coin, dst []float64) []float64 {
-	l := len(*c)
-
-	if l == 0 || l == 1 {
-		return dst
-	} else if l == 2 {
-		sl := *c
-		if sl[0] > sl[1] {
-			sl[0], sl[1] = sl[1], sl[0]
-		}
-	} else if l > 100 {
-		sort.Float64s([]float64(*c))
-	} else {
-		c.insertionSort()
-	}
-
-	free := cap(dst) - len(dst)
-	if free < len(*c)/2 {
-		extra := len(*c)/2 - free
-		newdst := make([]float64, len(dst), cap(dst)+extra)
-		copy(newdst, dst)
-		dst = newdst
-	}
-
-	// choose either the evens or the odds
-	offs := co.toss()
-	for len(*c) >= 2 {
-		l := len(*c) - 2
-		dst = append(dst, (*c)[l+offs])
-		*c = (*c)[:l]
-	}
-
-	return dst
-}
-
-func (c Compactor) insertionSort() {
-	l := len(c)
-	for i := 1; i < l; i++ {
-		v := c[i]
-		j := i
-		for ; j > 0 && c[j-1] > v; j-- {
-		}
-		if j == i {
+		if h == s.numLevels-1 {
+			s.addNewTopLevel()
+			h--
 			continue
 		}
-		copy(c[j+1:], c[j:i])
-		c[j] = v
+		s.compact(h)
 	}
+}
+
+func (s *KLLSketch) capacityForLevel(level int) int {
+	heightFromTop := s.topHeight - level
+	if heightFromTop < 0 {
+		heightFromTop = 0
+	}
+	if heightFromTop >= capacityCacheLen {
+		heightFromTop = capacityCacheLen - 1
+	}
+	return int(s.capacityCache[heightFromTop])
+}
+
+func (s *KLLSketch) rebuildCapacityCache() {
+	s.topHeight = s.numLevels - 1
+	scale := 1.0
+	for i := 0; i < capacityCacheLen; i++ {
+		scaled := int(math.Ceil(float64(s.k) * scale))
+		if scaled < s.m {
+			scaled = s.m
+		}
+		s.capacityCache[i] = uint32(scaled)
+		scale *= capacityDecay
+	}
+	s.level0Cap = s.capacityForLevel(0)
+}
+
+func (s *KLLSketch) addNewTopLevel() {
+	s.levels = append(s.levels, 0)
+	copy(s.levels[1:], s.levels[:len(s.levels)-1])
+	s.levels[0] = 0
+	s.levels[len(s.levels)-1] = len(s.items)
+	s.numLevels++
+	s.rebuildCapacityCache()
+}
+
+func (s *KLLSketch) compact(level int) {
+	idx := s.numLevels - 1 - level
+	start := s.levels[idx]
+	end := s.levels[idx+1]
+	count := end - start
+	if count <= 1 {
+		return
+	}
+
+	sort.Float64s(s.items[start:end])
+
+	offset := 0
+	if s.co.toss() {
+		offset = 1
+	}
+
+	survivors := 0
+	for i := offset; i < count; i += 2 {
+		s.items[start+survivors] = s.items[start+i]
+		survivors++
+	}
+
+	garbage := count - survivors
+	promotedStart := start + survivors
+	copy(s.items[promotedStart:], s.items[end:])
+	s.items = s.items[:len(s.items)-garbage]
+
+	s.levels[idx] = promotedStart
+	for i := idx + 1; i < len(s.levels); i++ {
+		s.levels[i] -= garbage
+	}
+	s.levels[len(s.levels)-1] = len(s.items)
+}
+
+func (s *KLLSketch) levelSize(level int) int {
+	idx := s.numLevels - 1 - level
+	return s.levels[idx+1] - s.levels[idx]
+}
+
+func (s *KLLSketch) levelValues(level int) []float64 {
+	if level < 0 || level >= s.numLevels {
+		return nil
+	}
+	idx := s.numLevels - 1 - level
+	return s.items[s.levels[idx]:s.levels[idx+1]]
+}
+
+func (s *KLLSketch) mergePacked(other *KLLSketch) {
+	maxLevels := s.numLevels
+	if other.numLevels > maxLevels {
+		maxLevels = other.numLevels
+	}
+
+	levelData := make([][]float64, maxLevels)
+	totalItems := 0
+	for level := 0; level < maxLevels; level++ {
+		selfLevel := s.levelValues(level)
+		otherLevel := other.levelValues(level)
+		if len(selfLevel)+len(otherLevel) == 0 {
+			continue
+		}
+		merged := make([]float64, 0, len(selfLevel)+len(otherLevel))
+		merged = append(merged, selfLevel...)
+		merged = append(merged, otherLevel...)
+		levelData[level] = merged
+		totalItems += len(merged)
+	}
+
+	s.items = make([]float64, 0, totalItems)
+	s.levels = make([]int, maxLevels+1)
+	s.numLevels = maxLevels
+
+	pos := 0
+	for level := maxLevels - 1; level >= 0; level-- {
+		idx := maxLevels - 1 - level
+		s.levels[idx] = pos
+		s.items = append(s.items, levelData[level]...)
+		pos = len(s.items)
+	}
+	s.levels[maxLevels] = pos
+	s.rebuildCapacityCache()
+	s.compressWhileNeeded()
 }
 
 type Quantile struct {
@@ -332,26 +397,11 @@ func (q CDF) Len() int           { return len(q) }
 func (q CDF) Less(i, j int) bool { return q[i].V < q[j].V }
 func (q CDF) Swap(i, j int)      { q[i], q[j] = q[j], q[i] }
 
-// Quantile estimates the quantile of the value x in the stream.
+// Quantile returns the quantile rank for value x.
 func (q CDF) Quantile(x float64) float64 {
-	idx := sort.Search(len(q), func(i int) bool { return q[i].V >= x })
-	if idx == 0 {
+	if len(q) == 0 {
 		return 0
 	}
-	return q[idx-1].Q
-}
-
-// Query estimates the value given quantile p.
-func (q CDF) Query(p float64) float64 {
-	idx := sort.Search(len(q), func(i int) bool { return q[i].Q >= p })
-	if idx == len(q) {
-		return q[len(q)-1].V
-	}
-	return q[idx].V
-}
-
-// QuantileLI estimates the quantile using linear interpolation.
-func (q CDF) QuantileLI(x float64) float64 {
 	idx := sort.Search(len(q), func(i int) bool { return q[i].V >= x })
 	if idx == len(q) {
 		return 1
@@ -359,14 +409,41 @@ func (q CDF) QuantileLI(x float64) float64 {
 	if idx == 0 {
 		return 0
 	}
-	// a < x <= b
+	return q[idx-1].Q
+}
+
+// Query returns the estimated value at quantile p.
+func (q CDF) Query(p float64) float64 {
+	if len(q) == 0 {
+		return 0
+	}
+	idx := sort.Search(len(q), func(i int) bool { return q[i].Q >= p })
+	if idx == len(q) {
+		return q[len(q)-1].V
+	}
+	return q[idx].V
+}
+
+func (q CDF) QuantileLI(x float64) float64 {
+	if len(q) == 0 {
+		return 0
+	}
+	idx := sort.Search(len(q), func(i int) bool { return q[i].V >= x })
+	if idx == len(q) {
+		return 1
+	}
+	if idx == 0 {
+		return 0
+	}
 	a, aq := q[idx-1].V, q[idx-1].Q
 	b, bq := q[idx].V, q[idx].Q
 	return ((a-x)*bq + (x-b)*aq) / (a - b)
 }
 
-// QueryLI estimates the value given quantile p using linear interpolation.
 func (q CDF) QueryLI(p float64) float64 {
+	if len(q) == 0 {
+		return 0
+	}
 	idx := sort.Search(len(q), func(i int) bool { return q[i].Q >= p })
 	if idx == len(q) {
 		return q[len(q)-1].V
@@ -374,66 +451,60 @@ func (q CDF) QueryLI(p float64) float64 {
 	if idx == 0 {
 		return q[0].V
 	}
-	// aq < p <= b
 	a, aq := q[idx-1].V, q[idx-1].Q
 	b, bq := q[idx].V, q[idx].Q
 	return ((aq-p)*b + (p-bq)*a) / (aq - bq)
 }
 
 type kllSnapshot struct {
-	K          int
-	Compactors [][]float64
-	CoinState  uint64
-	CoinMask   uint64
+	K             int
+	M             int
+	Items         []float64
+	Levels        []int
+	CoinState     uint64
+	CoinBitCache  uint64
+	CoinRemaining uint8
 }
 
-// SerializeToBytes serializes KLLSketch into bytes.
 func (s *KLLSketch) SerializeToBytes() ([]byte, error) {
-	compactors := make([][]float64, len(s.Compactors))
-	for i := range s.Compactors {
-		compactors[i] = append([]float64(nil), s.Compactors[i]...)
-	}
-
 	return common.EncodeToBytes(kllSnapshot{
-		K:          s.k,
-		Compactors: compactors,
-		CoinState:  s.co.st,
-		CoinMask:   s.co.mask,
+		K:             s.k,
+		M:             s.m,
+		Items:         append([]float64(nil), s.items...),
+		Levels:        append([]int(nil), s.levels...),
+		CoinState:     s.co.state,
+		CoinBitCache:  s.co.bitCache,
+		CoinRemaining: s.co.remainingBits,
 	})
 }
 
-// DeserializeKLLSketchFromBytes restores KLLSketch from serialized bytes.
 func DeserializeKLLSketchFromBytes(data []byte) (*KLLSketch, error) {
 	var snap kllSnapshot
 	if err := common.DecodeFromBytes(data, &snap); err != nil {
 		return nil, err
 	}
-	if snap.K <= 0 {
-		return nil, errors.New("invalid snapshot k")
+	if snap.K <= 0 || snap.M <= 0 {
+		return nil, errors.New("invalid snapshot parameters")
 	}
-	if len(snap.Compactors) == 0 {
-		return nil, errors.New("invalid snapshot compactors")
+	if len(snap.Levels) < 2 {
+		return nil, errors.New("invalid snapshot levels")
 	}
-
-	compactors := make([]Compactor, len(snap.Compactors))
-	for i := range snap.Compactors {
-		compactors[i] = append(Compactor(nil), snap.Compactors[i]...)
+	if snap.Levels[len(snap.Levels)-1] != len(snap.Items) {
+		return nil, errors.New("invalid snapshot item layout")
 	}
 
 	s := &KLLSketch{
-		Compactors: compactors,
-		k:          snap.K,
-		H:          len(compactors),
+		items:     append([]float64(nil), snap.Items...),
+		levels:    append([]int(nil), snap.Levels...),
+		k:         snap.K,
+		m:         snap.M,
+		numLevels: len(snap.Levels) - 1,
 		co: coin{
-			st:   snap.CoinState,
-			mask: snap.CoinMask,
+			state:         normalizeSeed(snap.CoinState),
+			bitCache:      snap.CoinBitCache,
+			remainingBits: snap.CoinRemaining,
 		},
 	}
-
-	s.maxSize = 0
-	for h := 0; h < s.H; h++ {
-		s.maxSize += s.capacity(h)
-	}
-	s.updateRetainedSize()
+	s.rebuildCapacityCache()
 	return s, nil
 }

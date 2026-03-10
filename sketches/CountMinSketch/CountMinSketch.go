@@ -30,12 +30,20 @@ type CountMinSketch struct {
 	mask       uint64
 }
 
+func hashLayoutForCols(cols int) (uint, uint64) {
+	width := 1
+	for width < cols {
+		width <<= 1
+	}
+	if width <= 1 {
+		return 0, 0
+	}
+	return uint(bits.TrailingZeros(uint(width))), uint64(width - 1)
+}
+
 func (s *CountMinSketch) rehydrateStorage() error {
 	if s.Rows <= 0 || s.Cols <= 0 {
 		return errors.New("invalid snapshot dimensions")
-	}
-	if s.Cols&(s.Cols-1) != 0 {
-		return errors.New("invalid snapshot: cols must be power-of-two")
 	}
 	if len(s.Count) != s.Rows || len(s.Sum) != s.Rows || len(s.Sum2) != s.Rows {
 		return errors.New("invalid snapshot matrix row count")
@@ -68,13 +76,17 @@ func (s *CountMinSketch) rehydrateStorage() error {
 	s.Count = countStore.As2D()
 	s.Sum = sumStore.As2D()
 	s.Sum2 = sum2Store.As2D()
-	s.bitsPerRow = uint(bits.TrailingZeros(uint(s.Cols)))
-	s.mask = uint64(s.Cols - 1)
+	s.bitsPerRow, s.mask = hashLayoutForCols(s.Cols)
 	return nil
 }
 
 /* sketch configurations */
 const (
+	DefaultRowNum    = 3
+	DefaultColNum    = 4096
+	QuickStartRowNum = 5
+	QuickStartColNum = 2048
+
 	CM_ROW_NO = 5
 	CM_COL_NO = 2048
 )
@@ -82,16 +94,6 @@ const (
 func NewCountMinSketch(row, col int) (*CountMinSketch, error) {
 	if row <= 0 || col <= 0 {
 		return nil, errors.New("row and col must be positive")
-	}
-	if row > CM_ROW_NO {
-		row = CM_ROW_NO
-	}
-	if col > CM_COL_NO {
-		col = CM_COL_NO
-	}
-
-	if col&(col-1) != 0 {
-		return nil, errors.New("Cols must be power-of-two for fast hashing")
 	}
 
 	countStore, err := storage.NewFlatVector2D(row, col)
@@ -107,7 +109,7 @@ func NewCountMinSketch(row, col int) (*CountMinSketch, error) {
 		return nil, err
 	}
 
-	bitsPerRow := uint(bits.TrailingZeros(uint(col)))
+	bitsPerRow, mask := hashLayoutForCols(col)
 
 	return &CountMinSketch{
 		Rows:       row,
@@ -121,14 +123,39 @@ func NewCountMinSketch(row, col int) (*CountMinSketch, error) {
 		L1:         make([]float64, row),
 		L2:         make([]float64, row),
 		bitsPerRow: bitsPerRow,
-		mask:       uint64(col - 1),
+		mask:       mask,
 	}, nil
+}
+
+// New returns a Count-Min sketch with the Rust API default dimensions.
+func New() (*CountMinSketch, error) {
+	return NewCountMinSketch(DefaultRowNum, DefaultColNum)
+}
+
+// WithDimensions mirrors the Rust constructor naming.
+func WithDimensions(rows, cols int) (*CountMinSketch, error) {
+	return NewCountMinSketch(rows, cols)
+}
+
+func (s *CountMinSketch) RowCount() int { return s.Rows }
+func (s *CountMinSketch) ColCount() int { return s.Cols }
+
+func (s *CountMinSketch) AsStorage() *storage.FlatVector2D {
+	return s.countStore
+}
+
+func (s *CountMinSketch) AsStorageMut() *storage.FlatVector2D {
+	return s.countStore
 }
 
 // deriveIndex computes column index from base hash (NO hashing, NO modulo)
 func (s *CountMinSketch) deriveIndex(hash uint64, row int) int {
 	shift := uint(row) * s.bitsPerRow
-	return int((hash >> shift) & s.mask)
+	idx := int((hash >> shift) & s.mask)
+	if idx >= s.Cols {
+		return idx % s.Cols
+	}
+	return idx
 }
 
 // ================= INSERT =================
@@ -137,6 +164,9 @@ func (s *CountMinSketch) InsertWithHash(hash uint64) {
 	shift := uint(0)
 	for r := 0; r < s.Rows; r++ {
 		c := int((hash >> shift) & s.mask)
+		if c >= s.Cols {
+			c %= s.Cols
+		}
 		shift += s.bitsPerRow
 
 		countRow := s.countStore.RowSlice(r)
@@ -154,9 +184,69 @@ func (s *CountMinSketch) InsertWithHash(hash uint64) {
 	}
 }
 
+func (s *CountMinSketch) Insert(input *common.SketchInput) {
+	if input == nil {
+		return
+	}
+	s.InsertWithHash(input.Hash)
+}
+
+func (s *CountMinSketch) InsertMany(input *common.SketchInput, many float64) {
+	if input == nil || many == 0 {
+		return
+	}
+	s.FastInsertManyWithHashValue(input.Hash, many)
+}
+
+func (s *CountMinSketch) BulkInsert(inputs []*common.SketchInput) {
+	for _, input := range inputs {
+		s.Insert(input)
+	}
+}
+
+func (s *CountMinSketch) BulkInsertMany(values []struct {
+	Input *common.SketchInput
+	Many  float64
+}) {
+	for _, value := range values {
+		s.InsertMany(value.Input, value.Many)
+	}
+}
+
 // InsertWithHashFast is an optimized alias for benchmark fast-path usage.
 func (s *CountMinSketch) InsertWithHashFast(hash uint64) {
 	s.InsertWithHash(hash)
+}
+
+func (s *CountMinSketch) FastInsertWithHashValue(hash uint64) {
+	s.InsertWithHash(hash)
+}
+
+func (s *CountMinSketch) FastInsertManyWithHashValue(hash uint64, many float64) {
+	if many == 0 {
+		return
+	}
+	shift := uint(0)
+	for r := 0; r < s.Rows; r++ {
+		c := int((hash >> shift) & s.mask)
+		if c >= s.Cols {
+			c %= s.Cols
+		}
+		shift += s.bitsPerRow
+
+		countRow := s.countStore.RowSlice(r)
+		sumRow := s.sumStore.RowSlice(r)
+		sum2Row := s.sum2Store.RowSlice(r)
+
+		prev := countRow[c]
+		curr := prev + many
+		countRow[c] = curr
+		sumRow[c] += many
+		sum2Row[c] += many
+
+		s.L1[r] += many
+		s.L2[r] += curr*curr - prev*prev
+	}
 }
 
 func (s *CountMinSketch) queryFrequencyFast(hash uint64) float64 {
@@ -171,6 +261,17 @@ func (s *CountMinSketch) queryFrequencyFast(hash uint64) float64 {
 		}
 	}
 	return res
+}
+
+func (s *CountMinSketch) Estimate(input *common.SketchInput) float64 {
+	if input == nil {
+		return 0
+	}
+	return s.FastEstimateWithHash(input.Hash)
+}
+
+func (s *CountMinSketch) FastEstimateWithHash(hash uint64) float64 {
+	return s.queryFrequencyFast(hash)
 }
 
 // ================= QUERY =================
@@ -190,6 +291,9 @@ func (s *CountMinSketch) QueryWithHash(
 		shift := uint(0)
 		for r := 0; r < s.Rows; r++ {
 			c := int((hash >> shift) & s.mask)
+			if c >= s.Cols {
+				c %= s.Cols
+			}
 			shift += s.bitsPerRow
 			v := math.Abs(s.sumStore.RowSlice(r)[c])
 			if v < res {
@@ -203,6 +307,9 @@ func (s *CountMinSketch) QueryWithHash(
 		shift := uint(0)
 		for r := 0; r < s.Rows; r++ {
 			c := int((hash >> shift) & s.mask)
+			if c >= s.Cols {
+				c %= s.Cols
+			}
 			shift += s.bitsPerRow
 			v := s.sum2Store.RowSlice(r)[c]
 			if v < res {
@@ -221,14 +328,12 @@ func (s *CountMinSketch) QueryWithHash(
 func (s *CountMinSketch) CM_L1() float64 {
 	res := math.MaxFloat64
 	for i := 0; i < s.Rows; i++ {
-		sum := 0.0
-		row := s.countStore.Row(i)
-		for j := 0; j < s.Cols; j++ {
-			sum += row[j]
+		if s.L1[i] < res {
+			res = s.L1[i]
 		}
-		if sum < res {
-			res = sum
-		}
+	}
+	if res == math.MaxFloat64 {
+		return 0
 	}
 	return res
 }
@@ -236,14 +341,12 @@ func (s *CountMinSketch) CM_L1() float64 {
 func (s *CountMinSketch) CM_L2() float64 {
 	res := math.MaxFloat64
 	for i := 0; i < s.Rows; i++ {
-		sum := 0.0
-		row := s.countStore.Row(i)
-		for j := 0; j < s.Cols; j++ {
-			sum += row[j] * row[j]
+		if s.L2[i] < res {
+			res = s.L2[i]
 		}
-		if sum < res {
-			res = sum
-		}
+	}
+	if res == math.MaxFloat64 {
+		return 0
 	}
 	return math.Sqrt(res)
 }

@@ -3,7 +3,8 @@ package storage
 import (
 	"errors"
 	"math"
-	"sort"
+
+	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
 // MatrixHashMode defines how per-row hash representation is stored.
@@ -249,18 +250,19 @@ func (d *DenseMatrixStorage) FastQueryMin(hashed MatrixHashType) float64 {
 }
 
 func (d *DenseMatrixStorage) FastQueryMedianSigned(hashed MatrixHashType) float64 {
-	values := make([]float64, d.Rows())
+	var valuesStack [16]float64
+	values := valuesStack[:0]
+	if d.Rows() > len(valuesStack) {
+		values = make([]float64, d.Rows())
+	} else {
+		values = valuesStack[:d.Rows()]
+	}
 	for r := 0; r < d.Rows(); r++ {
 		col := int(hashed.RowHash(r, d.maskBits, d.mask))
 		sign := float64(hashed.SignForRow(r))
 		values[r] = d.matrix.At(r, col) * sign
 	}
-	sort.Float64s(values)
-	mid := len(values) / 2
-	if len(values)%2 == 1 {
-		return values[mid]
-	}
-	return (values[mid-1] + values[mid]) / 2
+	return common.ComputeMedianInlineF64(values)
 }
 
 func shiftRight128(hi, lo uint64, shift uint) uint64 {

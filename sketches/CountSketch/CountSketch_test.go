@@ -85,6 +85,24 @@ func TestCS_SignCorrectness(t *testing.T) {
 	}
 }
 
+func TestCS_RustStyleAPI(t *testing.T) {
+	cs, err := New()
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if cs.RowCount() != RustDefaultRows || cs.ColCount() != RustDefaultCols {
+		t.Fatalf("unexpected default dimensions: got (%d,%d)", cs.RowCount(), cs.ColCount())
+	}
+
+	input := common.FromString("rust-api")
+	cs.Insert(input)
+	cs.InsertMany(input, 4)
+
+	if got := cs.Estimate(input); math.Abs(got-5) > 2 {
+		t.Fatalf("unexpected estimate: got %v", got)
+	}
+}
+
 // ==============================================================================
 // 2. LOGIC TESTS USING CAIDA DATASET
 // ==============================================================================

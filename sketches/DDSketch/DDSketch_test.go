@@ -252,3 +252,20 @@ func TestDDSketch_CAIDA_Monotonicity(t *testing.T) {
 	}
 	t.Logf("Monotonicity verified across %d quantile steps", steps)
 }
+
+func TestDDSketchRustStyleAPI(t *testing.T) {
+	s := New(0.01)
+	s.Add(1)
+	s.Add(10)
+	s.Add(100)
+
+	if got := s.Count(); got != 3 {
+		t.Fatalf("unexpected count: got %d", got)
+	}
+	if min, ok := s.Min(); !ok || min != 1 {
+		t.Fatalf("unexpected min: %v %v", min, ok)
+	}
+	if max, ok := s.Max(); !ok || max != 100 {
+		t.Fatalf("unexpected max: %v %v", max, ok)
+	}
+}
