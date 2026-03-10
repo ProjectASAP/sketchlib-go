@@ -67,7 +67,7 @@ func (h *HyperLogLog) TypeName() string {
 // It hashes the input and delegates to the fast path.
 func (h *HyperLogLog) Insert(x float64) {
 	buf := common.Float64ToBytes(x)
-	hash := common.HashIt(0, buf)
+	hash := common.HashIt(common.CanonicalHashSeed, buf)
 	h.InsertWithHash(hash)
 }
 
@@ -76,7 +76,7 @@ func (h *HyperLogLog) InsertInput(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
-	h.InsertWithHash(input.Hash)
+	h.InsertWithHash(common.HashIt(common.CanonicalHashSeed, input.Bytes))
 }
 
 func (h *HyperLogLog) InsertMany(inputs []*common.SketchInput) {

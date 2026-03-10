@@ -26,7 +26,7 @@ func FromString(s string) *SketchInput {
 // FromU64 creates SketchInput from uint64.
 func FromU64(v uint64) *SketchInput {
 	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], v)
+	binary.NativeEndian.PutUint64(buf[:], v)
 
 	cp := make([]byte, 8)
 	copy(cp, buf[:])

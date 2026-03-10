@@ -186,14 +186,14 @@ func (s *CountSketch) Insert(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
-	s.InsertWithHash(input.Hash)
+	s.insertWithMatrixHash(s.countStore.HashForInput(input), 1)
 }
 
 func (s *CountSketch) InsertMany(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
-	s.InsertWithHashAndValue(input.Hash, many)
+	s.insertWithMatrixHash(s.countStore.HashForInput(input), many)
 }
 
 func (s *CountSketch) FastInsertWithHashValue(hash uint64) {
@@ -207,6 +207,10 @@ func (s *CountSketch) FastInsertManyWithHashValue(hash uint64, many float64) {
 // InsertWithHashAndValue supports weighted updates.
 func (s *CountSketch) InsertWithHashAndValue(hash uint64, value float64) {
 	hashed := s.countStore.HashForMatrix(hash)
+	s.insertWithMatrixHash(hashed, value)
+}
+
+func (s *CountSketch) insertWithMatrixHash(hashed storage.MatrixHashType, value float64) {
 	count := s.Count
 	if hashed.Mode() == storage.MatrixHashPacked64 {
 		packed := hashed.Lower64()
@@ -225,8 +229,6 @@ func (s *CountSketch) InsertWithHashAndValue(hash uint64, value float64) {
 	for r := 0; r < s.Rows; r++ {
 		c, sign := s.derivePosAndSignFromHashed(hashed, r)
 		increment := sign * value
-
-		// Update L2 moments
 		row := count[r]
 		prev := row[c]
 		curr := prev + increment
@@ -283,12 +285,36 @@ func (s *CountSketch) Estimate(input *common.SketchInput) float64 {
 	if input == nil {
 		return 0
 	}
-	return s.FastEstimateWithHash(input.Hash)
+	return s.estimateWithMatrixHash(s.countStore.HashForInput(input))
 }
 
 func (s *CountSketch) FastEstimateWithHash(hash uint64) float64 {
 	est, _ := s.QueryWithHash(common.QueryFrequency, hash)
 	return est
+}
+
+func (s *CountSketch) estimateWithMatrixHash(hashed storage.MatrixHashType) float64 {
+	var estimatesStack [16]float64
+	var estimates []float64
+	if s.Rows <= len(estimatesStack) {
+		estimates = estimatesStack[:s.Rows]
+	} else {
+		estimates = make([]float64, s.Rows)
+	}
+	count := s.Count
+	if hashed.Mode() == storage.MatrixHashPacked64 {
+		packed := hashed.Lower64()
+		for r := 0; r < s.Rows; r++ {
+			c, sign := s.fastPacked64PosAndSign(packed, r)
+			estimates[r] = count[r][c] * sign
+		}
+		return common.ComputeMedianInlineF64(estimates)
+	}
+	for r := 0; r < s.Rows; r++ {
+		c, sign := s.derivePosAndSignFromHashed(hashed, r)
+		estimates[r] = count[r][c] * sign
+	}
+	return common.ComputeMedianInlineF64(estimates)
 }
 
 func (s *CountSketch) Merge(other common.Sketch) error {

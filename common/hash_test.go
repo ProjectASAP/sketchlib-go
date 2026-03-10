@@ -33,7 +33,7 @@ func TestFloat64Conversions(t *testing.T) {
 			if len(asBytes) != 8 {
 				t.Fatalf("Float64ToBytes returned %d bytes, want 8", len(asBytes))
 			}
-			decoded := binary.BigEndian.Uint64(asBytes)
+			decoded := binary.NativeEndian.Uint64(asBytes)
 			if decoded != expectedBits {
 				t.Fatalf("Float64ToBytes roundtrip mismatch, got %d want %d", decoded, expectedBits)
 			}

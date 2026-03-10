@@ -188,14 +188,14 @@ func (s *CountMinSketch) Insert(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
-	s.InsertWithHash(input.Hash)
+	s.insertMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
 }
 
 func (s *CountMinSketch) InsertMany(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
-	s.FastInsertManyWithHashValue(input.Hash, many)
+	s.insertMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), many)
 }
 
 func (s *CountMinSketch) BulkInsert(inputs []*common.SketchInput) {
@@ -249,6 +249,28 @@ func (s *CountMinSketch) FastInsertManyWithHashValue(hash uint64, many float64) 
 	}
 }
 
+func (s *CountMinSketch) insertMatrixHash(hashed storage.MatrixHashType, many float64) {
+	for r := 0; r < s.Rows; r++ {
+		c := int(hashed.RowHash(r, s.bitsPerRow, s.mask))
+		if c >= s.Cols {
+			c %= s.Cols
+		}
+
+		countRow := s.countStore.RowSlice(r)
+		sumRow := s.sumStore.RowSlice(r)
+		sum2Row := s.sum2Store.RowSlice(r)
+
+		prev := countRow[c]
+		curr := prev + many
+		countRow[c] = curr
+		sumRow[c] += many
+		sum2Row[c] += many
+
+		s.L1[r] += many
+		s.L2[r] += curr*curr - prev*prev
+	}
+}
+
 func (s *CountMinSketch) queryFrequencyFast(hash uint64) float64 {
 	res := math.MaxFloat64
 	shift := uint(0)
@@ -267,11 +289,29 @@ func (s *CountMinSketch) Estimate(input *common.SketchInput) float64 {
 	if input == nil {
 		return 0
 	}
-	return s.FastEstimateWithHash(input.Hash)
+	return s.estimateMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols))
 }
 
 func (s *CountMinSketch) FastEstimateWithHash(hash uint64) float64 {
 	return s.queryFrequencyFast(hash)
+}
+
+func (s *CountMinSketch) estimateMatrixHash(hashed storage.MatrixHashType) float64 {
+	res := math.MaxFloat64
+	for r := 0; r < s.Rows; r++ {
+		c := int(hashed.RowHash(r, s.bitsPerRow, s.mask))
+		if c >= s.Cols {
+			c %= s.Cols
+		}
+		v := s.countStore.RowSlice(r)[c]
+		if v < res {
+			res = v
+		}
+	}
+	if res == math.MaxFloat64 {
+		return 0
+	}
+	return res
 }
 
 // ================= QUERY =================
