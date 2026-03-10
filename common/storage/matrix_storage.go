@@ -164,6 +164,42 @@ func BuildMatrixHash(baseHash uint64, rows, cols int) MatrixHashType {
 	}
 }
 
+// BuildMatrixHashFromInput matches sketchlib-rust's matrix-hash construction
+// for Rust-style APIs that still operate on original input bytes.
+func BuildMatrixHashFromInput(input *common.SketchInput, rows, cols int) MatrixHashType {
+	return BuildMatrixHashFromInputSeeded(0, input, rows, cols)
+}
+
+func BuildMatrixHashFromInputSeeded(seedIdx int, input *common.SketchInput, rows, cols int) MatrixHashType {
+	if input == nil {
+		return MatrixHashType{mode: MatrixHashPacked64}
+	}
+	mode := HashModeForMatrix(rows, cols)
+	switch mode {
+	case MatrixHashPacked64:
+		return MatrixHashType{
+			mode:     MatrixHashPacked64,
+			packed64: common.HashIt(seedIdx, input.Bytes),
+		}
+	case MatrixHashPacked128:
+		hash := common.Hash128It(seedIdx, input.Bytes)
+		return MatrixHashType{
+			mode:        MatrixHashPacked128,
+			packed128Hi: hash.Hi,
+			packed128Lo: hash.Lo,
+		}
+	default:
+		seq := make([]uint64, rows)
+		for row := 0; row < rows; row++ {
+			seq[row] = common.HashIt(seedIdx+row, input.Bytes)
+		}
+		return MatrixHashType{
+			mode: MatrixHashRows,
+			rows: seq,
+		}
+	}
+}
+
 // MatrixStorage defines matrix sketch storage operations.
 type MatrixStorage interface {
 	Rows() int
@@ -228,6 +264,10 @@ func (d *DenseMatrixStorage) QueryOneCounter(row, col int) float64 {
 
 func (d *DenseMatrixStorage) HashForMatrix(baseHash uint64) MatrixHashType {
 	return BuildMatrixHash(baseHash, d.Rows(), d.Cols())
+}
+
+func (d *DenseMatrixStorage) HashForInput(input *common.SketchInput) MatrixHashType {
+	return BuildMatrixHashFromInput(input, d.Rows(), d.Cols())
 }
 
 func (d *DenseMatrixStorage) FastInsert(hashed MatrixHashType, delta float64) {

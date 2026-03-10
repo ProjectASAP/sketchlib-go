@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/cespare/xxhash/v2"
+	"github.com/zeebo/xxh3"
 )
 
 // seedList stores the hash seeds shared across sketches.
-// Seeds 0-4 are for Count/CountMin sketches;
-// the last seed is reserved for CountSketch sign hashing.
+// This mirrors sketchlib-rust's seed table.
 var seedList = [...]uint64{
 	0xcafe3553,
 	0xade3415118,
@@ -18,28 +17,56 @@ var seedList = [...]uint64{
 	0x2f024b2b,
 	0x451a3df5,
 	0x6a09e667,
+	0xbb67ae85,
+	0x3c6ef372,
+	0xa54ff53a,
+	0x510e527f,
+	0x9b05688c,
+	0x1f83d9ab,
+	0x5be0cd19,
+	0xcbbb9d5d,
+	0x629a292a,
+	0x9159015a,
+	0x152fecd8,
+	0x67332667,
+	0x8eb44a87,
+	0xdb0c2e0d,
 }
 
-// Hash64 returns unseeded xxhash of key.
-// Used as base hash and cached in SketchInput.
+const CanonicalHashSeed = 5
+
+type Hash128 struct {
+	Lo uint64
+	Hi uint64
+}
+
+func normalizedSeedIdx(seedIdx int) int {
+	n := len(seedList)
+	seedIdx %= n
+	if seedIdx < 0 {
+		seedIdx += n
+	}
+	return seedIdx
+}
+
+// Hash64 returns the Rust-compatible default seeded hash used by the fast-path
+// matrix sketches.
 func Hash64(key []byte) uint64 {
-	return xxhash.Sum64(key)
+	return HashIt(0, key)
 }
 
-// HashIt hashes key using the seed at seedIdx.
-// Hash = xxhash( seed_bytes || key )
+// HashIt hashes key with the Rust-compatible seeded XXH3 64-bit function.
 func HashIt(seedIdx int, key []byte) uint64 {
-	seed := seedList[seedIdx]
+	return xxh3.HashSeed(key, seedList[normalizedSeedIdx(seedIdx)])
+}
 
-	h := xxhash.New()
-
-	var seedBuf [8]byte
-	binary.LittleEndian.PutUint64(seedBuf[:], seed)
-
-	h.Write(seedBuf[:])
-	h.Write(key)
-
-	return h.Sum64()
+// Hash128It hashes key with the Rust-compatible seeded XXH3 128-bit function.
+func Hash128It(seedIdx int, key []byte) Hash128 {
+	hash := xxh3.Hash128Seed(key, seedList[normalizedSeedIdx(seedIdx)])
+	return Hash128{
+		Lo: hash.Lo,
+		Hi: hash.Hi,
+	}
 }
 
 // Float64ToString returns IEEE754 bit pattern as decimal string.
@@ -47,18 +74,31 @@ func Float64ToString(f float64) string {
 	return fmt.Sprint(math.Float64bits(f))
 }
 
-// Float64ToBytes returns IEEE754 bit pattern in big-endian.
+// Float64ToBytes returns IEEE754 bit pattern in native-endian, matching Rust's
+// to_ne_bytes on the current platform.
 func Float64ToBytes(f float64) []byte {
 	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, math.Float64bits(f))
+	binary.NativeEndian.PutUint64(buf, math.Float64bits(f))
 	return buf
 }
 
-// DeriveIndex derives column index for a given row
-// width MUST be power-of-two
+func maskBitsForWidth(width uint32) uint {
+	if width <= 1 {
+		return 1
+	}
+	u := width - 1
+	var bits uint
+	for u > 0 {
+		bits++
+		u >>= 1
+	}
+	return bits
+}
+
+// DeriveIndex derives the row-local column index using the same bit slicing
+// convention used by the Rust fast-path matrix hashes.
 func DeriveIndex(hash uint64, row int, width uint32) uint32 {
-	// kebutuhan bit per row
-	shift := uint(row * 11) // cukup untuk width ≤ 2048
+	shift := uint(row) * maskBitsForWidth(width)
 	mask := uint64(width - 1)
 	return uint32((hash >> shift) & mask)
 }

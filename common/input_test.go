@@ -2,10 +2,9 @@ package common
 
 import (
 	"bytes"
-	"encoding/binary"
 	"testing"
 
-	"github.com/cespare/xxhash/v2"
+	"github.com/zeebo/xxh3"
 )
 
 func TestFloat64InputBaseHash(t *testing.T) {
@@ -59,17 +58,7 @@ func TestHashItSeedPrefixContract(t *testing.T) {
 	key := []byte("contract-test")
 	seedIdx := 0
 
-	seed := seedList[seedIdx]
-
-	h := xxhash.New()
-
-	var seedBuf [8]byte
-	binary.LittleEndian.PutUint64(seedBuf[:], seed)
-
-	h.Write(seedBuf[:])
-	h.Write(key)
-
-	expected := h.Sum64()
+	expected := xxh3.HashSeed(key, seedList[seedIdx])
 	got := HashIt(seedIdx, key)
 
 	if got != expected {
