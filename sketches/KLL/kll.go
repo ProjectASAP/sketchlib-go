@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
 const (
@@ -21,6 +22,8 @@ const (
 type KLLSketch struct {
 	items         []float64
 	levels        []int
+	itemStore     *storage.Vector1D[float64]
+	levelStore    *storage.Vector1D[int]
 	k             int
 	m             int
 	numLevels     int
@@ -31,6 +34,20 @@ type KLLSketch struct {
 }
 
 type KLL = KLLSketch
+
+func (s *KLLSketch) bindStoresFromSlices() {
+	s.itemStore = storage.Vector1DFromVec(s.items)
+	s.levelStore = storage.Vector1DFromVec(s.levels)
+}
+
+func (s *KLLSketch) syncSlicesFromStores() {
+	if s.itemStore != nil {
+		s.items = s.itemStore.AsSlice()
+	}
+	if s.levelStore != nil {
+		s.levels = s.levelStore.AsSlice()
+	}
+}
 
 type coin struct {
 	state         uint64
@@ -115,6 +132,7 @@ func Init(k, m int) *KLLSketch {
 		numLevels: 1,
 		co:        newCoin(),
 	}
+	s.bindStoresFromSlices()
 	s.rebuildCapacityCache()
 	return s
 }
@@ -166,6 +184,7 @@ func (s *KLLSketch) Update(x float64) {
 func (s *KLLSketch) Clear() {
 	s.items = s.items[:0]
 	s.levels = []int{0, 0}
+	s.bindStoresFromSlices()
 	s.numLevels = 1
 	s.co = newCoin()
 	s.rebuildCapacityCache()
@@ -246,6 +265,7 @@ func (s *KLLSketch) CDF() CDF {
 func (s *KLLSketch) pushValue(value float64) {
 	s.items = append(s.items, value)
 	s.levels[s.numLevels] = len(s.items)
+	s.bindStoresFromSlices()
 	if len(s.items)-s.levels[s.numLevels-1] > s.level0Cap {
 		s.compressWhileNeeded()
 	}
@@ -298,6 +318,7 @@ func (s *KLLSketch) addNewTopLevel() {
 	copy(s.levels[1:], s.levels[:len(s.levels)-1])
 	s.levels[0] = 0
 	s.levels[len(s.levels)-1] = len(s.items)
+	s.bindStoresFromSlices()
 	s.numLevels++
 	s.rebuildCapacityCache()
 }
@@ -334,6 +355,7 @@ func (s *KLLSketch) compact(level int) {
 		s.levels[i] -= garbage
 	}
 	s.levels[len(s.levels)-1] = len(s.items)
+	s.bindStoresFromSlices()
 }
 
 func (s *KLLSketch) levelSize(level int) int {
@@ -382,6 +404,7 @@ func (s *KLLSketch) mergePacked(other *KLLSketch) {
 		pos = len(s.items)
 	}
 	s.levels[maxLevels] = pos
+	s.bindStoresFromSlices()
 	s.rebuildCapacityCache()
 	s.compressWhileNeeded()
 }
@@ -505,6 +528,7 @@ func DeserializeKLLSketchFromBytes(data []byte) (*KLLSketch, error) {
 			remainingBits: snap.CoinRemaining,
 		},
 	}
+	s.bindStoresFromSlices()
 	s.rebuildCapacityCache()
 	return s, nil
 }
