@@ -132,3 +132,93 @@ func TestHydraHashCMBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestHydraUpdateWithInput(t *testing.T) {
+	cfg := HydraConfig{
+		D:            3,
+		W:            8,
+		UnivMonLayer: 2,
+		UnivMonRow:   3,
+		UnivMonCol:   128,
+		UnivMonTopK:  2,
+		UseBigUM:     true,
+	}
+
+	h, err := NewHydra(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error constructing Hydra: %v", err)
+	}
+
+	input := common.FromString("beta")
+	h.UpdateWithInput(input, 5)
+
+	got := h.Estimate("beta")
+	if got != 5 {
+		t.Fatalf("expected estimate 5, got %d", got)
+	}
+}
+
+func TestHydraUpdateWithHash_NoTopKMode(t *testing.T) {
+	cfg := HydraConfig{
+		D:            3,
+		W:            8,
+		UnivMonLayer: 2,
+		UnivMonRow:   3,
+		UnivMonCol:   128,
+		UnivMonTopK:  2,
+		UseBigUM:     true,
+	}
+
+	h, err := NewHydra(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error constructing Hydra: %v", err)
+	}
+	h.SetTopKEnabled(false)
+
+	hash := common.FromString("gamma").Hash
+	h.UpdateWithHash(hash, 9)
+	got := h.EstimateWithHash(hash)
+	if got != 9 {
+		t.Fatalf("expected estimate 9, got %d", got)
+	}
+
+	// With TopK disabled, heavy-hitter query should not accumulate entries.
+	top := h.TopK(5)
+	if len(top) != 0 {
+		t.Fatalf("expected empty topk with TopK disabled, got %d", len(top))
+	}
+}
+
+func TestHydraSerializeRoundTrip(t *testing.T) {
+	cfg := HydraConfig{
+		D:            3,
+		W:            8,
+		UnivMonLayer: 2,
+		UnivMonRow:   3,
+		UnivMonCol:   128,
+		UnivMonTopK:  2,
+		UseBigUM:     true,
+	}
+	h, err := NewHydra(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error constructing Hydra: %v", err)
+	}
+	h.SetTopKEnabled(false)
+
+	hash := common.FromString("delta").Hash
+	h.UpdateWithHash(hash, 11)
+	before := h.EstimateWithHash(hash)
+
+	data, err := h.SerializeToBytes()
+	if err != nil {
+		t.Fatalf("serialize failed: %v", err)
+	}
+	restored, err := DeserializeHydraFromBytes(data)
+	if err != nil {
+		t.Fatalf("deserialize failed: %v", err)
+	}
+	after := restored.EstimateWithHash(hash)
+	if before != after {
+		t.Fatalf("roundtrip mismatch: before=%d after=%d", before, after)
+	}
+}
