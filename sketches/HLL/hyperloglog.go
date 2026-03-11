@@ -15,6 +15,7 @@ import (
 	"math/bits"
 
 	common "github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
 const (
@@ -35,12 +36,14 @@ const (
 // This implementation follows a fast-path-first API design.
 type HyperLogLog struct {
 	// Registers store leading-zero counts per bucket.
-	Registers [HLLRegisterCount]uint8
+	Registers *storage.Vector1D[uint8]
 }
 
 // NewHyperLogLog returns a new zero-initialized HLL sketch.
 func NewHyperLogLog() *HyperLogLog {
-	return &HyperLogLog{}
+	return &HyperLogLog{
+		Registers: storage.Vector1DFromSlice(make([]uint8, HLLRegisterCount)),
+	}
 }
 
 // New mirrors the Rust constructor naming.
@@ -50,7 +53,12 @@ func New() *HyperLogLog {
 
 // Debug prints raw register values (for inspection only).
 func (h *HyperLogLog) Debug() {
-	fmt.Println(h.Registers)
+	fmt.Println(h.RegisterSlice())
+}
+
+// RegisterSlice returns a direct view of register memory.
+func (h *HyperLogLog) RegisterSlice() []uint8 {
+	return h.Registers.AsSlice()
 }
 
 //
@@ -94,6 +102,7 @@ func (h *HyperLogLog) InsertManyWithHashes(hashes []uint64) {
 // InsertWithHash is the FAST PATH (execution layer).
 // It assumes the input has already been hashed.
 func (h *HyperLogLog) InsertWithHash(hash uint64) {
+	registers := h.Registers.AsMutSlice()
 	index := int(hash & HLLRegisterMask)
 	w := hash >> HLLPrecision
 
@@ -103,8 +112,8 @@ func (h *HyperLogLog) InsertWithHash(hash uint64) {
 		leadingZeros = maxLeadingZeros
 	}
 
-	if h.Registers[index] < leadingZeros {
-		h.Registers[index] = leadingZeros
+	if registers[index] < leadingZeros {
+		registers[index] = leadingZeros
 	}
 }
 
@@ -157,7 +166,7 @@ func (h *HyperLogLog) hllTau(x float64) float64 {
 
 func (h *HyperLogLog) getHistogram() [HLLRegisterBits + 2]uint32 {
 	var histogram [HLLRegisterBits + 2]uint32
-	for _, r := range h.Registers {
+	for _, r := range h.RegisterSlice() {
 		histogram[r]++
 	}
 	return histogram
@@ -199,13 +208,15 @@ func (h *HyperLogLog) Merge(other common.Sketch) error {
 		return errors.New("cannot merge: incompatible sketch type")
 	}
 
-	if len(h.Registers) != len(o.Registers) {
+	if h.Registers.Len() != o.Registers.Len() {
 		return errors.New("hyperloglog: incompatible register lengths")
 	}
 
+	self := h.Registers.AsMutSlice()
+	otherRegs := o.Registers.AsSlice()
 	for i := 0; i < HLLRegisterCount; i++ {
-		if o.Registers[i] > h.Registers[i] {
-			h.Registers[i] = o.Registers[i]
+		if otherRegs[i] > self[i] {
+			self[i] = otherRegs[i]
 		}
 	}
 	return nil
@@ -213,14 +224,25 @@ func (h *HyperLogLog) Merge(other common.Sketch) error {
 
 // SerializeToBytes serializes HyperLogLog into bytes.
 func (h *HyperLogLog) SerializeToBytes() ([]byte, error) {
-	return common.EncodeToBytes(h.Registers)
+	return common.EncodeToBytes(h.RegisterSlice())
 }
 
 // DeserializeHyperLogLogFromBytes restores HyperLogLog from serialized bytes.
 func DeserializeHyperLogLogFromBytes(data []byte) (*HyperLogLog, error) {
-	var regs [HLLRegisterCount]uint8
-	if err := common.DecodeFromBytes(data, &regs); err != nil {
+	var regs []uint8
+	if err := common.DecodeFromBytes(data, &regs); err == nil {
+		if len(regs) != HLLRegisterCount {
+			return nil, errors.New("hyperloglog: invalid register length")
+		}
+		return &HyperLogLog{Registers: storage.Vector1DFromSlice(regs)}, nil
+	}
+
+	// Backward compatibility with legacy fixed-array gob payload.
+	var legacyRegs [HLLRegisterCount]uint8
+	if err := common.DecodeFromBytes(data, &legacyRegs); err != nil {
 		return nil, err
 	}
-	return &HyperLogLog{Registers: regs}, nil
+	regs = make([]uint8, HLLRegisterCount)
+	copy(regs, legacyRegs[:])
+	return &HyperLogLog{Registers: storage.Vector1DFromSlice(regs)}, nil
 }
