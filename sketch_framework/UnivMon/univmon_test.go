@@ -228,3 +228,22 @@ func TestUnivSketch_CAIDA_Accuracy(t *testing.T) {
 		t.Errorf("Accuracy too low! Avg Error %.2f%% > 5%%", avgErr*100)
 	}
 }
+
+func TestUnivSketch_Update_NoTopK_Mode(t *testing.T) {
+	us, err := NewUnivSketchPyramid(100, 5, 1024, 8)
+	require.NoError(t, err)
+	us.SetTopKEnabled(false)
+
+	input := common.FromString("no-topk-item")
+	for i := 0; i < 10; i++ {
+		us.Update(input, 1)
+	}
+
+	freq, err := us.QueryWithHash(common.QueryFrequency, input.Hash)
+	require.NoError(t, err)
+	assert.Equal(t, 10.0, freq)
+
+	// QueryTopK remains callable, but with TopK disabled the heap is not updated.
+	topk := us.QueryTopK(5)
+	assert.Len(t, topk.Heap, 0)
+}
