@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/ProjectASAP/sketchlib-go/common"
 	"github.com/golang/glog"
 )
 
@@ -53,7 +54,7 @@ func TestElasticSketchBucketFlush(t *testing.T) {
 
 	es.mu.Lock()
 	defer es.mu.Unlock()
-	slot := es.buckets[0].slots[0]
+	slot := es.debugBucketSlot(0, 0)
 	if slot.id != "foo" {
 		t.Fatalf("expected bucket slot to keep key foo, got %q", slot.id)
 	}
@@ -87,9 +88,10 @@ func TestElasticSketchEvictionAndSketchFlush(t *testing.T) {
 	glog.Infof("TestElasticSketchEvictionAndSketchFlush: entries after light inserts: %+v", entries)
 
 	es.mu.Lock()
-	slot := es.buckets[0].slots[0]
+	slot := es.debugBucketSlot(0, 0)
+	vote := es.debugBucketVote(0)
 	es.mu.Unlock()
-	glog.Infof("TestElasticSketchEvictionAndSketchFlush: slot after eviction id=%s count=%f vote=%f", slot.id, slot.count, es.buckets[0].vote)
+	glog.Infof("TestElasticSketchEvictionAndSketchFlush: slot after eviction id=%s count=%f vote=%f", slot.id, slot.count, vote)
 
 	if slot.id != "light" {
 		t.Fatalf("expected bucket slot to be occupied by light, got %q", slot.id)
@@ -129,8 +131,87 @@ func TestElasticSketchEvictionAndSketchFlush(t *testing.T) {
 
 	es.mu.Lock()
 	defer es.mu.Unlock()
-	glog.Infof("TestElasticSketchEvictionAndSketchFlush: bucket slot final state id=%s count=%f", es.buckets[0].slots[0].id, es.buckets[0].slots[0].count)
-	if es.buckets[0].slots[0].count != 0 {
-		t.Fatalf("expected bucket count reset after flush, got %f", es.buckets[0].slots[0].count)
+	slot = es.debugBucketSlot(0, 0)
+	glog.Infof("TestElasticSketchEvictionAndSketchFlush: bucket slot final state id=%s count=%f", slot.id, slot.count)
+	if slot.count != 0 {
+		t.Fatalf("expected bucket count reset after flush, got %f", slot.count)
+	}
+}
+
+func TestElasticSketchInsertInputAndHashFastPath(t *testing.T) {
+	cfg := Config{
+		BucketCount:    4,
+		SlotsPerBucket: 2,
+		SketchSize:     32,
+		VoteFactor:     2,
+		FlushThreshold: 4,
+	}
+	es, err := New(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error constructing sketch: %v", err)
+	}
+
+	input := common.FromString("alpha")
+	es.InsertInputN(input, 3)
+	es.InsertWithHashN(input.Hash, 2)
+
+	es.mu.Lock()
+	defer es.mu.Unlock()
+
+	found := false
+	for bIdx := 0; bIdx < es.cfg.BucketCount && !found; bIdx++ {
+		for s := 0; s < es.cfg.SlotsPerBucket; s++ {
+			slot := es.debugBucketSlot(bIdx, s)
+			if slot.hash == input.Hash && slot.count > 0 {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		for _, v := range es.sketch.AsSlice() {
+			if v > 0 {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected key/hash to affect sketch state")
+	}
+}
+
+func TestElasticSketchSerializeRoundTrip(t *testing.T) {
+	cfg := Config{
+		BucketCount:    2,
+		SlotsPerBucket: 2,
+		SketchSize:     16,
+		VoteFactor:     2,
+		FlushThreshold: 4,
+	}
+	es, err := New(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error constructing sketch: %v", err)
+	}
+	es.InsertN("foo", 3)
+	es.InsertN("bar", 2)
+
+	blob, err := es.SerializeToBytes()
+	if err != nil {
+		t.Fatalf("serialize failed: %v", err)
+	}
+
+	restored, err := DeserializeElasticSketchFromBytes(blob)
+	if err != nil {
+		t.Fatalf("deserialize failed: %v", err)
+	}
+
+	restored.mu.Lock()
+	defer restored.mu.Unlock()
+	if restored.cfg.BucketCount != es.cfg.BucketCount || restored.cfg.SketchSize != es.cfg.SketchSize {
+		t.Fatalf("config mismatch after round trip")
+	}
+	if len(restored.slotCounts.AsSlice()) != len(es.slotCounts.AsSlice()) {
+		t.Fatalf("slot length mismatch after round trip")
 	}
 }
