@@ -297,5 +297,4 @@ An **adaptive multi-sketch composition framework** designed for heterogeneous an
 | Exponential Histogram | ✅           | ✅           | Exponential bucketing<br>Scale adjustment<br>No allocation           | Bucket compression<br>Adaptive scaling |
 | UnivMon               | ✅           | ✅          | Layered CountSketch<br>Multi-metric support                          | Memory tuning<br>Query fusion          |
 | HydraSketch           | ✅          | ✅          | Framework design<br>Sketch composition                               | Strategy optimization<br>Cost modeling |
-| ElasticSketch         | ❌           | ❌           | —                                                                    | Design optimization                    |
-
+| ElasticSketch         | ✅           | 🟡           | Vector1D-backed storage<br>Prehashed fast path (`InsertWithHash`)<br>`SketchInput` path + legacy snapshot compatibility | Throughput tuning<br>Allocation reduction on flush path |
