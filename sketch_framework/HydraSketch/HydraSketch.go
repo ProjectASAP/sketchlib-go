@@ -1,7 +1,6 @@
 package hydrasketch
 
 import (
-	"encoding/binary"
 	"errors"
 	"sync"
 
@@ -21,8 +20,10 @@ type Hydra struct {
 	D int
 	W int
 
-	Grid [][]*univmon.UnivSketch // [D][W]
-	Big  *univmon.UnivSketch     // Global UnivMon (optional)
+	gridFlat   []*univmon.UnivSketch   // flattened D*W backing storage
+	Grid       [][]*univmon.UnivSketch // compatibility 2D view over gridFlat
+	Big        *univmon.UnivSketch     // Global UnivMon (optional)
+	enableTopK bool
 
 	seedCM1 uint64
 	seedCM2 uint64
@@ -67,12 +68,15 @@ func NewHydra(cfg HydraConfig) (*Hydra, error) {
 			}
 			return 0x2222222222222222
 		}(),
+		gridFlat:   make([]*univmon.UnivSketch, cfg.D*cfg.W),
+		Grid:       make([][]*univmon.UnivSketch, cfg.D),
+		enableTopK: true,
 	}
 
-	// Initialize Grid D x W
-	h.Grid = make([][]*univmon.UnivSketch, h.D)
+	// Initialize 2D view over flattened D x W storage
 	for i := 0; i < h.D; i++ {
-		h.Grid[i] = make([]*univmon.UnivSketch, h.W)
+		start := i * h.W
+		h.Grid[i] = h.gridFlat[start : start+h.W]
 		for j := 0; j < h.W; j++ {
 			um, err := univmon.NewUnivSketchPyramid(
 				cfg.UnivMonTopK,
@@ -83,7 +87,8 @@ func NewHydra(cfg HydraConfig) (*Hydra, error) {
 			if err != nil {
 				return nil, err
 			}
-			h.Grid[i][j] = um
+			um.SetTopKEnabled(h.enableTopK)
+			h.gridFlat[start+j] = um
 		}
 	}
 
@@ -98,10 +103,29 @@ func NewHydra(cfg HydraConfig) (*Hydra, error) {
 		if err != nil {
 			return nil, err
 		}
+		b.SetTopKEnabled(h.enableTopK)
 		h.Big = b
 	}
 
 	return h, nil
+}
+
+func (h *Hydra) gridAt(row, col int) *univmon.UnivSketch {
+	return h.gridFlat[row*h.W+col]
+}
+
+func (h *Hydra) SetTopKEnabled(enabled bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.enableTopK = enabled
+	for i := range h.gridFlat {
+		if h.gridFlat[i] != nil {
+			h.gridFlat[i].SetTopKEnabled(enabled)
+		}
+	}
+	if h.Big != nil {
+		h.Big.SetTopKEnabled(enabled)
+	}
 }
 
 // Update updates the sketch with a key (+1 count)
@@ -111,45 +135,98 @@ func (h *Hydra) Update(key string) {
 
 // UpdateN updates the sketch with a key and a specific delta
 func (h *Hydra) UpdateN(key string, delta int64) {
+	h.UpdateWithInput(common.FromString(key), delta)
+}
+
+// UpdateWithInput updates the sketch with prebuilt input (hash+bytes).
+func (h *Hydra) UpdateWithInput(input *common.SketchInput, delta int64) {
+	if input == nil || delta <= 0 {
+		return
+	}
+	var posStack [16]int
+	pos := posStack[:0]
+	if h.D <= len(posStack) {
+		pos = posStack[:h.D]
+	} else {
+		pos = make([]int, h.D)
+	}
+	h.fillPositionsFromHash(input.Hash, pos)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	useTopK := h.enableTopK && len(input.Bytes) > 0
+	for r := 0; r < h.D; r++ {
+		cell := h.gridAt(r, pos[r])
+		if useTopK {
+			cell.Update(input, delta)
+		} else {
+			cell.UpdateWithHashOnly(input.Hash, delta)
+		}
+	}
+	if h.Big != nil {
+		if useTopK {
+			h.Big.Update(input, delta)
+		} else {
+			h.Big.UpdateWithHashOnly(input.Hash, delta)
+		}
+	}
+}
+
+// UpdateWithHash updates the sketch using pre-hashed input (throughput fast path).
+func (h *Hydra) UpdateWithHash(hash uint64, delta int64) {
 	if delta <= 0 {
 		return
 	}
-
-	// 1. Determine grid position
-	pos := h.hashCM(key)
-
-	// 2. Prepare input using common.FromString.
-	// This uses common.Hash64 internally, ensuring consistency.
-	input := common.FromString(key)
+	var posStack [16]int
+	pos := posStack[:0]
+	if h.D <= len(posStack) {
+		pos = posStack[:h.D]
+	} else {
+		pos = make([]int, h.D)
+	}
+	h.fillPositionsFromHash(hash, pos)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// 3. Update every row in the Grid
+	// Hash-only path skips key-aware TopK updates.
 	for r := 0; r < h.D; r++ {
-		h.Grid[r][pos[r]].Update(input, delta)
+		h.gridAt(r, pos[r]).UpdateWithHashOnly(hash, delta)
 	}
 
-	// 4. Update Big UnivMon if it exists
 	if h.Big != nil {
-		h.Big.Update(input, delta)
+		h.Big.UpdateWithHashOnly(hash, delta)
 	}
 }
 
 // Estimate returns the estimated frequency of the key.
 func (h *Hydra) Estimate(key string) int64 {
-	// 1. Use the exact same hash as UpdateN via common.FromString
-	inputHash := common.FromString(key).Hash
+	return h.EstimateWithHash(common.FromString(key).Hash)
+}
 
-	pos := h.hashCM(key)
-	vals := make([]int64, h.D)
+func (h *Hydra) EstimateWithHash(inputHash uint64) int64 {
+	var posStack [16]int
+	pos := posStack[:0]
+	if h.D <= len(posStack) {
+		pos = posStack[:h.D]
+	} else {
+		pos = make([]int, h.D)
+	}
+	h.fillPositionsFromHash(inputHash, pos)
+	var valsStack [16]int64
+	vals := valsStack[:0]
+	if h.D <= len(valsStack) {
+		vals = valsStack[:h.D]
+	} else {
+		vals = make([]int64, h.D)
+	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	for r := 0; r < h.D; r++ {
 		// Query with the pre-calculated hash
-		val, err := h.Grid[r][pos[r]].QueryWithHash(common.QueryFrequency, inputHash)
+		val, err := h.gridAt(r, pos[r]).QueryWithHash(common.QueryFrequency, inputHash)
 		if err != nil {
 			vals[r] = 0
 		} else {
@@ -206,18 +283,20 @@ func (h *Hydra) TopK(k int) []Pair {
 
 // hashCM determines the column position for each row in the Hydra Grid
 func (h *Hydra) hashCM(key string) []int {
-	var b1 [8]byte
-	var b2 [8]byte
-	binary.LittleEndian.PutUint64(b1[:], h.seedCM1)
-	binary.LittleEndian.PutUint64(b2[:], h.seedCM2)
-
-	keyBytes := []byte(key)
-
-	// FIX: Use common.Hash64 instead of direct xxhash dependency
-	x := common.Hash64(append(b1[:], keyBytes...))
-	y := common.Hash64(append(b2[:], keyBytes...))
-
 	out := make([]int, h.D)
+	h.fillPositionsFromHash(common.FromString(key).Hash, out)
+	return out
+}
+
+func (h *Hydra) fillPositionsFromHash(hash uint64, out []int) {
+	x := hash ^ h.seedCM1
+	y := hash ^ h.seedCM2
+	if x == 0 {
+		x = h.seedCM1
+	}
+	if y == 0 {
+		y = h.seedCM2 | 1
+	}
 	for r := 0; r < h.D; r++ {
 		x ^= x << 13
 		x ^= x >> 7
@@ -225,10 +304,8 @@ func (h *Hydra) hashCM(key string) []int {
 		y ^= y << 13
 		y ^= y >> 7
 		y ^= y << 17
-
 		out[r] = int((x ^ (y << 1)) % uint64(h.W))
 	}
-	return out
 }
 
 /////////////////////////////////////
@@ -296,12 +373,14 @@ func partition(a []int64, l, r int) int {
 }
 
 type hydraSnapshot struct {
-	D       int
-	W       int
-	SeedCM1 uint64
-	SeedCM2 uint64
-	Grid    [][][]byte
-	Big     []byte
+	Version    int
+	D          int
+	W          int
+	SeedCM1    uint64
+	SeedCM2    uint64
+	EnableTopK bool
+	Grid       [][][]byte
+	Big        []byte
 }
 
 // SerializeToBytes serializes Hydra into bytes.
@@ -334,12 +413,14 @@ func (h *Hydra) SerializeToBytes() ([]byte, error) {
 	}
 
 	return common.EncodeToBytes(hydraSnapshot{
-		D:       h.D,
-		W:       h.W,
-		SeedCM1: h.seedCM1,
-		SeedCM2: h.seedCM2,
-		Grid:    grid,
-		Big:     bigBytes,
+		Version:    1,
+		D:          h.D,
+		W:          h.W,
+		SeedCM1:    h.seedCM1,
+		SeedCM2:    h.seedCM2,
+		EnableTopK: h.enableTopK,
+		Grid:       grid,
+		Big:        bigBytes,
 	})
 }
 
@@ -356,25 +437,34 @@ func DeserializeHydraFromBytes(data []byte) (*Hydra, error) {
 		return nil, errors.New("invalid snapshot grid depth")
 	}
 
+	enableTopK := true
+	if snap.Version >= 1 {
+		enableTopK = snap.EnableTopK
+	}
+
 	h := &Hydra{
-		D:       snap.D,
-		W:       snap.W,
-		seedCM1: snap.SeedCM1,
-		seedCM2: snap.SeedCM2,
-		Grid:    make([][]*univmon.UnivSketch, snap.D),
+		D:          snap.D,
+		W:          snap.W,
+		seedCM1:    snap.SeedCM1,
+		seedCM2:    snap.SeedCM2,
+		gridFlat:   make([]*univmon.UnivSketch, snap.D*snap.W),
+		Grid:       make([][]*univmon.UnivSketch, snap.D),
+		enableTopK: enableTopK,
 	}
 
 	for i := 0; i < snap.D; i++ {
 		if len(snap.Grid[i]) != snap.W {
 			return nil, errors.New("invalid snapshot grid width")
 		}
-		h.Grid[i] = make([]*univmon.UnivSketch, snap.W)
+		start := i * h.W
+		h.Grid[i] = h.gridFlat[start : start+h.W]
 		for j := 0; j < snap.W; j++ {
 			um, err := univmon.DeserializeUnivSketchFromBytes(snap.Grid[i][j])
 			if err != nil {
 				return nil, err
 			}
-			h.Grid[i][j] = um
+			um.SetTopKEnabled(h.enableTopK)
+			h.gridFlat[start+j] = um
 		}
 	}
 
@@ -383,6 +473,7 @@ func DeserializeHydraFromBytes(data []byte) (*Hydra, error) {
 		if err != nil {
 			return nil, err
 		}
+		um.SetTopKEnabled(h.enableTopK)
 		h.Big = um
 	}
 
