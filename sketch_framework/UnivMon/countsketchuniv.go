@@ -5,14 +5,17 @@ import (
 	"math"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
 // CountSketchUniv implements common.Sketch
 type CountSketchUniv struct {
-	row   int
-	col   int
-	count [][]int64
-	l2    []int64
+	row        int
+	col        int
+	countStore *storage.Vector2D[int64]
+	l2Store    *storage.Vector1D[int64]
+	count      [][]int64
+	l2         []int64
 }
 
 // NewCountSketchUniv no longer requires manual seeds
@@ -30,20 +33,18 @@ func NewCountSketchUniv(row int, col int) (s *CountSketchUniv, err error) {
 		col: col,
 	}
 
-	// Fixed Pool Logic
-	if row == CS_ROW_NO_Univ_ELEPHANT && col == CS_COL_NO_Univ_ELEPHANT {
-		s.count = iarr2Pool_ele.Get()
-		s.l2 = iarrPool_ele.Get()
-	} else if row == CS_ROW_NO_Univ_MICE && col == CS_COL_NO_Univ_MICE {
-		s.count = iarr2Pool_mice.Get()
-		s.l2 = iarrPool_mice.Get()
-	} else {
-		s.count = make([][]int64, row)
-		for r := 0; r < row; r++ {
-			s.count[r] = make([]int64, col)
-		}
-		s.l2 = make([]int64, row)
+	countStore, err := storage.InitVector2D[int64](row, col)
+	if err != nil {
+		return nil, err
 	}
+	l2Store, err := storage.FilledVector1D[int64](row, 0)
+	if err != nil {
+		return nil, err
+	}
+	s.countStore = countStore
+	s.l2Store = l2Store
+	s.count = countStore.As2D()
+	s.l2 = l2Store.AsSlice()
 
 	return s, nil
 }
@@ -54,9 +55,9 @@ func (s *CountSketchUniv) TypeName() string {
 
 func (s *CountSketchUniv) CleanCountSketchUniv() error {
 	for r := 0; r < s.row; r++ {
-		s.count[r][0] = 0
-		for c := 1; c < s.col; c *= 2 {
-			copy(s.count[r][c:], s.count[r][:c])
+		row := s.countStore.RowSlice(r)
+		for c := 0; c < s.col; c++ {
+			row[c] = 0
 		}
 		s.l2[r] = 0
 	}
@@ -90,11 +91,13 @@ func (s *CountSketchUniv) Merge(other common.Sketch) error {
 	}
 
 	for i := 0; i < s.row; i++ {
+		row := s.countStore.RowSlice(i)
+		otherRow := o.countStore.RowSlice(i)
 		var rowL2 int64 = 0
 		for j := 0; j < s.col; j++ {
-			s.count[i][j] += o.count[i][j]
+			row[j] += otherRow[j]
 			// Recompute L2 sum-of-squares while we iterate
-			rowL2 += s.count[i][j] * s.count[i][j]
+			rowL2 += row[j] * row[j]
 		}
 		// Update the cached L2 value for this row
 		s.l2[i] = rowL2
@@ -105,51 +108,81 @@ func (s *CountSketchUniv) Merge(other common.Sketch) error {
 // --- UnivMon Specific Methods ---
 
 func (s *CountSketchUniv) UpdateWithHash(hash uint64, count int64) {
+	l2 := s.l2
 	for r := 0; r < s.row; r++ {
 		idx := common.DeriveIndex(hash, r, uint32(s.col))
 		sign := common.DeriveSign(hash, r)
+		row := s.countStore.RowSlice(r)
 
-		cur_count := s.count[r][idx]
-		s.count[r][idx] += sign * count
-		s.l2[r] += s.count[r][idx]*s.count[r][idx] - cur_count*cur_count
+		curCount := row[idx]
+		nextCount := curCount + sign*count
+		row[idx] = nextCount
+		l2[r] += nextCount*nextCount - curCount*curCount
+	}
+}
+
+// UpdateWithHashNoL2 updates counters without maintaining L2 cache.
+// Used by non-root UnivMon layers for faster update throughput.
+func (s *CountSketchUniv) UpdateWithHashNoL2(hash uint64, count int64) {
+	for r := 0; r < s.row; r++ {
+		idx := common.DeriveIndex(hash, r, uint32(s.col))
+		sign := common.DeriveSign(hash, r)
+		row := s.countStore.RowSlice(r)
+		row[idx] += sign * count
 	}
 }
 
 func (s *CountSketchUniv) UpdateAndEstimateHash(hash uint64, count int64) int64 {
-	counters := make([]int64, s.row)
+	var counters [3]int64
+	limit := s.row
+	if limit > 3 {
+		limit = 3
+	}
 
-	for r := 0; r < s.row; r++ {
+	for r := 0; r < limit; r++ {
 		idx := common.DeriveIndex(hash, r, uint32(s.col))
 		sign := common.DeriveSign(hash, r)
+		row := s.countStore.RowSlice(r)
 
-		cur_count := s.count[r][idx]
-		s.count[r][idx] += sign * count
-		s.l2[r] += s.count[r][idx]*s.count[r][idx] - cur_count*cur_count
+		curCount := row[idx]
+		nextCount := curCount + sign*count
+		row[idx] = nextCount
+		s.l2[r] += nextCount*nextCount - curCount*curCount
 
-		counters[r] = sign * s.count[r][idx]
+		counters[r] = sign * nextCount
 	}
 
 	return MedianOfThree(counters[0], counters[1], counters[2])
 }
 
 func (s *CountSketchUniv) UpdateAndEstimateHashNoL2(hash uint64, count int64) int64 {
-	counters := make([]int64, s.row)
-	for r := 0; r < s.row; r++ {
+	var counters [3]int64
+	limit := s.row
+	if limit > 3 {
+		limit = 3
+	}
+	for r := 0; r < limit; r++ {
 		idx := common.DeriveIndex(hash, r, uint32(s.col))
 		sign := common.DeriveSign(hash, r)
+		row := s.countStore.RowSlice(r)
 
-		s.count[r][idx] += sign * count
-		counters[r] = sign * s.count[r][idx]
+		row[idx] += sign * count
+		counters[r] = sign * row[idx]
 	}
 	return MedianOfThree(counters[0], counters[1], counters[2])
 }
 
 func (s *CountSketchUniv) EstimateHash(hash uint64) int64 {
-	counters := make([]int64, s.row)
-	for r := 0; r < s.row; r++ {
+	var counters [3]int64
+	limit := s.row
+	if limit > 3 {
+		limit = 3
+	}
+	for r := 0; r < limit; r++ {
 		idx := common.DeriveIndex(hash, r, uint32(s.col))
 		sign := common.DeriveSign(hash, r)
-		counters[r] = sign * s.count[r][idx]
+		row := s.countStore.RowSlice(r)
+		counters[r] = sign * row[idx]
 	}
 	return MedianOfThree(counters[0], counters[1], counters[2])
 }
@@ -197,10 +230,18 @@ func DeserializeCountSketchUnivFromBytes(data []byte) (*CountSketchUniv, error) 
 		return nil, errors.New("invalid snapshot l2 length")
 	}
 
+	countStore, err := storage.Vector2DFrom2D[int64](snap.Count)
+	if err != nil {
+		return nil, err
+	}
+	l2Store := storage.Vector1DFromSlice(snap.L2)
+
 	return &CountSketchUniv{
-		row:   snap.Row,
-		col:   snap.Col,
-		count: snap.Count,
-		l2:    snap.L2,
+		row:        snap.Row,
+		col:        snap.Col,
+		countStore: countStore,
+		l2Store:    l2Store,
+		count:      countStore.As2D(),
+		l2:         l2Store.AsSlice(),
 	}, nil
 }

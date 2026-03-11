@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
@@ -13,6 +14,7 @@ type UnivSketch struct {
 	row         int
 	col         int
 	layer       int
+	enableTopK  bool
 	cs_layers   []*CountSketchUniv
 	HH_layers   []*common.TopKHeap
 	bucket_size int64
@@ -25,6 +27,7 @@ func NewUnivSketchPyramid(k, row, col, layer int) (us *UnivSketch, err error) {
 		row:         row,
 		col:         col,
 		layer:       layer,
+		enableTopK:  true,
 		bucket_size: 0,
 	}
 
@@ -61,14 +64,27 @@ func (us *UnivSketch) Free() {
 	us.bucket_size = 0
 	for i := 0; i < us.layer; i++ {
 		us.cs_layers[i].CleanCountSketchUniv()
-		us.HH_layers[i].Clean()
+		if us.HH_layers[i] != nil {
+			us.HH_layers[i].Clean()
+		}
 	}
 }
 
 // --- Internal Helper ---
 
 func findBottomLayerNum(hash uint64, layer int) int {
-	// Optimization: check bit once per layer
+	if layer <= 1 {
+		return 0
+	}
+	bitsToCheck := layer - 1 // bits [1..layer-1]
+	if bitsToCheck < 63 {
+		mask := (uint64(1) << bitsToCheck) - 1
+		zeroBits := (^(hash >> 1)) & mask
+		if zeroBits == 0 {
+			return layer - 1
+		}
+		return bits.TrailingZeros64(zeroBits)
+	}
 	for l := 1; l < layer; l++ {
 		if ((hash >> l) & 1) == 0 {
 			return l - 1
@@ -79,47 +95,49 @@ func findBottomLayerNum(hash uint64, layer int) int {
 
 // --- Main Update Logic ---
 
+func (us *UnivSketch) updateLayersNoTopK(hash uint64, value int64, bottomLayer int) {
+	us.cs_layers[0].UpdateWithHash(hash, value)
+	for l := 1; l <= bottomLayer; l++ {
+		us.cs_layers[l].UpdateWithHashNoL2(hash, value)
+	}
+}
+
+func (us *UnivSketch) updateLayersWithTopK(hash uint64, value int64, bottomLayer int, key string) {
+	median := us.cs_layers[0].UpdateAndEstimateHash(hash, value)
+	us.HH_layers[0].Update(key, median)
+	for l := 1; l <= bottomLayer; l++ {
+		median = us.cs_layers[l].UpdateAndEstimateHashNoL2(hash, value)
+		us.HH_layers[l].Update(key, median)
+	}
+}
+
+func (us *UnivSketch) SetTopKEnabled(enabled bool) {
+	us.enableTopK = enabled
+}
+
 // Update inserts a value into the sketch.
 func (us *UnivSketch) Update(input *common.SketchInput, value int64) {
+	if input == nil || value == 0 {
+		return
+	}
 	us.bucket_size += value
 
-	bottom_layer_num := findBottomLayerNum(input.Hash, us.layer)
-	keyStr := string(input.Bytes)
-
-	// Determine optimization strategy based on depth
-	if bottom_layer_num < ELEPHANT_LAYER {
-		// Elephant Layers (Upper)
-		for l := bottom_layer_num; l >= 0; l-- {
-			var median_count int64
-			if l == 0 {
-				// Layer 0 requires full L2 update for accuracy
-				median_count = us.cs_layers[l].UpdateAndEstimateHash(input.Hash, value)
-			} else {
-				// Optimization: Skip L2 update for intermediate layers
-				median_count = us.cs_layers[l].UpdateAndEstimateHashNoL2(input.Hash, value)
-			}
-			us.HH_layers[l].Update(keyStr, median_count)
-		}
-	} else {
-		// Mice Layers (Lower/Deep) + Elephant Layers
-
-		// Update upper layers (Elephant)
-		for l := ELEPHANT_LAYER - 1; l >= 0; l-- {
-			var median_count int64
-			if l == 0 {
-				median_count = us.cs_layers[l].UpdateAndEstimateHash(input.Hash, value)
-			} else {
-				median_count = us.cs_layers[l].UpdateAndEstimateHashNoL2(input.Hash, value)
-			}
-			us.HH_layers[l].Update(keyStr, median_count)
-		}
-
-		// Update lower layers (Mice)
-		for l := bottom_layer_num; l >= ELEPHANT_LAYER; l-- {
-			median_count := us.cs_layers[l].UpdateAndEstimateHashNoL2(input.Hash, value)
-			us.HH_layers[l].Update(keyStr, median_count)
-		}
+	bottomLayer := findBottomLayerNum(input.Hash, us.layer)
+	if !us.enableTopK {
+		us.updateLayersNoTopK(input.Hash, value, bottomLayer)
+		return
 	}
+
+	us.updateLayersWithTopK(input.Hash, value, bottomLayer, string(input.Bytes))
+}
+
+// UpdateWithHashOnly is a fast path for stream updates that do not require key-aware TopK tracking.
+func (us *UnivSketch) UpdateWithHashOnly(hash uint64, value int64) {
+	if value == 0 {
+		return
+	}
+	us.bucket_size += value
+	us.updateLayersNoTopK(hash, value, findBottomLayerNum(hash, us.layer))
 }
 
 // TypeName returns the sketch type name.
@@ -129,12 +147,7 @@ func (us *UnivSketch) TypeName() string {
 
 // InsertWithHash implements common.Sketch.
 func (us *UnivSketch) InsertWithHash(hash uint64) {
-	// We create a dummy input with the hash.
-	input := &common.SketchInput{
-		Hash:  hash,
-		Bytes: []byte{}, // Key is empty
-	}
-	us.Update(input, 1)
+	us.UpdateWithHashOnly(hash, 1)
 }
 
 // QueryWithHash provides access to cardinality/sum estimates via the interface.
@@ -175,6 +188,9 @@ func (us *UnivSketch) Merge(other common.Sketch) error {
 		}
 
 		// B. Merge TopK Heaps Manually
+		if !us.enableTopK {
+			continue
+		}
 		for _, item := range o.HH_layers[i].Heap {
 			index, found := us.HH_layers[i].Find(item.Key)
 			if found {
@@ -389,6 +405,7 @@ func DeserializeUnivSketchFromBytes(data []byte) (*UnivSketch, error) {
 		row:         snap.Row,
 		col:         snap.Col,
 		layer:       snap.Layer,
+		enableTopK:  true,
 		bucket_size: snap.BucketSize,
 		cs_layers:   make([]*CountSketchUniv, snap.Layer),
 		HH_layers:   make([]*common.TopKHeap, snap.Layer),

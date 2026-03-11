@@ -54,6 +54,10 @@ func TestCountSketchUniv_Basic(t *testing.T) {
 	cs, err := NewCountSketchUniv(row, col)
 	require.NoError(t, err)
 	require.NotNil(t, cs)
+	require.NotNil(t, cs.countStore)
+	require.NotNil(t, cs.l2Store)
+	require.Equal(t, cs.row, cs.countStore.Rows())
+	require.Equal(t, cs.col, cs.countStore.Cols())
 
 	// Verify zero initialization
 	for r := 0; r < cs.row; r++ {
@@ -198,4 +202,37 @@ func TestCountSketchUniv_L2_CAIDA(t *testing.T) {
 	} else {
 		t.Log("L2 Accuracy Test Passed")
 	}
+}
+
+func TestCountSketchUnivSerializeRoundTrip(t *testing.T) {
+	cs, err := NewCountSketchUniv(5, 1024)
+	require.NoError(t, err)
+
+	for i := 0; i < 5000; i++ {
+		cs.UpdateWithHash(common.FromU64(uint64(i%333)).Hash, 1)
+	}
+
+	target := common.FromString("serialize_target").Hash
+	cs.UpdateWithHash(target, 17)
+
+	beforeFreq, err := cs.QueryWithHash(common.QueryFrequency, target)
+	require.NoError(t, err)
+	beforeL2, err := cs.QueryWithHash(common.QuerySum2, 0)
+	require.NoError(t, err)
+
+	data, err := cs.SerializeToBytes()
+	require.NoError(t, err)
+
+	restored, err := DeserializeCountSketchUnivFromBytes(data)
+	require.NoError(t, err)
+	require.NotNil(t, restored.countStore)
+	require.NotNil(t, restored.l2Store)
+
+	afterFreq, err := restored.QueryWithHash(common.QueryFrequency, target)
+	require.NoError(t, err)
+	afterL2, err := restored.QueryWithHash(common.QuerySum2, 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, beforeFreq, afterFreq, "frequency should match after round trip")
+	assert.Equal(t, beforeL2, afterL2, "l2 should match after round trip")
 }
