@@ -3,6 +3,7 @@ package benchmark
 import (
 	"math"
 	"runtime"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -294,7 +295,7 @@ func TestHLL_Merge_Accuracy(t *testing.T) {
 	}
 
 	// Double check internal state if possible (requires public access or deep equal)
-	if part1.Registers != totalH.Registers {
+	if !slices.Equal(part1.RegisterSlice(), totalH.RegisterSlice()) {
 		t.Error("Internal Register state mismatch!")
 	}
 }

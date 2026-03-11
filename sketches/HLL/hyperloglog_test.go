@@ -3,6 +3,7 @@ package hll
 import (
 	"encoding/binary"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
@@ -136,7 +137,7 @@ func TestHyperLogLog_CAIDA_Merge(t *testing.T) {
 
 	// Verify 2: Internal State Match
 	// The registers themselves must be identical bit-for-bit
-	if hllPart1.Registers != hllTotal.Registers {
+	if !slices.Equal(hllPart1.RegisterSlice(), hllTotal.RegisterSlice()) {
 		t.Error("Merge state mismatch. Registers differ between Merged and Total sketch.")
 	} else {
 		t.Log("Merge state verification passed (Registers are identical).")
@@ -200,6 +201,13 @@ func TestHyperLogLogSerializeRoundTrip(t *testing.T) {
 
 func TestHyperLogLogRustStyleAPI(t *testing.T) {
 	h := New()
+	if h.Registers == nil {
+		t.Fatal("register storage must be initialized")
+	}
+	if h.Registers.Len() != HLLRegisterCount {
+		t.Fatalf("unexpected register length: got %d want %d", h.Registers.Len(), HLLRegisterCount)
+	}
+
 	h.InsertInput(common.FromString("a"))
 	h.InsertMany([]*common.SketchInput{common.FromString("b"), common.FromString("c")})
 	h.InsertManyWithHashes([]uint64{common.FromString("d").Hash})
