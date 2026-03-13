@@ -2,10 +2,15 @@ package hydrasketch
 
 import (
 	"errors"
+	"strings"
 	"sync"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
+)
+
+const (
+	defaultHydraSeed = 6 // aligned with sketchlib-rust HYDRA_SEED
 )
 
 // Pair represents a Key-Value pair for TopK results.
@@ -14,169 +19,268 @@ type Pair struct {
 	Value int64
 }
 
-// Hydra combines the power of a Grid structure (like Count-Min)
-// with UnivMon estimators in each cell.
 type Hydra struct {
 	D int
 	W int
 
-	gridFlat   []*univmon.UnivSketch   // flattened D*W backing storage
-	Grid       [][]*univmon.UnivSketch // compatibility 2D view over gridFlat
-	Big        *univmon.UnivSketch     // Global UnivMon (optional)
-	enableTopK bool
+	cells       []HydraCounter
+	typeToClone HydraCounter
+	bigCounter  HydraCounter
 
+	enableTopK    bool
+	fanoutSubkeys bool
+	seedHydra     int
+
+	// Retained for backward compatibility with old snapshots.
 	seedCM1 uint64
 	seedCM2 uint64
 
 	mu sync.Mutex
 }
 
-// HydraConfig holds the configuration for Hydra and the internal UnivMon
+// HydraConfig holds Hydra settings.
 type HydraConfig struct {
 	D int
 	W int
 
-	// Configuration for each UnivMon inside the cells
-	UnivMonLayer int
-	UnivMonRow   int
-	UnivMonCol   int
-	UnivMonTopK  int
+	// Rust-aligned generic counter config.
+	CounterType HydraCounterType
+	Counter     HydraCounter
+	CounterRows int
+	CounterCols int
+	KLLK        int
 
-	UseBigUM bool
-	SeedCM1  uint64
-	SeedCM2  uint64
+	UniversalTopK  int
+	UniversalRow   int
+	UniversalCol   int
+	UniversalLayer int
+
+	EnableGlobalCounter bool
+	FanoutSubkeys bool
+	EnableTopK    bool
+	SeedHydra     int
+	SeedCM1       uint64
+	SeedCM2       uint64
 }
 
-// NewHydra creates a new Hydra instance using the UnivMon engine
+// NewHydra creates a Hydra instance.
 func NewHydra(cfg HydraConfig) (*Hydra, error) {
 	if cfg.D <= 0 || cfg.W <= 0 {
 		return nil, errors.New("invalid D/W dimensions")
 	}
 
+	template, err := resolveCounterTemplate(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	h := &Hydra{
-		D: cfg.D,
-		W: cfg.W,
-		seedCM1: func() uint64 {
-			if cfg.SeedCM1 != 0 {
-				return cfg.SeedCM1
-			}
-			return 0x1111111111111111
-		}(),
-		seedCM2: func() uint64 {
-			if cfg.SeedCM2 != 0 {
-				return cfg.SeedCM2
-			}
-			return 0x2222222222222222
-		}(),
-		gridFlat:   make([]*univmon.UnivSketch, cfg.D*cfg.W),
-		Grid:       make([][]*univmon.UnivSketch, cfg.D),
-		enableTopK: true,
+		D:             cfg.D,
+		W:             cfg.W,
+		typeToClone:   template,
+		cells:         make([]HydraCounter, cfg.D*cfg.W),
+		enableTopK:    true,
+		fanoutSubkeys: true,
+		seedHydra:     defaultHydraSeed,
+		seedCM1:       0x1111111111111111,
+		seedCM2:       0x2222222222222222,
+	}
+	if cfg.EnableTopK == false {
+		h.enableTopK = false
+	}
+	if cfg.FanoutSubkeys == false {
+		h.fanoutSubkeys = false
+	}
+	if cfg.SeedHydra != 0 {
+		h.seedHydra = cfg.SeedHydra
+	}
+	if cfg.SeedCM1 != 0 {
+		h.seedCM1 = cfg.SeedCM1
+	}
+	if cfg.SeedCM2 != 0 {
+		h.seedCM2 = cfg.SeedCM2
 	}
 
-	// Initialize 2D view over flattened D x W storage
-	for i := 0; i < h.D; i++ {
-		start := i * h.W
-		h.Grid[i] = h.gridFlat[start : start+h.W]
-		for j := 0; j < h.W; j++ {
-			um, err := univmon.NewUnivSketchPyramid(
-				cfg.UnivMonTopK,
-				cfg.UnivMonRow,
-				cfg.UnivMonCol,
-				cfg.UnivMonLayer,
-			)
-			if err != nil {
-				return nil, err
-			}
-			um.SetTopKEnabled(h.enableTopK)
-			h.gridFlat[start+j] = um
-		}
-	}
-
-	// Initialize Big UnivMon (Global) if requested
-	if cfg.UseBigUM {
-		b, err := univmon.NewUnivSketchPyramid(
-			cfg.UnivMonTopK*2,
-			cfg.UnivMonRow,
-			cfg.UnivMonCol,
-			cfg.UnivMonLayer,
-		)
+	for i := range h.cells {
+		clone, err := template.Clone()
 		if err != nil {
 			return nil, err
 		}
-		b.SetTopKEnabled(h.enableTopK)
-		h.Big = b
+		clone.SetTopKEnabled(h.enableTopK)
+		h.cells[i] = clone
 	}
 
+	if cfg.EnableGlobalCounter {
+		if template.CounterType() == HydraCounterUniversal {
+			topK := cfg.UniversalTopK
+			if topK <= 0 {
+				topK = 32
+			}
+			row := cfg.UniversalRow
+			if row <= 0 {
+				row = 3
+			}
+			col := cfg.UniversalCol
+			if col <= 0 {
+				col = 1024
+			}
+			layer := cfg.UniversalLayer
+			if layer <= 0 {
+				layer = 8
+			}
+			h.bigCounter, err = NewHydraUnivMonCounter(topK*2, row, col, layer)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			h.bigCounter, err = template.Clone()
+			if err != nil {
+				return nil, err
+			}
+		}
+		h.bigCounter.SetTopKEnabled(h.enableTopK)
+	}
 	return h, nil
 }
 
-func (h *Hydra) gridAt(row, col int) *univmon.UnivSketch {
-	return h.gridFlat[row*h.W+col]
+// NewHydraWithDimensions mirrors sketchlib-rust Hydra::with_dimensions.
+func NewHydraWithDimensions(rows, cols int, counter HydraCounter) (*Hydra, error) {
+	return NewHydra(HydraConfig{
+		D:          rows,
+		W:          cols,
+		Counter:    counter,
+		EnableTopK: true,
+		// Rust behavior: fan-out subsets is enabled in update(key,...).
+		FanoutSubkeys: true,
+	})
+}
+
+func resolveCounterTemplate(cfg HydraConfig) (HydraCounter, error) {
+	if cfg.Counter != nil {
+		return cfg.Counter, nil
+	}
+
+	counterType := cfg.CounterType
+	if counterType == "" {
+		counterType = HydraCounterCM
+	}
+
+	switch counterType {
+	case HydraCounterCM:
+		rows := cfg.CounterRows
+		if rows <= 0 {
+			rows = 3
+		}
+		cols := cfg.CounterCols
+		if cols <= 0 {
+			cols = 4096
+		}
+		return NewHydraCountMinCounter(rows, cols)
+	case HydraCounterCS:
+		rows := cfg.CounterRows
+		if rows <= 0 {
+			rows = 3
+		}
+		cols := cfg.CounterCols
+		if cols <= 0 {
+			cols = 4096
+		}
+		return NewHydraCountSketchCounter(rows, cols)
+	case HydraCounterHLL:
+		return NewHydraHLLCounter(), nil
+	case HydraCounterKLL:
+		k := cfg.KLLK
+		if k <= 0 {
+			k = 200
+		}
+		return NewHydraKLLCounter(k)
+	case HydraCounterUniversal:
+		topK := cfg.UniversalTopK
+		if topK <= 0 {
+			topK = 32
+		}
+		row := cfg.UniversalRow
+		if row <= 0 {
+			row = 3
+		}
+		col := cfg.UniversalCol
+		if col <= 0 {
+			col = 1024
+		}
+		layer := cfg.UniversalLayer
+		if layer <= 0 {
+			layer = 8
+		}
+		return NewHydraUnivMonCounter(topK, row, col, layer)
+	default:
+		return nil, errors.New("unsupported hydra counter type")
+	}
+}
+
+func (h *Hydra) counterAt(row, col int) HydraCounter {
+	return h.cells[row*h.W+col]
 }
 
 func (h *Hydra) SetTopKEnabled(enabled bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
 	h.enableTopK = enabled
-	for i := range h.gridFlat {
-		if h.gridFlat[i] != nil {
-			h.gridFlat[i].SetTopKEnabled(enabled)
+	for i := range h.cells {
+		if h.cells[i] != nil {
+			h.cells[i].SetTopKEnabled(enabled)
 		}
 	}
-	if h.Big != nil {
-		h.Big.SetTopKEnabled(enabled)
+	if h.bigCounter != nil {
+		h.bigCounter.SetTopKEnabled(enabled)
 	}
 }
 
-// Update updates the sketch with a key (+1 count)
-func (h *Hydra) Update(key string) {
-	h.UpdateN(key, 1)
+// UpdateValue mirrors sketchlib-rust: key determines subpopulation routing,
+// value is inserted into the selected cell counters.
+func (h *Hydra) UpdateValue(key string, value *common.SketchInput, delta int64) {
+	if value == nil || delta <= 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	subkeys := h.expandSubkeys(key)
+	for _, subkey := range subkeys {
+		var posStack [16]int
+		pos := posStack[:0]
+		if h.D <= len(posStack) {
+			pos = posStack[:h.D]
+		} else {
+			pos = make([]int, h.D)
+		}
+		h.fillPositionsFromSubKey(subkey, pos)
+
+		for r := 0; r < h.D; r++ {
+			h.counterAt(r, pos[r]).InsertWithHash(value, value.Hash, delta)
+		}
+	}
+
+	if h.bigCounter != nil {
+		h.bigCounter.InsertWithHash(value, value.Hash, delta)
+	}
 }
 
-// UpdateN updates the sketch with a key and a specific delta
-func (h *Hydra) UpdateN(key string, delta int64) {
-	h.UpdateWithInput(common.FromString(key), delta)
-}
-
-// UpdateWithInput updates the sketch with prebuilt input (hash+bytes).
+// UpdateWithInput updates using prebuilt input.
 func (h *Hydra) UpdateWithInput(input *common.SketchInput, delta int64) {
 	if input == nil || delta <= 0 {
 		return
 	}
-	var posStack [16]int
-	pos := posStack[:0]
-	if h.D <= len(posStack) {
-		pos = posStack[:h.D]
-	} else {
-		pos = make([]int, h.D)
-	}
-	h.fillPositionsFromHash(input.Hash, pos)
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	useTopK := h.enableTopK && len(input.Bytes) > 0
-	for r := 0; r < h.D; r++ {
-		cell := h.gridAt(r, pos[r])
-		if useTopK {
-			cell.Update(input, delta)
-		} else {
-			cell.UpdateWithHashOnly(input.Hash, delta)
-		}
-	}
-	if h.Big != nil {
-		if useTopK {
-			h.Big.Update(input, delta)
-		} else {
-			h.Big.UpdateWithHashOnly(input.Hash, delta)
-		}
-	}
+	h.UpdateValue(string(input.Bytes), input, delta)
 }
 
-// UpdateWithHash updates the sketch using pre-hashed input (throughput fast path).
+// UpdateWithHash updates using hash-only fast path.
 func (h *Hydra) UpdateWithHash(hash uint64, delta int64) {
 	if delta <= 0 {
 		return
 	}
+	value := &common.SketchInput{Hash: hash}
+
 	var posStack [16]int
 	pos := posStack[:0]
 	if h.D <= len(posStack) {
@@ -189,22 +293,18 @@ func (h *Hydra) UpdateWithHash(hash uint64, delta int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Hash-only path skips key-aware TopK updates.
 	for r := 0; r < h.D; r++ {
-		h.gridAt(r, pos[r]).UpdateWithHashOnly(hash, delta)
+		h.counterAt(r, pos[r]).InsertWithHash(value, hash, delta)
 	}
-
-	if h.Big != nil {
-		h.Big.UpdateWithHashOnly(hash, delta)
+	if h.bigCounter != nil {
+		h.bigCounter.InsertWithHash(value, hash, delta)
 	}
 }
 
-// Estimate returns the estimated frequency of the key.
-func (h *Hydra) Estimate(key string) int64 {
-	return h.EstimateWithHash(common.FromString(key).Hash)
-}
+// QueryKey mirrors sketchlib-rust Hydra::query_key.
+func (h *Hydra) QueryKey(key []string, query HydraQuery) float64 {
+	joined := strings.Join(key, ";")
 
-func (h *Hydra) EstimateWithHash(inputHash uint64) int64 {
 	var posStack [16]int
 	pos := posStack[:0]
 	if h.D <= len(posStack) {
@@ -212,80 +312,111 @@ func (h *Hydra) EstimateWithHash(inputHash uint64) int64 {
 	} else {
 		pos = make([]int, h.D)
 	}
-	h.fillPositionsFromHash(inputHash, pos)
-	var valsStack [16]int64
-	vals := valsStack[:0]
-	if h.D <= len(valsStack) {
-		vals = valsStack[:h.D]
-	} else {
-		vals = make([]int64, h.D)
-	}
+	h.fillPositionsFromSubKey(joined, pos)
+
+	values := make([]float64, h.D)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	for r := 0; r < h.D; r++ {
-		// Query with the pre-calculated hash
-		val, err := h.gridAt(r, pos[r]).QueryWithHash(common.QueryFrequency, inputHash)
+		v, err := h.counterAt(r, pos[r]).Query(query)
 		if err != nil {
-			vals[r] = 0
-		} else {
-			vals[r] = int64(val)
+			values[r] = 0
+			continue
 		}
+		values[r] = v
 	}
-
-	// Median
-	quickSelect(vals, h.D/2)
-	return vals[h.D/2]
+	return common.ComputeMedianInlineF64(values)
 }
 
-// GetEntropy returns the estimated Shannon entropy.
+func (h *Hydra) QueryFrequency(key []string, value *common.SketchInput) float64 {
+	return h.QueryKey(key, FrequencyQuery(value))
+}
+
+func (h *Hydra) QueryQuantile(key []string, threshold float64) float64 {
+	return h.QueryKey(key, CDFQuery(threshold))
+}
+
+// GetEntropy returns the global entropy estimate when big sketch exists.
 func (h *Hydra) GetEntropy() float64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.Big != nil {
-		return h.Big.GetEntropy()
+	if h.bigCounter == nil {
+		return 0
 	}
-	return 0.0
+	v, err := h.bigCounter.Query(EntropyQuery())
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
-// GetCardinality returns the estimated cardinality.
+// GetCardinality returns the global cardinality estimate when big sketch exists.
 func (h *Hydra) GetCardinality() float64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.Big != nil {
-		return h.Big.GetCardinality()
+	if h.bigCounter == nil {
+		return 0
 	}
-	return 0.0
+	v, err := h.bigCounter.Query(CardinalityQuery())
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
-// TopK returns the Heavy Hitters elements.
+// TopK returns heavy hitters when global counter supports it.
 func (h *Hydra) TopK(k int) []Pair {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.Big != nil {
-		heapStruct := h.Big.QueryTopK(k)
-		out := make([]Pair, 0, len(heapStruct.Heap))
-		for _, item := range heapStruct.Heap {
-			out = append(out, Pair{
-				Key:   item.Key,
-				Value: item.Count,
-			})
-		}
-		return out
+	if h.bigCounter == nil || !h.enableTopK {
+		return nil
 	}
-
-	return nil
+	return h.bigCounter.TopK(k)
 }
 
-// hashCM determines the column position for each row in the Hydra Grid
-func (h *Hydra) hashCM(key string) []int {
-	out := make([]int, h.D)
-	h.fillPositionsFromHash(common.FromString(key).Hash, out)
+func (h *Hydra) expandSubkeys(key string) []string {
+	if !h.fanoutSubkeys {
+		return []string{key}
+	}
+	parts := strings.Split(key, ";")
+	filtered := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			filtered = append(filtered, p)
+		}
+	}
+	if len(filtered) <= 1 {
+		return []string{key}
+	}
+
+	n := len(filtered)
+	out := make([]string, 0, (1<<n)-1)
+	var b strings.Builder
+	for mask := 1; mask < (1 << n); mask++ {
+		b.Reset()
+		first := true
+		for j := 0; j < n; j++ {
+			if (mask>>j)&1 == 0 {
+				continue
+			}
+			if !first {
+				b.WriteByte(';')
+			}
+			b.WriteString(filtered[j])
+			first = false
+		}
+		out = append(out, b.String())
+	}
 	return out
+}
+
+func (h *Hydra) fillPositionsFromSubKey(key string, out []int) {
+	h.fillPositionsFromHash(common.HashIt(h.seedHydra, []byte(key)), out)
 }
 
 func (h *Hydra) fillPositionsFromHash(hash uint64, out []int) {
@@ -329,7 +460,7 @@ func ParallelUpdate(h *Hydra, jobs []UpdateJob, workers int) {
 		go func() {
 			defer wg.Done()
 			for j := range ch {
-				h.UpdateN(j.Key, j.Count)
+				h.UpdateValue(j.Key, common.FromString(j.Key), j.Count)
 			}
 		}()
 	}
@@ -341,46 +472,21 @@ func ParallelUpdate(h *Hydra, jobs []UpdateJob, workers int) {
 	wg.Wait()
 }
 
-///////////////////////////
-// util: quickselect     //
-///////////////////////////
-
-func quickSelect(a []int64, k int) {
-	l, r := 0, len(a)-1
-	for l < r {
-		p := partition(a, l, r)
-		if p == k {
-			return
-		} else if p < k {
-			l = p + 1
-		} else {
-			r = p - 1
-		}
-	}
-}
-
-func partition(a []int64, l, r int) int {
-	p := a[r]
-	i := l
-	for j := l; j < r; j++ {
-		if a[j] < p {
-			a[i], a[j] = a[j], a[i]
-			i++
-		}
-	}
-	a[i], a[r] = a[r], a[i]
-	return i
-}
-
 type hydraSnapshot struct {
-	Version    int
-	D          int
-	W          int
-	SeedCM1    uint64
-	SeedCM2    uint64
-	EnableTopK bool
-	Grid       [][][]byte
-	Big        []byte
+	Version       int
+	D             int
+	W             int
+	CounterType   HydraCounterType
+	EnableTopK    bool
+	FanoutSubkeys bool
+	SeedHydra     int
+	SeedCM1       uint64
+	SeedCM2       uint64
+	Cells         [][]byte
+	Big           []byte
+
+	// Legacy payload compatibility (v1)
+	Grid [][][]byte
 }
 
 // SerializeToBytes serializes Hydra into bytes.
@@ -388,24 +494,22 @@ func (h *Hydra) SerializeToBytes() ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	grid := make([][][]byte, h.D)
-	for i := 0; i < h.D; i++ {
-		grid[i] = make([][]byte, h.W)
-		for j := 0; j < h.W; j++ {
-			if h.Grid[i][j] == nil {
-				continue
-			}
-			b, err := h.Grid[i][j].SerializeToBytes()
-			if err != nil {
-				return nil, err
-			}
-			grid[i][j] = b
+	if len(h.cells) == 0 {
+		return nil, errors.New("empty hydra")
+	}
+
+	cells := make([][]byte, len(h.cells))
+	for i := range h.cells {
+		b, err := h.cells[i].SerializeToBytes()
+		if err != nil {
+			return nil, err
 		}
+		cells[i] = b
 	}
 
 	var bigBytes []byte
-	if h.Big != nil {
-		b, err := h.Big.SerializeToBytes()
+	if h.bigCounter != nil {
+		b, err := h.bigCounter.SerializeToBytes()
 		if err != nil {
 			return nil, err
 		}
@@ -413,14 +517,17 @@ func (h *Hydra) SerializeToBytes() ([]byte, error) {
 	}
 
 	return common.EncodeToBytes(hydraSnapshot{
-		Version:    1,
-		D:          h.D,
-		W:          h.W,
-		SeedCM1:    h.seedCM1,
-		SeedCM2:    h.seedCM2,
-		EnableTopK: h.enableTopK,
-		Grid:       grid,
-		Big:        bigBytes,
+		Version:       2,
+		D:             h.D,
+		W:             h.W,
+		CounterType:   h.cells[0].CounterType(),
+		EnableTopK:    h.enableTopK,
+		FanoutSubkeys: h.fanoutSubkeys,
+		SeedHydra:     h.seedHydra,
+		SeedCM1:       h.seedCM1,
+		SeedCM2:       h.seedCM2,
+		Cells:         cells,
+		Big:           bigBytes,
 	})
 }
 
@@ -433,49 +540,103 @@ func DeserializeHydraFromBytes(data []byte) (*Hydra, error) {
 	if snap.D <= 0 || snap.W <= 0 {
 		return nil, errors.New("invalid snapshot dimensions")
 	}
-	if len(snap.Grid) != snap.D {
-		return nil, errors.New("invalid snapshot grid depth")
-	}
 
-	enableTopK := true
-	if snap.Version >= 1 {
-		enableTopK = snap.EnableTopK
-	}
-
-	h := &Hydra{
-		D:          snap.D,
-		W:          snap.W,
-		seedCM1:    snap.SeedCM1,
-		seedCM2:    snap.SeedCM2,
-		gridFlat:   make([]*univmon.UnivSketch, snap.D*snap.W),
-		Grid:       make([][]*univmon.UnivSketch, snap.D),
-		enableTopK: enableTopK,
-	}
-
-	for i := 0; i < snap.D; i++ {
-		if len(snap.Grid[i]) != snap.W {
-			return nil, errors.New("invalid snapshot grid width")
+	// Legacy snapshot fallback (v1 UnivMon grid)
+	if len(snap.Cells) == 0 && len(snap.Grid) > 0 {
+		if len(snap.Grid) != snap.D {
+			return nil, errors.New("invalid snapshot grid depth")
 		}
-		start := i * h.W
-		h.Grid[i] = h.gridFlat[start : start+h.W]
-		for j := 0; j < snap.W; j++ {
-			um, err := univmon.DeserializeUnivSketchFromBytes(snap.Grid[i][j])
+		h := &Hydra{
+			D:             snap.D,
+			W:             snap.W,
+			enableTopK:    true,
+			fanoutSubkeys: true,
+			seedHydra:     defaultHydraSeed,
+			seedCM1:       0x1111111111111111,
+			seedCM2:       0x2222222222222222,
+			cells:         make([]HydraCounter, snap.D*snap.W),
+		}
+		if snap.Version >= 1 {
+			h.enableTopK = snap.EnableTopK
+			h.seedCM1 = snap.SeedCM1
+			h.seedCM2 = snap.SeedCM2
+		}
+
+		for i := 0; i < snap.D; i++ {
+			if len(snap.Grid[i]) != snap.W {
+				return nil, errors.New("invalid snapshot grid width")
+			}
+			for j := 0; j < snap.W; j++ {
+				um, err := univmon.DeserializeUnivSketchFromBytes(snap.Grid[i][j])
+				if err != nil {
+					return nil, err
+				}
+				um.SetTopKEnabled(h.enableTopK)
+				h.cells[i*h.W+j] = &univCounter{s: um}
+			}
+		}
+		if len(snap.Big) > 0 {
+			um, err := univmon.DeserializeUnivSketchFromBytes(snap.Big)
 			if err != nil {
 				return nil, err
 			}
 			um.SetTopKEnabled(h.enableTopK)
-			h.gridFlat[start+j] = um
+			h.bigCounter = &univCounter{s: um}
+		}
+		h.typeToClone = &univCounter{}
+		return h, nil
+	}
+
+	if len(snap.Cells) != snap.D*snap.W {
+		return nil, errors.New("invalid snapshot cells length")
+	}
+	if snap.CounterType == "" {
+		return nil, errors.New("invalid snapshot counter type")
+	}
+
+	h := &Hydra{
+		D:             snap.D,
+		W:             snap.W,
+		enableTopK:    true,
+		fanoutSubkeys: true,
+		seedHydra:     defaultHydraSeed,
+		seedCM1:       0x1111111111111111,
+		seedCM2:       0x2222222222222222,
+		cells:         make([]HydraCounter, len(snap.Cells)),
+	}
+	if snap.Version >= 2 {
+		h.enableTopK = snap.EnableTopK
+		h.fanoutSubkeys = snap.FanoutSubkeys
+		if snap.SeedHydra != 0 {
+			h.seedHydra = snap.SeedHydra
+		}
+		if snap.SeedCM1 != 0 {
+			h.seedCM1 = snap.SeedCM1
+		}
+		if snap.SeedCM2 != 0 {
+			h.seedCM2 = snap.SeedCM2
 		}
 	}
 
-	if len(snap.Big) > 0 {
-		um, err := univmon.DeserializeUnivSketchFromBytes(snap.Big)
+	for i := range snap.Cells {
+		counter, err := decodeCounter(snap.CounterType, snap.Cells[i])
 		if err != nil {
 			return nil, err
 		}
-		um.SetTopKEnabled(h.enableTopK)
-		h.Big = um
+		counter.SetTopKEnabled(h.enableTopK)
+		h.cells[i] = counter
+	}
+	if len(h.cells) > 0 {
+		h.typeToClone, _ = h.cells[0].Clone()
 	}
 
+	if len(snap.Big) > 0 {
+		counter, err := decodeCounter(snap.CounterType, snap.Big)
+		if err != nil {
+			return nil, err
+		}
+		counter.SetTopKEnabled(h.enableTopK)
+		h.bigCounter = counter
+	}
 	return h, nil
 }

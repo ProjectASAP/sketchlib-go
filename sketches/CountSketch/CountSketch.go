@@ -30,7 +30,7 @@ type CountSketch struct {
 	Rows int
 	Cols int
 
-	countStore *storage.DenseMatrixStorage
+	countStore *storage.FlatVector2D
 
 	Count [][]float64
 	L2    []float64
@@ -64,14 +64,9 @@ func (s *CountSketch) rehydrateStorage() error {
 		s.TopK = common.NewTopKHeap(TOPK_SIZE)
 	}
 
-	countStore, err := storage.NewDenseMatrixStorage(s.Rows, s.Cols)
+	countStore, err := storage.NewFlatVector2DFrom2D(s.Count)
 	if err != nil {
 		return err
-	}
-	for r := 0; r < s.Rows; r++ {
-		for c := 0; c < s.Cols; c++ {
-			countStore.UpdateOneCounter(r, c, s.Count[r][c])
-		}
 	}
 
 	s.countStore = countStore
@@ -80,7 +75,7 @@ func (s *CountSketch) rehydrateStorage() error {
 	return nil
 }
 
-// NewCountSketch creates a new CountSketch.
+// NewCountSketch creates the float64-counter CountSketch.
 // Usage:
 //
 //	NewCountSketch()             -> Uses defaults (5, 2048)
@@ -112,7 +107,7 @@ func NewCountSketch(dims ...int) (*CountSketch, error) {
 		return nil, errors.New("cols must be a power of two")
 	}
 
-	countStore, err := storage.NewDenseMatrixStorage(rows, cols)
+	countStore, err := storage.NewFlatVector2D(rows, cols)
 	if err != nil {
 		return nil, err
 	}
@@ -130,12 +125,12 @@ func NewCountSketch(dims ...int) (*CountSketch, error) {
 	}, nil
 }
 
-// New returns a Count sketch using the Rust default dimensions.
+// New returns the float64-counter CountSketch with Rust default dimensions.
 func New() (*CountSketch, error) {
 	return NewCountSketch(RustDefaultRows, RustDefaultCols)
 }
 
-// WithDimensions mirrors the Rust constructor naming.
+// WithDimensions mirrors Rust constructor naming for the float64 variant.
 func WithDimensions(rows, cols int) (*CountSketch, error) {
 	return NewCountSketch(rows, cols)
 }
@@ -143,18 +138,18 @@ func WithDimensions(rows, cols int) (*CountSketch, error) {
 func (s *CountSketch) RowCount() int { return s.Rows }
 func (s *CountSketch) ColCount() int { return s.Cols }
 
-func (s *CountSketch) AsStorage() *storage.DenseMatrixStorage {
+func (s *CountSketch) AsStorage() *storage.FlatVector2D {
 	return s.countStore
 }
 
-func (s *CountSketch) AsStorageMut() *storage.DenseMatrixStorage {
+func (s *CountSketch) AsStorageMut() *storage.FlatVector2D {
 	return s.countStore
 }
 
 // derivePosAndSign computes row index and sign (+1/-1) from base hash.
 // Kept for backward-compatibility with existing tests.
 func (s *CountSketch) derivePosAndSign(hash uint64, row int) (int, float64) {
-	hashed := s.countStore.HashForMatrix(hash)
+	hashed := storage.BuildMatrixHash(hash, s.Rows, s.Cols)
 	return s.derivePosAndSignFromHashed(hashed, row)
 }
 
@@ -186,14 +181,14 @@ func (s *CountSketch) Insert(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
-	s.insertWithMatrixHash(s.countStore.HashForInput(input), 1)
+	s.insertWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
 }
 
 func (s *CountSketch) InsertMany(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
-	s.insertWithMatrixHash(s.countStore.HashForInput(input), many)
+	s.insertWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), many)
 }
 
 func (s *CountSketch) FastInsertWithHashValue(hash uint64) {
@@ -206,7 +201,7 @@ func (s *CountSketch) FastInsertManyWithHashValue(hash uint64, many float64) {
 
 // InsertWithHashAndValue supports weighted updates.
 func (s *CountSketch) InsertWithHashAndValue(hash uint64, value float64) {
-	hashed := s.countStore.HashForMatrix(hash)
+	hashed := storage.BuildMatrixHash(hash, s.Rows, s.Cols)
 	s.insertWithMatrixHash(hashed, value)
 }
 
@@ -241,7 +236,7 @@ func (s *CountSketch) insertWithMatrixHash(hashed storage.MatrixHashType, value 
 func (s *CountSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
 	switch q {
 	case common.QueryFrequency:
-		hashed := s.countStore.HashForMatrix(hash)
+		hashed := storage.BuildMatrixHash(hash, s.Rows, s.Cols)
 		var estimatesStack [16]float64
 		var estimates []float64
 		if s.Rows <= len(estimatesStack) {
@@ -285,7 +280,7 @@ func (s *CountSketch) Estimate(input *common.SketchInput) float64 {
 	if input == nil {
 		return 0
 	}
-	return s.estimateWithMatrixHash(s.countStore.HashForInput(input))
+	return s.estimateWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols))
 }
 
 func (s *CountSketch) FastEstimateWithHash(hash uint64) float64 {

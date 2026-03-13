@@ -459,3 +459,87 @@ func TestCountMinSketch_ErrorBound_CAIDA(t *testing.T) {
 			correctLowerBound, withinCount, cols)
 	}
 }
+
+func buildCMSWorkload(n, keys int, seed int64) ([]uint64, map[uint64]int) {
+	rng := rand.New(rand.NewSource(seed))
+	out := make([]uint64, n)
+	truth := make(map[uint64]int, keys)
+	for i := 0; i < n; i++ {
+		k := rng.Intn(keys)
+		h := common.FromString(fmt.Sprintf("cms:%d", k)).Hash
+		out[i] = h
+		truth[h]++
+	}
+	return out, truth
+}
+
+func TestCountMin_Quality_OperationsAndErrorBound(t *testing.T) {
+	const rows, cols = 5, 4096
+	stream, truth := buildCMSWorkload(40000, 2000, 11)
+	s, err := NewCountMinSketch(rows, cols)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	for _, h := range stream {
+		s.InsertWithHash(h)
+	}
+
+	eps := math.E / float64(cols)
+	bound := eps * float64(len(stream))
+
+	for h, real := range truth {
+		freq, err := s.QueryWithHash(common.QueryFrequency, h)
+		if err != nil {
+			t.Fatalf("query freq: %v", err)
+		}
+		if freq < float64(real) {
+			t.Fatalf("underestimate for hash %d: got=%v real=%d", h, freq, real)
+		}
+		if freq > float64(real)+2.0*bound {
+			t.Fatalf("freq error too large for hash %d: got=%v real=%d bound=%v", h, freq, real, bound)
+		}
+
+		sum, _ := s.QueryWithHash(common.QuerySum, h)
+		sum2, _ := s.QueryWithHash(common.QuerySum2, h)
+		if sum < float64(real) || sum2 < float64(real) {
+			t.Fatalf("sum/sum2 under real count for hash %d", h)
+		}
+	}
+}
+
+func TestCountMin_Quality_MergeAccuracy(t *testing.T) {
+	const rows, cols = 5, 2048
+	stream, truth := buildCMSWorkload(20000, 1200, 77)
+
+	left, _ := NewCountMinSketch(rows, cols)
+	right, _ := NewCountMinSketch(rows, cols)
+	total, _ := NewCountMinSketch(rows, cols)
+
+	mid := len(stream) / 2
+	for i, h := range stream {
+		total.InsertWithHash(h)
+		if i < mid {
+			left.InsertWithHash(h)
+		} else {
+			right.InsertWithHash(h)
+		}
+	}
+	if err := left.Merge(right); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	for h, real := range truth {
+		got, _ := left.QueryWithHash(common.QueryFrequency, h)
+		want, _ := total.QueryWithHash(common.QueryFrequency, h)
+		if got != want {
+			t.Fatalf("merged mismatch for hash %d: got=%v want=%v real=%d", h, got, want, real)
+		}
+	}
+}
+
+func TestCountMin_Quality_SpecificUnsupportedQuery(t *testing.T) {
+	s, _ := NewCountMinSketch(3, 64)
+	if _, err := s.QueryWithHash(common.QueryCardinality, 123); err == nil {
+		t.Fatal("expected unsupported query error")
+	}
+}

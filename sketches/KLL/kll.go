@@ -40,15 +40,6 @@ func (s *KLLSketch) bindStoresFromSlices() {
 	s.levelStore = storage.Vector1DFromVec(s.levels)
 }
 
-func (s *KLLSketch) syncSlicesFromStores() {
-	if s.itemStore != nil {
-		s.items = s.itemStore.AsSlice()
-	}
-	if s.levelStore != nil {
-		s.levels = s.levelStore.AsSlice()
-	}
-}
-
 type coin struct {
 	state         uint64
 	bitCache      uint64

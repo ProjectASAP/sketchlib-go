@@ -2,6 +2,7 @@ package kll
 
 import (
 	"math"
+	"math/rand"
 	"sort"
 	"testing"
 	"time"
@@ -296,5 +297,79 @@ func TestKLLRustStyleAPI(t *testing.T) {
 	median := s.Quantile(0.5)
 	if median < 2 || median > 4 {
 		t.Fatalf("unexpected median: got %v", median)
+	}
+}
+
+func rankLE(sorted []float64, x float64) int {
+	return sort.Search(len(sorted), func(i int) bool { return sorted[i] > x })
+}
+
+func TestKLL_Quality_OperationsAndErrorBound(t *testing.T) {
+	k := 200
+	s, err := NewKLLSketch(k)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	rng := rand.New(rand.NewSource(42))
+	vals := make([]float64, 20000)
+	for i := range vals {
+		vals[i] = rng.Float64() * 1_000_000
+		s.Insert(vals[i])
+	}
+	drift := math.Abs(float64(s.Count()-len(vals))) / float64(len(vals))
+	if drift > 0.01 {
+		t.Fatalf("count drift too high: got=%d want=%d drift=%.4f", s.Count(), len(vals), drift)
+	}
+
+	sorted := append([]float64(nil), vals...)
+	sort.Float64s(sorted)
+	for _, q := range []float64{0.5, 0.9, 0.99} {
+		estV := s.Quantile(q)
+		estRank := float64(rankLE(sorted, estV)) / float64(len(sorted))
+		if math.Abs(estRank-q) > 0.03 {
+			t.Fatalf("rank error too high at q=%.2f: estRank=%.4f", q, estRank)
+		}
+	}
+}
+
+func TestKLL_Quality_MergeAccuracy(t *testing.T) {
+	left, _ := NewKLLSketch(200)
+	right, _ := NewKLLSketch(200)
+	total, _ := NewKLLSketch(200)
+
+	rng := rand.New(rand.NewSource(7))
+	vals := make([]float64, 15000)
+	for i := range vals {
+		vals[i] = rng.ExpFloat64() * 1000
+		total.Insert(vals[i])
+		if i < len(vals)/2 {
+			left.Insert(vals[i])
+		} else {
+			right.Insert(vals[i])
+		}
+	}
+	if err := left.Merge(right); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	mergeDrift := math.Abs(float64(left.Count()-total.Count())) / float64(total.Count())
+	if mergeDrift > 0.01 {
+		t.Fatalf("merged count drift too high: got=%d want=%d drift=%.4f", left.Count(), total.Count(), mergeDrift)
+	}
+	for _, q := range []float64{0.5, 0.9, 0.99} {
+		if d := math.Abs(left.Quantile(q) - total.Quantile(q)); d > 20000 {
+			t.Fatalf("merge quantile too far at q=%.2f: diff=%.2f", q, d)
+		}
+	}
+}
+
+func TestKLL_Quality_SpecificClear(t *testing.T) {
+	s, _ := NewKLLSketch(200)
+	for i := 0; i < 100; i++ {
+		s.Insert(float64(i))
+	}
+	s.Clear()
+	if s.Count() != 0 {
+		t.Fatalf("expected count=0 after clear, got=%d", s.Count())
 	}
 }

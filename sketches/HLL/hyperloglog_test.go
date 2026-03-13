@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"math"
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
@@ -214,5 +215,50 @@ func TestHyperLogLogRustStyleAPI(t *testing.T) {
 
 	if got := h.Estimate(); got < 4 {
 		t.Fatalf("estimate too small: got %d", got)
+	}
+}
+
+func TestHLL_Quality_CardinalityAndErrorBound(t *testing.T) {
+	h := NewHyperLogLog()
+	const n = 100000
+	for i := 0; i < n; i++ {
+		h.InsertWithHash(common.FromString("hll:q:" + strconv.Itoa(i)).Hash)
+	}
+	est := h.Estimate()
+	relErr := math.Abs(float64(est-n)) / float64(n)
+	if relErr > 0.05 {
+		t.Fatalf("relative error too high: est=%d real=%d rel=%.4f", est, n, relErr)
+	}
+}
+
+func TestHLL_Quality_MergeAccuracy(t *testing.T) {
+	left := NewHyperLogLog()
+	right := NewHyperLogLog()
+	total := NewHyperLogLog()
+
+	const n = 50000
+	for i := 0; i < n; i++ {
+		h := common.FromString("hll:m:" + strconv.Itoa(i)).Hash
+		total.InsertWithHash(h)
+		if i < n/2 {
+			left.InsertWithHash(h)
+		} else {
+			right.InsertWithHash(h)
+		}
+	}
+	if err := left.Merge(right); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+
+	if left.Estimate() != total.Estimate() {
+		t.Fatalf("merged estimate mismatch: got=%d want=%d", left.Estimate(), total.Estimate())
+	}
+}
+
+func TestHLL_Quality_SpecificHIPMergeUnsupported(t *testing.T) {
+	h1 := NewHIP()
+	h2 := NewHIP()
+	if err := h1.Merge(h2); err == nil {
+		t.Fatal("expected HIP merge to be unsupported")
 	}
 }

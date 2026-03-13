@@ -2,6 +2,7 @@ package ddsketch
 
 import (
 	"math"
+	"math/rand"
 	"sort"
 	"testing"
 
@@ -135,18 +136,18 @@ func TestDDSketch_CAIDA_Merge(t *testing.T) {
 	// We cannot compare len(counts) because Add() adds padding (GrowChunk)
 	// while Merge() allocates exact fit. We must compare counts at every index.
 
-		// Helper to safely get count at a specific global index
-		getCount := func(b *Buckets, k int32) uint64 {
-			if b.counts == nil {
-				return 0
-			}
-			counts := b.counts.AsSlice()
-			idx := k - b.offset
-			if idx >= 0 && int(idx) < len(counts) {
-				return counts[idx]
-			}
+	// Helper to safely get count at a specific global index
+	getCount := func(b *Buckets, k int32) uint64 {
+		if b.counts == nil {
 			return 0
 		}
+		counts := b.counts.AsSlice()
+		idx := k - b.offset
+		if idx >= 0 && int(idx) < len(counts) {
+			return counts[idx]
+		}
+		return 0
+	}
 
 	// Determine the global range covering both sketches
 	l1, r1, _ := sPart1.store.Range()
@@ -271,5 +272,94 @@ func TestDDSketchRustStyleAPI(t *testing.T) {
 	}
 	if max, ok := s.Max(); !ok || max != 100 {
 		t.Fatalf("unexpected max: %v %v", max, ok)
+	}
+}
+
+func nearestRank(sorted []float64, q float64) float64 {
+	if q <= 0 {
+		return sorted[0]
+	}
+	if q >= 1 {
+		return sorted[len(sorted)-1]
+	}
+	idx := int(math.Ceil(q*float64(len(sorted)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+func TestDDSketch_Quality_OperationsAndErrorBound(t *testing.T) {
+	alpha := 0.01
+	s := NewDDSketch(alpha)
+	rng := rand.New(rand.NewSource(123))
+	vals := make([]float64, 0, 30000)
+	for i := 0; i < 30000; i++ {
+		v := math.Exp(rng.Float64()*8 - 2)
+		vals = append(vals, v)
+		s.Add(v)
+	}
+	s.Add(0)
+	s.Add(-3)
+	s.Add(math.NaN())
+
+	if int(s.Count()) != len(vals) {
+		t.Fatalf("count mismatch: got=%d want=%d", s.Count(), len(vals))
+	}
+	sorted := append([]float64(nil), vals...)
+	sort.Float64s(sorted)
+
+	for _, q := range []float64{0.5, 0.9, 0.99} {
+		est, ok := s.GetValueAtQuantile(q)
+		if !ok {
+			t.Fatalf("missing quantile q=%.2f", q)
+		}
+		truth := nearestRank(sorted, q)
+		re := math.Abs(est-truth) / truth
+		if re > 0.03 {
+			t.Fatalf("relative error too high q=%.2f est=%v truth=%v re=%v", q, est, truth, re)
+		}
+	}
+}
+
+func TestDDSketch_Quality_MergeAccuracy(t *testing.T) {
+	a := NewDDSketch(0.01)
+	b := NewDDSketch(0.01)
+	total := NewDDSketch(0.01)
+
+	rng := rand.New(rand.NewSource(99))
+	vals := make([]float64, 20000)
+	for i := range vals {
+		vals[i] = 1 + rng.Float64()*100000
+		total.Add(vals[i])
+		if i < len(vals)/2 {
+			a.Add(vals[i])
+		} else {
+			b.Add(vals[i])
+		}
+	}
+	if err := a.Merge(b); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if a.Count() != total.Count() {
+		t.Fatalf("merged count mismatch: got=%d want=%d", a.Count(), total.Count())
+	}
+	for _, q := range []float64{0.5, 0.95} {
+		ga, _ := a.GetValueAtQuantile(q)
+		gt, _ := total.GetValueAtQuantile(q)
+		if ga != gt {
+			t.Fatalf("merged quantile mismatch q=%.2f got=%v want=%v", q, ga, gt)
+		}
+	}
+}
+
+func TestDDSketch_Quality_SpecificMappingMismatchMerge(t *testing.T) {
+	a := NewDDSketch(0.01)
+	b := NewDDSketch(0.02)
+	if err := a.Merge(b); err == nil {
+		t.Fatal("expected merge error for different alpha/index mapping")
 	}
 }

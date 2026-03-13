@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
@@ -14,7 +15,7 @@ type Number interface {
 }
 
 // Matrix2D is the storage interface used by matrix sketches.
-type Matrix2D[T Number] interface {
+type Matrix2D[T any] interface {
 	Rows() int
 	Cols() int
 	At(row, col int) T
@@ -26,7 +27,7 @@ type Matrix2D[T Number] interface {
 }
 
 // Vector2D is a thin wrapper over flat 1D data for a rows x cols matrix.
-type Vector2D[T Number] struct {
+type Vector2D[T any] struct {
 	data []T
 	view [][]T
 
@@ -39,7 +40,7 @@ type Vector2D[T Number] struct {
 }
 
 // InitVector2D creates a zero-initialized matrix with rows*cols capacity.
-func InitVector2D[T Number](rows, cols int) (*Vector2D[T], error) {
+func InitVector2D[T any](rows, cols int) (*Vector2D[T], error) {
 	if rows <= 0 || cols <= 0 {
 		return nil, errors.New("rows and cols must be positive")
 	}
@@ -61,7 +62,7 @@ func InitVector2D[T Number](rows, cols int) (*Vector2D[T], error) {
 }
 
 // Vector2DFromFn builds a matrix from a generator function.
-func Vector2DFromFn[T Number](rows, cols int, fn func(row, col int) T) (*Vector2D[T], error) {
+func Vector2DFromFn[T any](rows, cols int, fn func(row, col int) T) (*Vector2D[T], error) {
 	v, err := InitVector2D[T](rows, cols)
 	if err != nil {
 		return nil, err
@@ -75,7 +76,7 @@ func Vector2DFromFn[T Number](rows, cols int, fn func(row, col int) T) (*Vector2
 }
 
 // Vector2DFrom2D constructs a matrix by copying from 2D input.
-func Vector2DFrom2D[T Number](src [][]T) (*Vector2D[T], error) {
+func Vector2DFrom2D[T any](src [][]T) (*Vector2D[T], error) {
 	if len(src) == 0 || len(src[0]) == 0 {
 		return nil, errors.New("source matrix must be non-empty")
 	}
@@ -121,7 +122,8 @@ func (v *Vector2D[T]) Set(row, col int, value T) {
 }
 
 func (v *Vector2D[T]) Add(row, col int, delta T) {
-	v.data[v.Index(row, col)] += delta
+	idx := v.Index(row, col)
+	v.data[idx] = addValue(v.data[idx], delta)
 }
 
 func (v *Vector2D[T]) Row(row int) []T {
@@ -145,7 +147,7 @@ func (v *Vector2D[T]) FastInsert(
 	updateFn func(current T, delta T) T,
 ) {
 	if updateFn == nil {
-		updateFn = func(current T, delta T) T { return current + delta }
+		updateFn = func(current T, delta T) T { return addValue(current, delta) }
 	}
 	for r := 0; r < v.rows; r++ {
 		c := colFn(r, v.maskBits, v.mask)
@@ -166,7 +168,7 @@ func (v *Vector2D[T]) FastQueryMin(
 	for r := 1; r < v.rows; r++ {
 		c := colFn(r, v.maskBits, v.mask)
 		val := v.At(r, c)
-		if val < minVal {
+		if lessValue(val, minVal) {
 			minVal = val
 		}
 	}
@@ -190,12 +192,20 @@ func (v *Vector2D[T]) FastQueryMedian(
 		c := colFn(r, v.maskBits, v.mask)
 		values[r] = projectFn(r, v.At(r, c))
 	}
-	slices.Sort(values)
+	slices.SortFunc(values, func(a, b T) int {
+		if lessValue(a, b) {
+			return -1
+		}
+		if lessValue(b, a) {
+			return 1
+		}
+		return 0
+	})
 	mid := len(values) / 2
 	if len(values)%2 == 1 {
 		return values[mid]
 	}
-	return (values[mid-1] + values[mid]) / 2
+	return avgValue(values[mid-1], values[mid])
 }
 
 // FastQueryAggregate executes fast query path with custom aggregation logic.
@@ -212,7 +222,7 @@ func (v *Vector2D[T]) FastQueryAggregate(
 	return acc
 }
 
-type vector2DSnapshot[T Number] struct {
+type vector2DSnapshot[T any] struct {
 	Data     []T
 	Rows     int
 	Cols     int
@@ -232,7 +242,7 @@ func (v *Vector2D[T]) SerializeToBytes() ([]byte, error) {
 	})
 }
 
-func DeserializeVector2DFromBytes[T Number](data []byte) (*Vector2D[T], error) {
+func DeserializeVector2DFromBytes[T any](data []byte) (*Vector2D[T], error) {
 	var snap vector2DSnapshot[T]
 	if err := common.DecodeFromBytes(data, &snap); err != nil {
 		return nil, err
@@ -269,4 +279,97 @@ func NewFlatVector2DFrom2D(src [][]float64) (*FlatVector2D, error) {
 // SortBy allows custom comparators (Rust-like sort_by).
 func (v *Vector2D[T]) SortBy(compare func(a, b T) int) {
 	slices.SortFunc(v.data, compare)
+}
+
+func addValue[T any](a, b T) T {
+	switch av := any(a).(type) {
+	case int:
+		return any(av + any(b).(int)).(T)
+	case int8:
+		return any(av + any(b).(int8)).(T)
+	case int16:
+		return any(av + any(b).(int16)).(T)
+	case int32:
+		return any(av + any(b).(int32)).(T)
+	case int64:
+		return any(av + any(b).(int64)).(T)
+	case uint:
+		return any(av + any(b).(uint)).(T)
+	case uint8:
+		return any(av + any(b).(uint8)).(T)
+	case uint16:
+		return any(av + any(b).(uint16)).(T)
+	case uint32:
+		return any(av + any(b).(uint32)).(T)
+	case uint64:
+		return any(av + any(b).(uint64)).(T)
+	case float32:
+		return any(av + any(b).(float32)).(T)
+	case float64:
+		return any(av + any(b).(float64)).(T)
+	default:
+		panic(fmt.Sprintf("Vector2D: Add unsupported for type %T", a))
+	}
+}
+
+func lessValue[T any](a, b T) bool {
+	switch av := any(a).(type) {
+	case int:
+		return av < any(b).(int)
+	case int8:
+		return av < any(b).(int8)
+	case int16:
+		return av < any(b).(int16)
+	case int32:
+		return av < any(b).(int32)
+	case int64:
+		return av < any(b).(int64)
+	case uint:
+		return av < any(b).(uint)
+	case uint8:
+		return av < any(b).(uint8)
+	case uint16:
+		return av < any(b).(uint16)
+	case uint32:
+		return av < any(b).(uint32)
+	case uint64:
+		return av < any(b).(uint64)
+	case float32:
+		return av < any(b).(float32)
+	case float64:
+		return av < any(b).(float64)
+	default:
+		panic(fmt.Sprintf("Vector2D: comparison unsupported for type %T", a))
+	}
+}
+
+func avgValue[T any](a, b T) T {
+	switch av := any(a).(type) {
+	case int:
+		return any((av + any(b).(int)) / 2).(T)
+	case int8:
+		return any((av + any(b).(int8)) / 2).(T)
+	case int16:
+		return any((av + any(b).(int16)) / 2).(T)
+	case int32:
+		return any((av + any(b).(int32)) / 2).(T)
+	case int64:
+		return any((av + any(b).(int64)) / 2).(T)
+	case uint:
+		return any((av + any(b).(uint)) / 2).(T)
+	case uint8:
+		return any((av + any(b).(uint8)) / 2).(T)
+	case uint16:
+		return any((av + any(b).(uint16)) / 2).(T)
+	case uint32:
+		return any((av + any(b).(uint32)) / 2).(T)
+	case uint64:
+		return any((av + any(b).(uint64)) / 2).(T)
+	case float32:
+		return any((av + any(b).(float32)) / 2.0).(T)
+	case float64:
+		return any((av + any(b).(float64)) / 2.0).(T)
+	default:
+		panic(fmt.Sprintf("Vector2D: median unsupported for type %T", a))
+	}
 }

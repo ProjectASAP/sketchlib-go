@@ -3,320 +3,266 @@ package cocosketch
 import (
 	"errors"
 	"math/rand"
-	"sort"
+	"strconv"
 	"time"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
-// Aggregation determines how to combine values if a hash is found in multiple arrays simultaneously.
-type Aggregation int
-
-const (
-	AggregateRaw    Aggregation = iota // Returns the first value found (fastest)
-	AggregateSum                       // Sums up all occurrences across arrays
-	AggregateMedian                    // Takes the median of all occurrences (Recommended by paper)
-	AggregateMax                       // Takes the maximum value (Common in Count-Min)
-)
-
-// CocoSketch implements common.Sketch using the Cornucopia Sketch algorithm.
-// It uses probabilistic replacement to manage heavy hitters in a fixed-size table.
-type CocoSketch struct {
-	d          int // number of arrays
-	length     int // number of buckets per array
-	keysStore  *storage.Vector2D[uint64]
-	countStore *storage.Vector2D[uint64]
-	keys       [][]uint64  // Stores the Hash itself as the key
-	counts     [][]uint64  // Stores the frequency count
-	rng        *rand.Rand  // Local RNG for probabilistic replacement
-	defaultAgg Aggregation // Default aggregation method for QueryWithHash
+type cocoBucket struct {
+	Hash   uint64
+	Val    uint64
+	HasKey bool
 }
 
-// NewCocoSketch creates a new instance.
-// d: number of arrays (hashes).
-// length: size of each array.
+type CocoSketch struct {
+	d      int
+	length int
+
+	tableStore *storage.Vector2D[cocoBucket]
+	table      [][]cocoBucket
+
+	rng *rand.Rand
+}
+
 func NewCocoSketch(d, length int) (*CocoSketch, error) {
+
 	if d <= 0 || length <= 0 {
 		return nil, errors.New("d and length must be > 0")
 	}
 
-	keysStore, err := storage.InitVector2D[uint64](d, length)
-	if err != nil {
-		return nil, err
-	}
-	countStore, err := storage.InitVector2D[uint64](d, length)
+	tableStore, err := storage.Vector2DFromFn[cocoBucket](
+		d, length,
+		func(_, _ int) cocoBucket { return cocoBucket{} },
+	)
+
 	if err != nil {
 		return nil, err
 	}
 
-	// Use local random source
 	src := rand.NewSource(time.Now().UnixNano())
 
 	return &CocoSketch{
 		d:          d,
 		length:     length,
-		keysStore:  keysStore,
-		countStore: countStore,
-		keys:       keysStore.As2D(),
-		counts:     countStore.As2D(),
+		tableStore: tableStore,
+		table:      tableStore.As2D(),
 		rng:        rand.New(src),
-		defaultAgg: AggregateMedian, // Recommended default
 	}, nil
 }
 
-// SetAggregation changes the default aggregation strategy used by QueryWithHash.
-func (c *CocoSketch) SetAggregation(agg Aggregation) {
-	c.defaultAgg = agg
-}
-
-// SetSeed sets a deterministic RNG seed (useful for tests/bench reproducibility).
 func (c *CocoSketch) SetSeed(seed int64) {
 	c.rng = rand.New(rand.NewSource(seed))
 }
 
-// TypeName returns the name of the sketch.
 func (c *CocoSketch) TypeName() string {
 	return "CocoSketch"
 }
 
-func splitHash(hash uint64) (uint64, uint64) {
-	h1 := uint64(uint32(hash & 0xffffffff))
-	h2 := uint64(uint32((hash >> 32) | 1)) // ensure odd
-	return h1, h2
+func (c *CocoSketch) hashIndex(row int, hash uint64) int {
+	return int(common.DeriveIndex(hash, row, uint32(c.length)))
 }
 
-func positionAt(i int, h1, h2, mod uint64) int {
-	return int((h1 + uint64(i)*h2) % mod)
-}
+func (c *CocoSketch) insertKeyValue(hash uint64, v uint64) {
 
-// InsertWithHash inserts a hash into the sketch (value = 1).
-// Implements common.Sketch.
-func (c *CocoSketch) InsertWithHash(hash uint64) {
-	h1, h2 := splitHash(hash)
-	mod := uint64(c.length)
-	keys := c.keys
-	counts := c.counts
+	minRow := c.d
+	minVal := ^uint64(0)
 
-	// 1) If same hash is found in candidates -> increment and finish
 	for i := 0; i < c.d; i++ {
-		p := positionAt(i, h1, h2, mod)
-		if keys[i][p] == hash {
-			counts[i][p]++
+
+		idx := c.hashIndex(i, hash)
+		b := &c.table[i][idx]
+
+		if b.HasKey {
+
+			if b.Hash == hash {
+				b.Val += v
+				return
+			}
+
+			if b.Val < minVal {
+				minVal = b.Val
+				minRow = i
+			}
+
+		} else {
+
+			b.Hash = hash
+			b.Val = v
+			b.HasKey = true
 			return
 		}
 	}
 
-	// 2) Choose the bucket with minimum counter
-	minIdx := 0
-	minPos := positionAt(0, h1, h2, mod)
-	minVal := counts[0][minPos]
-
-	for i := 1; i < c.d; i++ {
-		p := positionAt(i, h1, h2, mod)
-		v := counts[i][p]
-		if v < minVal {
-			minVal = v
-			minIdx = i
-			minPos = p
-		}
+	if minRow >= c.d {
+		minRow = 0
 	}
 
-	// 3) Increment counter of the victim/target
-	counts[minIdx][minPos]++
-	C := counts[minIdx][minPos]
+	idx := c.hashIndex(minRow, hash)
+	b := &c.table[minRow][idx]
 
-	// 4) Probabilistic replacement: replace key with probability 1/C
-	if C == 0 {
-		C = 1 // Should not happen after increment
-	}
-	if (c.rng.Uint64() % C) == 0 {
-		keys[minIdx][minPos] = hash
+	b.Val += v
+
+	if float64(v)/float64(b.Val) > c.rng.Float64() {
+		b.Hash = hash
 	}
 }
 
-// QueryWithHash returns the estimated frequency of the hash.
-// It uses the default aggregation strategy set by SetAggregation (default: Median).
-// Implements common.Sketch.
+func (c *CocoSketch) InsertWithHash(hash uint64) {
+	c.insertKeyValue(hash, 1)
+}
+
+func (c *CocoSketch) Insert(key string, v uint64) {
+
+	if key == "" || v == 0 {
+		return
+	}
+
+	hash := common.Hash64([]byte(key))
+	c.insertKeyValue(hash, v)
+}
+
+func (c *CocoSketch) EstimateHash(hash uint64) uint64 {
+
+	total := uint64(0)
+
+	for i := 0; i < c.d; i++ {
+
+		idx := c.hashIndex(i, hash)
+		b := c.table[i][idx]
+
+		if b.HasKey && b.Hash == hash {
+			total += b.Val
+		}
+	}
+
+	return total
+}
+
+func (c *CocoSketch) Estimate(partialKey string) uint64 {
+
+	hash := common.Hash64([]byte(partialKey))
+	return c.EstimateHash(hash)
+}
+
+func (c *CocoSketch) EstimateWithUDF(partialKey string, udf func(full, partial string) bool) uint64 {
+
+	total := uint64(0)
+
+	for i := 0; i < c.d; i++ {
+		for j := 0; j < c.length; j++ {
+
+			b := c.table[i][j]
+
+			if !b.HasKey {
+				continue
+			}
+
+			keyStr := strconv.FormatUint(b.Hash, 16)
+
+			if udf(keyStr, partialKey) {
+				total += b.Val
+			}
+		}
+	}
+
+	return total
+}
+
 func (c *CocoSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
+
 	if q == common.QuerySum2 {
-		// Not implemented for Coco yet
 		return 0, nil
 	}
+
 	if q != common.QueryFrequency {
 		return 0, common.ErrUnsupportedQuery
 	}
 
-	// Call internal function using default aggregation strategy
-	return c.estimateSpecific(hash, c.defaultAgg), nil
+	return float64(c.EstimateHash(hash)), nil
 }
 
-// QuerySpecific allows querying with a specific Aggregation strategy manually.
-func (c *CocoSketch) QuerySpecific(hash uint64, agg Aggregation) float64 {
-	return c.estimateSpecific(hash, agg)
-}
-
-// estimateSpecific is the internal logic to collect values and aggregate them.
-func (c *CocoSketch) estimateSpecific(hash uint64, agg Aggregation) float64 {
-	h1, h2 := splitHash(hash)
-	mod := uint64(c.length)
-	keys := c.keys
-	counts := c.counts
-
-	// Collect all counter values that match this hash
-	var valuesStack [16]uint64
-	values := valuesStack[:0]
-	if c.d > len(valuesStack) {
-		values = make([]uint64, 0, c.d)
-	}
-
-	for i := 0; i < c.d; i++ {
-		p := positionAt(i, h1, h2, mod)
-		if keys[i][p] == hash {
-			val := counts[i][p]
-			if agg == AggregateRaw {
-				return float64(val) // Return immediately for Raw (First match)
-			}
-			values = append(values, val)
-		}
-	}
-
-	if len(values) == 0 {
-		return 0
-	}
-
-	// Process Aggregation
-	switch agg {
-	case AggregateSum:
-		var sum uint64
-		for _, v := range values {
-			sum += v
-		}
-		return float64(sum)
-
-	case AggregateMax:
-		var maxVal uint64
-		for _, v := range values {
-			if v > maxVal {
-				maxVal = v
-			}
-		}
-		return float64(maxVal)
-
-	case AggregateMedian:
-		sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
-		n := len(values)
-		if n%2 == 1 {
-			return float64(values[n/2])
-		}
-		// Average of two middle values
-		return float64(values[n/2-1]+values[n/2]) / 2.0
-
-	default: // Fallback to Sum or Raw
-		return float64(values[0])
-	}
-}
-
-// Merge combines another sketch into this one.
-// Implements common.Sketch.
 func (c *CocoSketch) Merge(other common.Sketch) error {
+
 	o, ok := other.(*CocoSketch)
+
 	if !ok {
 		return errors.New("cannot merge different sketch types")
 	}
 
 	if c.d != o.d || c.length != o.length {
-		return errors.New("incompatible sketches: d/length mismatch")
+		return errors.New("incompatible sketches")
 	}
 
-	for i := 0; i < c.d; i++ {
-		countRow := c.counts[i]
-		keyRow := c.keys[i]
-		for j := 0; j < c.length; j++ {
-			add := o.counts[i][j]
-			if add == 0 {
-				continue
-			}
+	for i := 0; i < o.d; i++ {
+		for j := 0; j < o.length; j++ {
 
-			countRow[j] += add
-			total := countRow[j]
+			b := o.table[i][j]
 
-			// Adopt key from other with probability add/total
-			if total > 0 && (c.rng.Uint64()%total) < add {
-				keyRow[j] = o.keys[i][j]
+			if b.HasKey {
+				c.insertKeyValue(b.Hash, b.Val)
 			}
 		}
 	}
+
 	return nil
 }
 
-// Clear resets the sketch.
 func (c *CocoSketch) Clear() {
+
 	for i := 0; i < c.d; i++ {
-		keyRow := c.keys[i]
-		countRow := c.counts[i]
 		for j := 0; j < c.length; j++ {
-			keyRow[j] = 0
-			countRow[j] = 0
+			c.table[i][j] = cocoBucket{}
 		}
 	}
 }
 
 type cocoSnapshot struct {
-	D          int
-	Length     int
-	Keys       [][]uint64
-	Counts     [][]uint64
-	DefaultAgg Aggregation
+	D     int
+	W     int
+	Table [][]cocoBucket
 }
 
-// SerializeToBytes serializes CocoSketch into bytes.
 func (c *CocoSketch) SerializeToBytes() ([]byte, error) {
+
+	table := make([][]cocoBucket, c.d)
+
+	for i := 0; i < c.d; i++ {
+		table[i] = append([]cocoBucket(nil), c.table[i]...)
+	}
+
 	return common.EncodeToBytes(cocoSnapshot{
-		D:          c.d,
-		Length:     c.length,
-		Keys:       c.keys,
-		Counts:     c.counts,
-		DefaultAgg: c.defaultAgg,
+		D:     c.d,
+		W:     c.length,
+		Table: table,
 	})
 }
 
-// DeserializeCocoSketchFromBytes restores CocoSketch from serialized bytes.
 func DeserializeCocoSketchFromBytes(data []byte) (*CocoSketch, error) {
+
 	var snap cocoSnapshot
+
 	if err := common.DecodeFromBytes(data, &snap); err != nil {
 		return nil, err
 	}
-	if snap.D <= 0 || snap.Length <= 0 {
+
+	if snap.D <= 0 || snap.W <= 0 {
 		return nil, errors.New("invalid snapshot dimensions")
 	}
-	if len(snap.Keys) != snap.D || len(snap.Counts) != snap.D {
-		return nil, errors.New("invalid snapshot depth")
-	}
-	for i := 0; i < snap.D; i++ {
-		if len(snap.Keys[i]) != snap.Length || len(snap.Counts[i]) != snap.Length {
-			return nil, errors.New("invalid snapshot row length")
-		}
-	}
 
-	keysStore, err := storage.Vector2DFrom2D[uint64](snap.Keys)
-	if err != nil {
-		return nil, err
-	}
-	countStore, err := storage.Vector2DFrom2D[uint64](snap.Counts)
+	tableStore, err := storage.Vector2DFrom2D[cocoBucket](snap.Table)
 	if err != nil {
 		return nil, err
 	}
 
 	src := rand.NewSource(time.Now().UnixNano())
+
 	return &CocoSketch{
 		d:          snap.D,
-		length:     snap.Length,
-		keysStore:  keysStore,
-		countStore: countStore,
-		keys:       keysStore.As2D(),
-		counts:     countStore.As2D(),
+		length:     snap.W,
+		tableStore: tableStore,
+		table:      tableStore.As2D(),
 		rng:        rand.New(src),
-		defaultAgg: snap.DefaultAgg,
 	}, nil
 }

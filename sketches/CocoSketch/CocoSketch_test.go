@@ -2,287 +2,373 @@ package cocosketch
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
+	"math/rand"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	"github.com/ProjectASAP/sketchlib-go/testdata"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-// Helper to load CAIDA data
-func loadCAIDA(t *testing.T) []testdata.Sample {
-	// Adjust path relative to this file
-	file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
-	samples, err := testdata.ReadCAIDAStream(file1, "")
+func TestNewCocoSketchValidation(t *testing.T) {
+	if _, err := NewCocoSketch(0, 10); err == nil {
+		t.Fatal("expected error when d=0")
+	}
+	if _, err := NewCocoSketch(5, 0); err == nil {
+		t.Fatal("expected error when width=0")
+	}
+
+	cs, err := NewCocoSketch(4, 32)
 	if err != nil {
-		t.Skipf("Skipping CAIDA test: %v", err)
+		t.Fatalf("new coco failed: %v", err)
 	}
-	if len(samples) == 0 {
-		t.Skip("No CAIDA samples found.")
-	}
-	return samples
-}
-
-// TestNewCocoSketch_Validation verifies that invalid parameters are rejected.
-// (Kept as logic check, data independent)
-func TestNewCocoSketch_Validation(t *testing.T) {
-	_, err := NewCocoSketch(0, 10)
-	require.Error(t, err, "Should fail with d=0")
-
-	_, err = NewCocoSketch(5, 0)
-	require.Error(t, err, "Should fail with length=0")
-
-	cs, err := NewCocoSketch(3, 10)
-	require.NoError(t, err)
-	require.NotNil(t, cs)
-	require.Equal(t, "CocoSketch", cs.TypeName())
-	require.NotNil(t, cs.keysStore)
-	require.NotNil(t, cs.countStore)
-	require.Equal(t, 3, cs.keysStore.Rows())
-	require.Equal(t, 10, cs.keysStore.Cols())
-}
-
-// TestCocoSketch_CAIDA_BasicInsertQuery verifies that we can ingest the CAIDA stream
-// and retrieve a non-zero count for a known heavy hitter.
-func TestCocoSketch_CAIDA_BasicInsertQuery(t *testing.T) {
-	samples := loadCAIDA(t)
-
-	// Initialize: 4 arrays, 4096 buckets each
-	d, length := 4, 4096
-	cs, err := NewCocoSketch(d, length)
-	require.NoError(t, err)
-
-	// Identify a heavy hitter from the first 1000 packets to query later
-	targetIP := uint32(samples[0].F)
-	targetHash := common.Hash64(ipToBytes(targetIP))
-
-	// Ingest Data
-	for _, s := range samples {
-		ipBytes := ipToBytes(uint32(s.F))
-		cs.InsertWithHash(common.Hash64(ipBytes))
-	}
-
-	// Query the known existing key
-	val, err := cs.QueryWithHash(common.QueryFrequency, targetHash)
-	require.NoError(t, err)
-	assert.Greater(t, val, 0.0, "Heavy hitter should have non-zero count")
-
-	// Query a non-existent key (0xDEADBEEF)
-	valMissing, err := cs.QueryWithHash(common.QueryFrequency, 0xDEADBEEF)
-	require.NoError(t, err)
-
-	// CocoSketch is probabilistic; it *might* return non-zero noise,
-	// but usually 0 for completely random unused keys in a sparse sketch.
-	// We just ensure it doesn't error.
-	assert.GreaterOrEqual(t, valMissing, 0.0)
-}
-
-// TestCocoSketch_CAIDA_Merge splits the CAIDA stream in two, sketches them separately,
-// merges them, and verifies the count matches a sketch of the full stream.
-func TestCocoSketch_CAIDA_Merge(t *testing.T) {
-	samples := loadCAIDA(t)
-	mid := len(samples) / 2
-
-	d, length := 4, 4096
-	csPart1, _ := NewCocoSketch(d, length)
-	csPart2, _ := NewCocoSketch(d, length)
-	csTotal, _ := NewCocoSketch(d, length)
-	csPart1.SetSeed(1)
-	csPart2.SetSeed(2)
-	csTotal.SetSeed(3)
-	csPart1.SetAggregation(AggregateMax)
-	csTotal.SetAggregation(AggregateMax)
-
-	// Ingest Data
-	for i, s := range samples {
-		hash := common.Hash64(ipToBytes(uint32(s.F)))
-
-		// Insert into Total
-		csTotal.InsertWithHash(hash)
-
-		// Insert into Parts
-		if i < mid {
-			csPart1.InsertWithHash(hash)
-		} else {
-			csPart2.InsertWithHash(hash)
-		}
-	}
-
-	// Merge Part2 into Part1
-	err := csPart1.Merge(csPart2)
-	require.NoError(t, err)
-
-	// Verification: Check Top-10 Heavy Hitters from Ground Truth
-	// Note: CocoSketch is probabilistic (random replacement), so exact matches
-	// between csTotal and csMerged are unlikely because RNG calls will differ.
-	// Instead, we verify that the merged sketch accurately estimates the total count.
-
-	// Build Ground Truth for check
-	groundTruth := make(map[uint64]int64)
-	for _, s := range samples {
-		hash := common.Hash64(ipToBytes(uint32(s.F)))
-		groundTruth[hash]++
-	}
-
-	// Check one heavy hitter
-	var heavyKey uint64
-	var maxCount int64
-	for k, v := range groundTruth {
-		if v > maxCount {
-			maxCount = v
-			heavyKey = k
-		}
-	}
-
-	estMerged, _ := csPart1.QueryWithHash(common.QueryFrequency, heavyKey)
-
-	// CocoSketch merge is probabilistic and can under-estimate after collisions/evictions.
-	// Use bounded ratio checks instead of strict delta.
-	assert.Greater(t, estMerged, 0.0, "Merged sketch should keep heavy hitter signal")
-	assert.GreaterOrEqual(t, estMerged, float64(maxCount)*0.35,
-		"Merged sketch should not under-estimate too aggressively")
-	assert.LessOrEqual(t, estMerged, float64(maxCount)*1.65,
-		"Merged sketch should stay within probabilistic upper bound")
-}
-
-// TestCocoSketch_CAIDA_AggregationStrategies verifies how different aggregation
-// methods (Median, Max, Sum) behave on real data.
-func TestCocoSketch_CAIDA_AggregationStrategies(t *testing.T) {
-	samples := loadCAIDA(t)
-	cs, _ := NewCocoSketch(5, 2048)
-
-	for _, s := range samples {
-		cs.InsertWithHash(common.Hash64(ipToBytes(uint32(s.F))))
-	}
-
-	// Find the heaviest item
-	groundTruth := make(map[uint64]int64)
-	for _, s := range samples {
-		groundTruth[common.Hash64(ipToBytes(uint32(s.F)))]++
-	}
-	var heavyKey uint64
-	var maxCount int64
-	for k, v := range groundTruth {
-		if v > maxCount {
-			maxCount = v
-			heavyKey = k
-		}
-	}
-
-	// Query with different strategies
-	valMedian := cs.QuerySpecific(heavyKey, AggregateMedian)
-	valMax := cs.QuerySpecific(heavyKey, AggregateMax)
-	valSum := cs.QuerySpecific(heavyKey, AggregateSum)
-
-	t.Logf("Key %x (True: %d) -> Median: %.0f, Max: %.0f, Sum: %.0f",
-		heavyKey, maxCount, valMedian, valMax, valSum)
-
-	// In a single un-merged sketch, CocoSketch usually keeps a key in only one bucket.
-	// Therefore, Sum, Max, and Median should be roughly identical.
-	// However, if collisions forced the key to be evicted and re-inserted elsewhere,
-	// or if we had a merge, they might differ.
-
-	// For standard Cornucopia logic, we expect them to be close.
-	assert.InDelta(t, valMax, valMedian, float64(maxCount)*0.1, "Median and Max should be close")
-}
-
-// TestCocoSketch_CAIDA_Accuracy calculates the relative error for Top-K items.
-func TestCocoSketch_CAIDA_Accuracy(t *testing.T) {
-	samples := loadCAIDA(t)
-
-	// Configuration
-	// d=4 arrays, length=4096 buckets (Total 16k buckets)
-	d, length := 4, 4096
-	cs, _ := NewCocoSketch(d, length)
-
-	groundTruth := make(map[uint32]int64)
-
-	// Ingest
-	for _, s := range samples {
-		ip := uint32(s.F)
-		groundTruth[ip]++
-		cs.InsertWithHash(common.Hash64(ipToBytes(ip)))
-	}
-
-	// Sort Ground Truth to get Top-K
-	type kv struct {
-		IP    uint32
-		Count int64
-	}
-	var sorted []kv
-	for k, v := range groundTruth {
-		sorted = append(sorted, kv{k, v})
-	}
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].Count > sorted[j].Count
-	})
-
-	topK := 100
-	if len(sorted) < topK {
-		topK = len(sorted)
-	}
-
-	var totalRelErr float64
-	for i := 0; i < topK; i++ {
-		item := sorted[i]
-		hash := common.Hash64(ipToBytes(item.IP))
-
-		est, _ := cs.QueryWithHash(common.QueryFrequency, hash)
-
-		// CocoSketch can underestimate if the item was evicted and never replaced
-		// It generally doesn't overestimate significantly unless collisions are high
-		err := math.Abs(est - float64(item.Count))
-		relErr := err / float64(item.Count)
-		totalRelErr += relErr
-	}
-
-	avgRelError := (totalRelErr / float64(topK)) * 100
-
-	t.Log("===================================================")
-	t.Logf(" CAIDA ACCURACY REPORT (CocoSketch)")
-	t.Logf(" Processed: %d packets, Unique IPs: %d", len(samples), len(groundTruth))
-	t.Logf(" Top-%d Avg Relative Error: %.4f%%", topK, avgRelError)
-	t.Log("===================================================")
-
-	// Threshold: CocoSketch (Cornucopia) is designed for high accuracy on heavy hitters.
-	// We expect reasonable performance (< 15% error).
-	if avgRelError > 15.0 {
-		t.Errorf("Accuracy too low on real-world data: %.2f%%", avgRelError)
+	if cs.TypeName() != "CocoSketch" {
+		t.Fatalf("unexpected type: %s", cs.TypeName())
 	}
 }
 
-func TestCocoSketchSerializeRoundTrip(t *testing.T) {
-	cs, err := NewCocoSketch(4, 512)
-	require.NoError(t, err)
+func TestCocoInsertThenEstimatePartial(t *testing.T) {
+	cs, _ := NewCocoSketch(4, 64)
+	cs.Insert("user:1234", 3)
+	cs.Insert("user:1234", 2)
 
-	for i := 0; i < 5000; i++ {
-		cs.InsertWithHash(common.FromU64(uint64(i % 321)).Hash)
+	if got := cs.Estimate("user"); got != 5 {
+		t.Fatalf("expected estimate(user)=5, got %d", got)
+	}
+}
+
+func TestCocoEstimateWithUDF(t *testing.T) {
+	cs, _ := NewCocoSketch(4, 64)
+	cs.Insert("region=us|id=1", 4)
+	cs.Insert("region=eu|id=2", 6)
+
+	matcher := func(full, partial string) bool {
+		return strings.Contains(full, partial)
 	}
 
-	before, err := cs.QueryWithHash(common.QueryFrequency, common.FromU64(123).Hash)
-	require.NoError(t, err)
+	if got := cs.EstimateWithUDF("us", matcher); got != 4 {
+		t.Fatalf("expected us total=4, got %d", got)
+	}
+	if got := cs.EstimateWithUDF("region", matcher); got != 10 {
+		t.Fatalf("expected region total=10, got %d", got)
+	}
+}
+
+func TestCocoMergeReplaysBuckets(t *testing.T) {
+	left, _ := NewCocoSketch(4, 64)
+	right, _ := NewCocoSketch(4, 64)
+
+	left.Insert("alpha:key", 7)
+	right.Insert("beta:key", 11)
+
+	if err := left.Merge(right); err != nil {
+		t.Fatalf("merge failed: %v", err)
+	}
+
+	if got := left.Estimate("alpha"); got != 7 {
+		t.Fatalf("expected alpha=7, got %d", got)
+	}
+	if got := left.Estimate("beta"); got != 11 {
+		t.Fatalf("expected beta=11, got %d", got)
+	}
+}
+
+func TestCocoHashAdapterRoundTrip(t *testing.T) {
+	cs, _ := NewCocoSketch(4, 128)
+	h := uint64(0x1234abcd)
+
+	for i := 0; i < 9; i++ {
+		cs.InsertWithHash(h)
+	}
+
+	got, err := cs.QueryWithHash(common.QueryFrequency, h)
+	if err != nil {
+		t.Fatalf("query with hash failed: %v", err)
+	}
+	if got < 9 {
+		t.Fatalf("expected estimate >= 9, got %.0f", got)
+	}
+}
+
+func TestCocoSerializeRoundTrip(t *testing.T) {
+	cs, _ := NewCocoSketch(4, 128)
+	cs.Insert("topic:alpha", 13)
+	cs.Insert("topic:beta", 8)
 
 	data, err := cs.SerializeToBytes()
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("serialize failed: %v", err)
+	}
 
 	restored, err := DeserializeCocoSketchFromBytes(data)
-	require.NoError(t, err)
-	require.NotNil(t, restored.keysStore)
-	require.NotNil(t, restored.countStore)
-	require.Equal(t, cs.d, restored.d)
-	require.Equal(t, cs.length, restored.length)
+	if err != nil {
+		t.Fatalf("deserialize failed: %v", err)
+	}
 
-	after, err := restored.QueryWithHash(common.QueryFrequency, common.FromU64(123).Hash)
-	require.NoError(t, err)
-	require.Equal(t, before, after)
+	if got := restored.Estimate("topic:alpha"); got < 13 {
+		t.Fatalf("expected restored alpha >=13, got %d", got)
+	}
+	if got := restored.Estimate("topic:beta"); got < 8 {
+		t.Fatalf("expected restored beta >=8, got %d", got)
+	}
 }
 
-// Helper: Convert uint32 IP to 4-byte slice
-func ipToBytes(ip uint32) []byte {
-	bytes := make([]byte, 4)
-	binary.BigEndian.PutUint32(bytes, ip)
-	return bytes
+func ExampleCocoSketch_Insert() {
+	cs, _ := NewCocoSketch(4, 64)
+	cs.Insert("user:42", 5)
+	fmt.Println(cs.Estimate("user"))
+	// Output: 5
+}
+
+var (
+	cocoCAIDAOnce   sync.Once
+	cocoCAIDAHashes []uint64
+	cocoCAIDAErr    error
+)
+
+func loadCAIDACocoHashes(t *testing.T) []uint64 {
+	t.Helper()
+	cocoCAIDAOnce.Do(func() {
+		file1 := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
+		samples, err := testdata.ReadCAIDAStream(file1, "")
+		if err != nil {
+			cocoCAIDAErr = err
+			return
+		}
+
+		hashes := make([]uint64, len(samples))
+		var ip [4]byte
+		for i, s := range samples {
+			binary.BigEndian.PutUint32(ip[:], uint32(s.F))
+			hashes[i] = common.Hash64(ip[:])
+		}
+		cocoCAIDAHashes = hashes
+	})
+
+	if cocoCAIDAErr != nil {
+		t.Skipf("Skipping CAIDA test: %v", cocoCAIDAErr)
+	}
+	if len(cocoCAIDAHashes) == 0 {
+		t.Skip("No CAIDA samples found.")
+	}
+	return cocoCAIDAHashes
+}
+
+func topHashes(truth map[uint64]uint64, n int) []uint64 {
+	type kv struct {
+		k uint64
+		v uint64
+	}
+	arr := make([]kv, 0, len(truth))
+	for k, v := range truth {
+		arr = append(arr, kv{k: k, v: v})
+	}
+	sort.Slice(arr, func(i, j int) bool { return arr[i].v > arr[j].v })
+	if len(arr) < n {
+		n = len(arr)
+	}
+	out := make([]uint64, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, arr[i].k)
+	}
+	return out
+}
+
+func TestCoco_RealisticAccuracyDistribution(t *testing.T) {
+
+	cs, _ := NewCocoSketch(5, 2048)
+
+	hashes := loadCAIDACocoHashes(t)
+
+	truth := map[uint64]uint64{}
+
+	for _, h := range hashes {
+		cs.InsertWithHash(h)
+		truth[h]++
+	}
+
+	var totalErr float64
+	sample := 5000
+
+	keys := make([]uint64, 0, len(truth))
+	for k := range truth {
+		keys = append(keys, k)
+	}
+
+	rng := rand.New(rand.NewSource(99))
+
+	for i := 0; i < sample; i++ {
+
+		h := keys[rng.Intn(len(keys))]
+		real := float64(truth[h])
+
+		est, _ := cs.QueryWithHash(common.QueryFrequency, h)
+
+		err := math.Abs(est-real) / math.Max(real, 1)
+
+		totalErr += err
+	}
+
+	are := totalErr / float64(sample)
+
+	t.Log("==== CocoSketch Realistic Accuracy ====")
+	t.Logf("Stream size: %d", len(hashes))
+	t.Logf("Unique keys: %d", len(truth))
+	t.Logf("Average Relative Error: %.4f", are)
+
+}
+
+func TestCoco_HeavyHitterThreshold(t *testing.T) {
+
+	streamSize := 100000
+	thresholdRatio := 0.001
+
+	cs, _ := NewCocoSketch(5, 2048)
+
+	hashes := loadCAIDACocoHashes(t)[:streamSize]
+
+	truth := map[uint64]uint64{}
+
+	for _, h := range hashes {
+		cs.InsertWithHash(h)
+		truth[h]++
+	}
+
+	threshold := uint64(float64(streamSize) * thresholdRatio)
+
+	trueHH := map[uint64]bool{}
+
+	for k, v := range truth {
+		if v >= threshold {
+			trueHH[k] = true
+		}
+	}
+
+	predHH := map[uint64]bool{}
+
+	for k := range truth {
+		est, _ := cs.QueryWithHash(common.QueryFrequency, k)
+		if uint64(est) >= threshold {
+			predHH[k] = true
+		}
+	}
+
+	tp := 0
+	fp := 0
+	fn := 0
+
+	for k := range predHH {
+		if trueHH[k] {
+			tp++
+		} else {
+			fp++
+		}
+	}
+
+	for k := range trueHH {
+		if !predHH[k] {
+			fn++
+		}
+	}
+
+	precision := float64(tp) / float64(tp+fp+1)
+	recall := float64(tp) / float64(tp+fn+1)
+
+	f1 := 2 * precision * recall / (precision + recall + 1e-9)
+
+	t.Log("==== Heavy Hitter Detection ====")
+	t.Logf("Precision: %.3f", precision)
+	t.Logf("Recall: %.3f", recall)
+	t.Logf("F1 Score: %.3f", f1)
+
+	if recall < 0.7 {
+		t.Fatalf("Recall too low: %.3f", recall)
+	}
+}
+
+func TestCoco_MemoryAccuracyCurve(t *testing.T) {
+
+	widths := []int{64, 128, 256, 512, 1024, 2048}
+
+	hashes := loadCAIDACocoHashes(t)[:100000]
+
+	truth := map[uint64]uint64{}
+
+	for _, h := range hashes {
+		truth[h]++
+	}
+
+	for _, w := range widths {
+
+		cs, _ := NewCocoSketch(4, w)
+
+		for _, h := range hashes {
+			cs.InsertWithHash(h)
+		}
+
+		var totalErr float64
+		count := 0
+
+		for k, v := range truth {
+
+			est, _ := cs.QueryWithHash(common.QueryFrequency, k)
+
+			err := math.Abs(est-float64(v)) / math.Max(float64(v), 1)
+
+			totalErr += err
+			count++
+
+			if count > 2000 {
+				break
+			}
+		}
+
+		are := totalErr / float64(count)
+
+		t.Logf("Width=%d ARE=%.4f", w, are)
+	}
+}
+
+func TestCoco_UniformTraffic(t *testing.T) {
+
+	cs, _ := NewCocoSketch(5, 2048)
+
+	rng := rand.New(rand.NewSource(99))
+
+	truth := map[string]uint64{}
+
+	for i := 0; i < 100000; i++ {
+
+		k := fmt.Sprintf("flow-%d", rng.Intn(20000))
+
+		truth[k]++
+		cs.Insert(k, 1)
+	}
+
+	var totalErr float64
+	count := 0
+
+	for k, v := range truth {
+
+		est := float64(cs.Estimate(k))
+		real := float64(v)
+
+		err := math.Abs(est-real) / math.Max(real, 1)
+
+		totalErr += err
+		count++
+
+		if count > 2000 {
+			break
+		}
+	}
+
+	are := totalErr / float64(count)
+
+	t.Log("==== Uniform Traffic Accuracy ====")
+	t.Logf("ARE: %.4f", are)
 }

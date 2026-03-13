@@ -84,6 +84,25 @@ func BenchmarkHLL_Insert_Batch(b *testing.B) {
 	}
 }
 
+func TestHLL_Insert_Latency_P50P99(t *testing.T) {
+	hashes := LoadCAIDAHashes(t)
+	h := hll.NewHyperLogLog()
+
+	sampleSize := benchMinInt(100_000, len(hashes))
+	latencies := make([]int64, sampleSize)
+	for i := 0; i < sampleSize; i++ {
+		start := time.Now()
+		h.InsertWithHash(hashes[i])
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	t.Log("=== HLL Insert Latency Report ===")
+	t.Logf(" P50 (Median): %d ns", benchPercentileInt64(latencies, 0.50))
+	t.Logf(" P99:          %d ns", benchPercentileInt64(latencies, 0.99))
+	t.Log("=================================")
+}
+
 // =====================================================
 // 2. QUERY THROUGHPUT & LATENCY
 // =====================================================
@@ -338,4 +357,39 @@ func TestHLL_CAIDA_AccuracyReport(t *testing.T) {
 	if errRate > 0.025 {
 		t.Errorf("Accuracy too low: %.4f%% > 2.5%%", errRate*100)
 	}
+}
+
+func TestHLL_Merge_Latency_Distribution(t *testing.T) {
+	hashes := LoadCAIDAHashes(t)
+	mid := len(hashes) / 2
+
+	leftSrc := hll.NewHyperLogLog()
+	rightSrc := hll.NewHyperLogLog()
+	for i, hash := range hashes {
+		if i < mid {
+			leftSrc.InsertWithHash(hash)
+		} else {
+			rightSrc.InsertWithHash(hash)
+		}
+	}
+
+	sampleSize := 1_000
+	latencies := make([]int64, sampleSize)
+	for i := 0; i < sampleSize; i++ {
+		left := hll.NewHyperLogLog()
+		right := hll.NewHyperLogLog()
+		_ = left.Merge(leftSrc)
+		_ = right.Merge(rightSrc)
+
+		start := time.Now()
+		_ = left.Merge(right)
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	t.Log("=== HLL Merge Latency Distribution ===")
+	t.Logf(" P50:  %d ns", benchPercentileInt64(latencies, 0.50))
+	t.Logf(" P99:  %d ns", benchPercentileInt64(latencies, 0.99))
+	t.Logf(" P99.9:%d ns", benchPercentileInt64(latencies, 0.999))
+	t.Log("======================================")
 }
