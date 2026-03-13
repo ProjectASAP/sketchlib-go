@@ -1,200 +1,86 @@
 package elasticsketch
 
 import (
-	"flag"
-	"os"
+	"math"
+	"strconv"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
-	"github.com/golang/glog"
 )
 
-func TestMain(m *testing.M) {
-	_ = flag.Set("alsologtostderr", "true")
-	flag.Parse()
-	code := m.Run()
-	glog.Flush()
-	os.Exit(code)
+func mustNewElasticForTest(t *testing.T, buckets int) *ElasticSketch {
+	t.Helper()
+	es, err := New(Config{BucketCount: buckets})
+	if err != nil {
+		t.Fatalf("new elastic: %v", err)
+	}
+	return es
 }
 
-func TestElasticSketchBucketFlush(t *testing.T) {
-	cfg := Config{
-		BucketCount:    1,
-		SlotsPerBucket: 2,
-		SketchSize:     8,
-		VoteFactor:     2,
-		FlushThreshold: 3,
+func TestElasticHeavyBucketTracksRepeatedFlow(t *testing.T) {
+	es := mustNewElasticForTest(t, 8)
+	flow := "flow::primary"
+
+	for i := 0; i < 12; i++ {
+		es.Insert(flow)
 	}
 
-	var entries []ElasticEntry
-	es, err := New(cfg, WithFlushFunc(func(entry ElasticEntry) {
-		entries = append(entries, entry)
-	}))
-	if err != nil {
-		t.Fatalf("unexpected error constructing sketch: %v", err)
+	if got := es.Query(flow); got != 12 {
+		t.Fatalf("expected exact heavy count 12, got %d", got)
 	}
-
-	es.InsertN("foo", 3)
-	glog.Infof("TestElasticSketchBucketFlush: entries after insert: %+v", entries)
-
-	if len(entries) != 1 {
-		t.Fatalf("expected 1 flush entry, got %d", len(entries))
+	if got := es.Query("other"); got != 0 {
+		t.Fatalf("expected other count 0, got %d", got)
 	}
-
-	entry := entries[0]
-	if !entry.FromBucket {
-		t.Fatalf("expected flush from bucket, got sketch entry: %#v", entry)
+	if len(es.heavy) != 8 {
+		t.Fatalf("expected 8 heavy buckets, got %d", len(es.heavy))
 	}
-	if entry.ID != "foo" {
-		t.Fatalf("expected flush for key foo, got %s", entry.ID)
-	}
-	if entry.Count != 3 {
-		t.Fatalf("expected flush count 3, got %f", entry.Count)
-	}
-
-	es.mu.Lock()
-	defer es.mu.Unlock()
-	slot := es.debugBucketSlot(0, 0)
-	if slot.id != "foo" {
-		t.Fatalf("expected bucket slot to keep key foo, got %q", slot.id)
-	}
-	glog.Infof("TestElasticSketchBucketFlush: bucket slot after flush id=%s count=%f", slot.id, slot.count)
-	if slot.count != 0 {
-		t.Fatalf("expected bucket slot count reset after flush, got %f", slot.count)
+	if es.light.Rows() != elasticLightRows || es.light.Cols() != elasticLightCols {
+		t.Fatalf("unexpected light layout: got %dx%d", es.light.Rows(), es.light.Cols())
 	}
 }
 
-func TestElasticSketchEvictionAndSketchFlush(t *testing.T) {
-	cfg := Config{
-		BucketCount:    1,
-		SlotsPerBucket: 1,
-		SketchSize:     16,
-		VoteFactor:     3,
-		FlushThreshold: 3,
-	}
+func TestElasticLightSketchCountsCollidingFlows(t *testing.T) {
+	es := mustNewElasticForTest(t, 8)
+	primary := "flow::primary"
+	primaryIdx := int(hashForElastic(primary) % uint64(es.bktlen))
 
-	var entries []ElasticEntry
-	es, err := New(cfg, WithFlushFunc(func(entry ElasticEntry) {
-		entries = append(entries, entry)
-	}))
-	if err != nil {
-		t.Fatalf("unexpected error constructing sketch: %v", err)
-	}
-
-	es.InsertN("heavy", 2)
-	glog.Infof("TestElasticSketchEvictionAndSketchFlush: entries after heavy inserts: %+v", entries)
-
-	es.InsertN("light", 6)
-	glog.Infof("TestElasticSketchEvictionAndSketchFlush: entries after light inserts: %+v", entries)
-
-	es.mu.Lock()
-	slot := es.debugBucketSlot(0, 0)
-	vote := es.debugBucketVote(0)
-	es.mu.Unlock()
-	glog.Infof("TestElasticSketchEvictionAndSketchFlush: slot after eviction id=%s count=%f vote=%f", slot.id, slot.count, vote)
-
-	if slot.id != "light" {
-		t.Fatalf("expected bucket slot to be occupied by light, got %q", slot.id)
-	}
-	if slot.count != 1 {
-		t.Fatalf("expected bucket slot count 1 after eviction, got %f", slot.count)
-	}
-
-	foundSketchFlush := false
-	for _, entry := range entries {
-		if !entry.FromBucket && entry.ID == "light" && entry.Count == cfg.FlushThreshold {
-			foundSketchFlush = true
+	secondary := ""
+	for i := 0; i < 10000; i++ {
+		cand := makeCollisionCandidate(i)
+		if int(hashForElastic(cand)%uint64(es.bktlen)) == primaryIdx && cand != primary {
+			secondary = cand
 			break
 		}
 	}
-	if !foundSketchFlush {
-		t.Fatalf("expected sketch flush for key light, got %#v", entries)
+	if secondary == "" {
+		t.Fatal("unable to find colliding key")
 	}
 
-	prevEntries := len(entries)
-	es.InsertN("light", 2)
-	glog.Infof("TestElasticSketchEvictionAndSketchFlush: entries after additional light inserts: %+v", entries)
-	if len(entries) != prevEntries+1 {
-		t.Fatalf("expected an additional flush entry from bucket, got %d total", len(entries))
+	for i := 0; i < 10; i++ {
+		es.Insert(primary)
+	}
+	for i := 0; i < 6; i++ {
+		es.Insert(secondary)
 	}
 
-	last := entries[len(entries)-1]
-	if !last.FromBucket {
-		t.Fatalf("expected last entry to come from bucket, got %#v", last)
-	}
-	if last.ID != "light" {
-		t.Fatalf("expected bucket flush for key light, got %s", last.ID)
-	}
-	if last.Count != cfg.FlushThreshold {
-		t.Fatalf("expected bucket flush count %f, got %f", cfg.FlushThreshold, last.Count)
-	}
+	heavyEst := es.Query(primary)
+	lightEst := es.Query(secondary)
 
-	es.mu.Lock()
-	defer es.mu.Unlock()
-	slot = es.debugBucketSlot(0, 0)
-	glog.Infof("TestElasticSketchEvictionAndSketchFlush: bucket slot final state id=%s count=%f", slot.id, slot.count)
-	if slot.count != 0 {
-		t.Fatalf("expected bucket count reset after flush, got %f", slot.count)
+	if heavyEst < 10 {
+		t.Fatalf("expected heavy estimate >=10, got %d", heavyEst)
+	}
+	if lightEst < 6 {
+		t.Fatalf("expected light estimate >=6, got %d", lightEst)
+	}
+	if es.lightEstimateHash(hashForElastic(secondary)) < 6 {
+		t.Fatalf("expected direct light estimate >=6, got %.0f", es.lightEstimateHash(hashForElastic(secondary)))
 	}
 }
 
-func TestElasticSketchInsertInputAndHashFastPath(t *testing.T) {
-	cfg := Config{
-		BucketCount:    4,
-		SlotsPerBucket: 2,
-		SketchSize:     32,
-		VoteFactor:     2,
-		FlushThreshold: 4,
-	}
-	es, err := New(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error constructing sketch: %v", err)
-	}
-
-	input := common.FromString("alpha")
-	es.InsertInputN(input, 3)
-	es.InsertWithHashN(input.Hash, 2)
-
-	es.mu.Lock()
-	defer es.mu.Unlock()
-
-	found := false
-	for bIdx := 0; bIdx < es.cfg.BucketCount && !found; bIdx++ {
-		for s := 0; s < es.cfg.SlotsPerBucket; s++ {
-			slot := es.debugBucketSlot(bIdx, s)
-			if slot.hash == input.Hash && slot.count > 0 {
-				found = true
-				break
-			}
-		}
-	}
-	if !found {
-		for _, v := range es.sketch.AsSlice() {
-			if v > 0 {
-				found = true
-				break
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("expected key/hash to affect sketch state")
-	}
-}
-
-func TestElasticSketchSerializeRoundTrip(t *testing.T) {
-	cfg := Config{
-		BucketCount:    2,
-		SlotsPerBucket: 2,
-		SketchSize:     16,
-		VoteFactor:     2,
-		FlushThreshold: 4,
-	}
-	es, err := New(cfg)
-	if err != nil {
-		t.Fatalf("unexpected error constructing sketch: %v", err)
-	}
-	es.InsertN("foo", 3)
-	es.InsertN("bar", 2)
+func TestElasticSerializeRoundTrip(t *testing.T) {
+	es := mustNewElasticForTest(t, 4)
+	es.InsertN("foo", 7)
+	es.InsertN("bar", 3)
 
 	blob, err := es.SerializeToBytes()
 	if err != nil {
@@ -206,12 +92,177 @@ func TestElasticSketchSerializeRoundTrip(t *testing.T) {
 		t.Fatalf("deserialize failed: %v", err)
 	}
 
-	restored.mu.Lock()
-	defer restored.mu.Unlock()
-	if restored.cfg.BucketCount != es.cfg.BucketCount || restored.cfg.SketchSize != es.cfg.SketchSize {
-		t.Fatalf("config mismatch after round trip")
+	if got := restored.Query("foo"); got < 7 {
+		t.Fatalf("expected restored foo >=7, got %d", got)
 	}
-	if len(restored.slotCounts.AsSlice()) != len(es.slotCounts.AsSlice()) {
-		t.Fatalf("slot length mismatch after round trip")
+	if got := restored.Query("bar"); got < 3 {
+		t.Fatalf("expected restored bar >=3, got %d", got)
+	}
+	if len(restored.heavy) != len(es.heavy) {
+		t.Fatalf("heavy bucket length mismatch after restore: got %d want %d", len(restored.heavy), len(es.heavy))
+	}
+	if restored.light.Rows() != es.light.Rows() || restored.light.Cols() != es.light.Cols() {
+		t.Fatalf("light layout mismatch after restore: got %dx%d want %dx%d", restored.light.Rows(), restored.light.Cols(), es.light.Rows(), es.light.Cols())
+	}
+}
+
+func TestElastic_RustAlignedLayout(t *testing.T) {
+	es := mustNewElasticForTest(t, 16)
+
+	if len(es.heavy) != 16 {
+		t.Fatalf("expected heavy Vec-style layout of 16 buckets, got %d", len(es.heavy))
+	}
+	for i, bucket := range es.heavy {
+		if bucket.FlowID != "" || bucket.VotePos != 0 || bucket.VoteNeg != 0 || bucket.Eviction {
+			t.Fatalf("heavy bucket %d not zero-initialized: %+v", i, bucket)
+		}
+	}
+
+	if es.light == nil {
+		t.Fatal("light part is nil")
+	}
+	if es.light.Rows() != elasticLightRows || es.light.Cols() != elasticLightCols {
+		t.Fatalf("light part should be Vector2D[%d x %d], got %dx%d", elasticLightRows, elasticLightCols, es.light.Rows(), es.light.Cols())
+	}
+}
+
+func hashForElastic(key string) uint64 {
+	return commonHashCanonical([]byte(key))
+}
+
+func makeCollisionCandidate(i int) string {
+	return "flow::secondary::" + strconv.Itoa(i)
+}
+
+// small helpers to avoid extra deps in tests
+func commonHashCanonical(b []byte) uint64 {
+	return common.HashIt(common.CanonicalHashSeed, b)
+}
+
+func mustElasticQuality(t *testing.T, buckets int) *ElasticSketch {
+	t.Helper()
+	es, err := New(Config{BucketCount: buckets})
+	if err != nil {
+		t.Fatalf("new elastic: %v", err)
+	}
+	return es
+}
+
+func findElasticCollision(bucketCount int, target string) string {
+	targetIdx := int(common.HashIt(common.CanonicalHashSeed, []byte(target)) % uint64(bucketCount))
+	for i := 0; i < 1_000_000; i++ {
+		cand := "elastic-collision-" + strconv.Itoa(i)
+		if cand == target {
+			continue
+		}
+		idx := int(common.HashIt(common.CanonicalHashSeed, []byte(cand)) % uint64(bucketCount))
+		if idx == targetIdx {
+			return cand
+		}
+	}
+	return ""
+}
+
+func TestElastic_Quality_OperationsAndErrorBound(t *testing.T) {
+	es := mustElasticQuality(t, 64)
+	main := "flow-main"
+	collider := findElasticCollision(es.bktlen, main)
+	if collider == "" {
+		t.Fatal("failed to find collider")
+	}
+
+	for i := 0; i < 200; i++ {
+		es.Insert(main)
+	}
+	for i := 0; i < 30; i++ {
+		es.Insert(collider)
+	}
+
+	gotMain := es.Query(main)
+	gotColl := es.Query(collider)
+	if gotMain < 200 {
+		t.Fatalf("main underestimated: got=%d want>=200", gotMain)
+	}
+	if gotColl < 30 {
+		t.Fatalf("collider underestimated: got=%d want>=30", gotColl)
+	}
+
+	// Conservative upper bound from Count-Min light layer epsilon (w=4096).
+	epsBound := int(math.Ceil((2.718281828 / 4096.0) * 230.0))
+	if gotColl > 30+epsBound+20 {
+		t.Fatalf("collider overestimate too high: got=%d bound=%d", gotColl, 30+epsBound+20)
+	}
+}
+
+func TestElastic_Quality_SerializeRoundTrip(t *testing.T) {
+	es := mustElasticQuality(t, 128)
+	for i := 0; i < 100; i++ {
+		es.Insert("k:" + strconv.Itoa(i%7))
+	}
+	b, err := es.SerializeToBytes()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	r, err := DeserializeElasticSketchFromBytes(b)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	for i := 0; i < 7; i++ {
+		k := "k:" + strconv.Itoa(i)
+		if r.Query(k) != es.Query(k) {
+			t.Fatalf("roundtrip mismatch key=%s got=%d want=%d", k, r.Query(k), es.Query(k))
+		}
+	}
+}
+
+func TestElastic_Merge_DisjointHeavyBuckets(t *testing.T) {
+	left := mustElasticQuality(t, 64)
+	right := mustElasticQuality(t, 64)
+
+	left.InsertN("flow:left", 40)
+	right.InsertN("flow:right", 25)
+
+	if err := left.Merge(right); err != nil {
+		t.Fatalf("merge failed: %v", err)
+	}
+
+	if got := left.Query("flow:left"); got < 40 {
+		t.Fatalf("left flow underestimated after merge: got=%d want>=40", got)
+	}
+	if got := left.Query("flow:right"); got < 25 {
+		t.Fatalf("right flow underestimated after merge: got=%d want>=25", got)
+	}
+}
+
+func TestElastic_Merge_CollidingFlows(t *testing.T) {
+	left := mustElasticQuality(t, 16)
+	main := "flow-main"
+	collider := findElasticCollision(left.bktlen, main)
+	if collider == "" {
+		t.Fatal("failed to find collider")
+	}
+
+	right := mustElasticQuality(t, 16)
+	for i := 0; i < 30; i++ {
+		left.Insert(main)
+	}
+	for i := 0; i < 12; i++ {
+		right.Insert(collider)
+	}
+
+	beforeMain := left.Query(main)
+	beforeCollider := right.Query(collider)
+
+	if err := left.Merge(right); err != nil {
+		t.Fatalf("merge failed: %v", err)
+	}
+
+	afterMain := left.Query(main)
+	afterCollider := left.Query(collider)
+	if afterMain < beforeMain {
+		t.Fatalf("main flow regressed after merge: before=%d after=%d", beforeMain, afterMain)
+	}
+	if afterCollider < beforeCollider {
+		t.Fatalf("collider regressed after merge: before=%d after=%d", beforeCollider, afterCollider)
 	}
 }
