@@ -200,6 +200,11 @@ func (h *HyperLogLog) QueryWithHash(q common.QueryType, hash uint64) (float64, e
 // -----------------------
 //
 
+// Reset clears all registers, returning the sketch to its zero state.
+func (h *HyperLogLog) Reset() {
+	clear(h.Registers.AsMutSlice())
+}
+
 // Merge combines another HLL into this one.
 // Both sketches must use the same precision.
 func (h *HyperLogLog) Merge(other common.Sketch) error {
