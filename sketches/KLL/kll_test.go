@@ -282,6 +282,56 @@ func TestKLL_CAIDA_MemoryBound(t *testing.T) {
 	}
 }
 
+// ======================
+// Reset Tests
+// ======================
+
+// TestKLL_Reset_ClearsState verifies that Reset() returns the sketch to its empty state.
+func TestKLL_Reset_ClearsState(t *testing.T) {
+	s := InitKLL(200)
+	for i := 0; i < 1000; i++ {
+		s.Insert(float64(i))
+	}
+	if s.Count() == 0 {
+		t.Fatal("sketch should be non-empty before Reset")
+	}
+
+	s.Reset()
+
+	assertVectorWrapperSynced(t, s)
+	if got := s.Count(); got != 0 {
+		t.Fatalf("Count() = %d after Reset, want 0", got)
+	}
+	if got := s.GetRetainedItems(); got != 0 {
+		t.Fatalf("GetRetainedItems() = %d after Reset, want 0", got)
+	}
+}
+
+// TestKLL_Reset_SubsequentInserts verifies that inserting into a reset sketch gives
+// the same Count as a fresh sketch receiving the same data.
+func TestKLL_Reset_SubsequentInserts(t *testing.T) {
+	s := InitKLL(200)
+	ref := InitKLL(200)
+
+	// Noise pass
+	for i := 0; i < 500; i++ {
+		s.Insert(float64(i))
+	}
+	s.Reset()
+
+	// Signal pass — identical data to both
+	for i := 0; i < 1000; i++ {
+		s.Insert(float64(i))
+		ref.Insert(float64(i))
+	}
+
+	assertVectorWrapperSynced(t, s)
+	assertVectorWrapperSynced(t, ref)
+	if s.Count() != ref.Count() {
+		t.Fatalf("Count mismatch after Reset + re-insert: got %d, want %d", s.Count(), ref.Count())
+	}
+}
+
 func TestKLLRustStyleAPI(t *testing.T) {
 	s := InitKLL(64)
 	values := []float64{1, 2, 3, 4, 5}

@@ -200,6 +200,73 @@ func TestHyperLogLogSerializeRoundTrip(t *testing.T) {
 	}
 }
 
+// ==============================================================================
+// 3. RESET TESTS
+// ==============================================================================
+
+// TestHyperLogLog_Reset_ClearsState verifies that Reset() returns the sketch to the
+// same state as a freshly constructed one.
+func TestHyperLogLog_Reset_ClearsState(t *testing.T) {
+	h := NewHyperLogLog()
+	fresh := NewHyperLogLog()
+
+	for i := uint64(0); i < 1000; i++ {
+		h.InsertWithHash(common.FromU64(i).Hash)
+	}
+	if h.Estimate() == 0 {
+		t.Fatal("sketch should be non-empty before Reset")
+	}
+
+	h.Reset()
+
+	if !slices.Equal(h.RegisterSlice(), fresh.RegisterSlice()) {
+		t.Fatal("registers not fully zeroed after Reset")
+	}
+	if got := h.Estimate(); got != 0 {
+		t.Fatalf("Estimate() = %d after Reset, want 0", got)
+	}
+}
+
+// TestHyperLogLog_Reset_SubsequentInserts verifies that a reset sketch receiving
+// the same inputs as a fresh sketch produces identical register state and estimates.
+func TestHyperLogLog_Reset_SubsequentInserts(t *testing.T) {
+	h := NewHyperLogLog()
+	ref := NewHyperLogLog()
+
+	// Noise pass
+	for i := uint64(0); i < 500; i++ {
+		h.InsertWithHash(common.FromU64(i).Hash)
+	}
+	h.Reset()
+
+	// Signal pass — same inputs to both
+	for i := uint64(500); i < 1500; i++ {
+		hash := common.FromU64(i).Hash
+		h.InsertWithHash(hash)
+		ref.InsertWithHash(hash)
+	}
+
+	if !slices.Equal(h.RegisterSlice(), ref.RegisterSlice()) {
+		t.Fatal("register state diverged after Reset + re-insert")
+	}
+	if h.Estimate() != ref.Estimate() {
+		t.Fatalf("Estimate mismatch after Reset: got %d, want %d", h.Estimate(), ref.Estimate())
+	}
+}
+
+// TestHyperLogLog_Reset_NoAllocs confirms that Reset() performs no heap allocations.
+func TestHyperLogLog_Reset_NoAllocs(t *testing.T) {
+	h := NewHyperLogLog()
+	for i := uint64(0); i < 100; i++ {
+		h.InsertWithHash(common.FromU64(i).Hash)
+	}
+
+	allocs := testing.AllocsPerRun(10, func() { h.Reset() })
+	if allocs != 0 {
+		t.Fatalf("Reset() allocated %.0f times, want 0", allocs)
+	}
+}
+
 func TestHyperLogLogRustStyleAPI(t *testing.T) {
 	h := New()
 	if h.Registers == nil {

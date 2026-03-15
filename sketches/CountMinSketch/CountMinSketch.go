@@ -392,6 +392,17 @@ func (s *CountMinSketch) CM_L2() float64 {
 	return math.Sqrt(res)
 }
 
+// Reset clears all counters and norms, returning the sketch to its zero state.
+func (s *CountMinSketch) Reset() {
+	for i := range s.Count {
+		clear(s.Count[i])
+		clear(s.Sum[i])
+		clear(s.Sum2[i])
+	}
+	clear(s.L1)
+	clear(s.L2)
+}
+
 func (s *CountMinSketch) TypeName() string {
 	return "countmin"
 }

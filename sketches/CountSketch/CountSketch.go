@@ -312,6 +312,17 @@ func (s *CountSketch) estimateWithMatrixHash(hashed storage.MatrixHashType) floa
 	return common.ComputeMedianInlineF64(estimates)
 }
 
+// Reset clears all counters and L2 norms, returning the sketch to its zero state.
+func (s *CountSketch) Reset() {
+	for i := range s.Count {
+		clear(s.Count[i])
+	}
+	clear(s.L2)
+	if s.TopK != nil {
+		s.TopK = common.NewTopKHeap(TOPK_SIZE)
+	}
+}
+
 func (s *CountSketch) Merge(other common.Sketch) error {
 	o, ok := other.(*CountSketch)
 	if !ok {

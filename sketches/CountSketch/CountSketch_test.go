@@ -298,9 +298,82 @@ func TestCS_CAIDA_Accuracy(t *testing.T) {
 	}
 }
 
-//////////////////////////////////////////////////////////////////
-// 4. RANDOMIZED QUALITY TEST
-//////////////////////////////////////////////////////////////////
+// ==============================================================================
+// 3. RESET TESTS
+// ==============================================================================
+
+// TestCS_Reset_ClearsState verifies that Reset() zeroes all counters and L2 norms
+// and returns zero estimates, matching a freshly constructed sketch.
+func TestCS_Reset_ClearsState(t *testing.T) {
+	cs, _ := NewCountSketch(5, 1024)
+	for i := 0; i < 500; i++ {
+		cs.UpdateString("hot", 1)
+	}
+
+	cs.Reset()
+
+	for r := 0; r < cs.Rows; r++ {
+		for c := 0; c < cs.Cols; c++ {
+			if cs.Count[r][c] != 0 {
+				t.Fatalf("Count[%d][%d] = %.0f after Reset, want 0", r, c, cs.Count[r][c])
+			}
+		}
+	}
+	for r, v := range cs.L2 {
+		if v != 0 {
+			t.Fatalf("L2[%d] = %.0f after Reset, want 0", r, v)
+		}
+	}
+	if est := cs.EstimateStringCount("hot"); est != 0 {
+		t.Fatalf("EstimateStringCount = %d after Reset, want 0", est)
+	}
+}
+
+// TestCS_Reset_SubsequentInserts verifies that a reset sketch receiving the same
+// inputs as a fresh sketch produces the same estimate.
+func TestCS_Reset_SubsequentInserts(t *testing.T) {
+	cs, _ := NewCountSketch(5, 1024)
+	ref, _ := NewCountSketch(5, 1024)
+
+	// Noise pass
+	for i := 0; i < 200; i++ {
+		cs.UpdateString("noise", 1)
+	}
+	cs.Reset()
+
+	// Signal pass — identical inputs to both
+	for i := 0; i < 300; i++ {
+		cs.UpdateString("signal", 1)
+		ref.UpdateString("signal", 1)
+	}
+
+	estReset := cs.EstimateStringCount("signal")
+	estRef := ref.EstimateStringCount("signal")
+	if estReset != estRef {
+		t.Fatalf("estimate mismatch after Reset + re-insert: got %d, want %d", estReset, estRef)
+	}
+}
+
+// TestCS_Reset_Allocs confirms that Reset() performs exactly 2 heap allocations:
+// one for the replacement TopKHeap struct and one for its backing slice.
+func TestCS_Reset_Allocs(t *testing.T) {
+	cs, _ := NewCountSketch(5, 1024)
+	for i := 0; i < 100; i++ {
+		cs.UpdateString("k", 1)
+	}
+
+	const wantAllocs = 2 // TopKHeap struct + make([]Item, 0, TOPK_SIZE)
+	allocs := testing.AllocsPerRun(10, func() { cs.Reset() })
+	if allocs != wantAllocs {
+		t.Fatalf("Reset() allocated %.0f times, want %d (1 TopKHeap struct + 1 backing slice)", allocs, wantAllocs)
+	}
+}
+
+func TestCountSketchSerializeRoundTrip(t *testing.T) {
+	cs, err := NewCountSketch(5, 1024)
+	if err != nil {
+		t.Fatalf("new countsketch: %v", err)
+	}
 
 type csUpdate struct {
 	hash  uint64
