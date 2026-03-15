@@ -180,6 +180,11 @@ func (s *KLLSketch) Update(x float64) {
 	s.Insert(x)
 }
 
+// Reset clears the sketch, returning it to its empty state.
+func (s *KLLSketch) Reset() {
+	s.Clear()
+}
+
 // Clear resets the sketch while preserving allocation.
 func (s *KLLSketch) Clear() {
 	s.items = s.items[:0]
