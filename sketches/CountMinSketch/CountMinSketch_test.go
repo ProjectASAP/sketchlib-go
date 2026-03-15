@@ -299,6 +299,72 @@ func TestCMS_RealWorld_CAIDA_Accuracy(t *testing.T) {
 	}
 }
 
+// ==============================================================================
+// 3. RESET TESTS
+// ==============================================================================
+
+// TestCMS_Reset_ClearsState verifies that Reset() returns zero for all queries
+// and zeros L1/L2, matching a freshly constructed sketch.
+func TestCMS_Reset_ClearsState(t *testing.T) {
+	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
+	h := common.FromString("key").Hash
+	for i := 0; i < 500; i++ {
+		s.InsertWithHash(h)
+	}
+
+	s.Reset()
+
+	if est, _ := s.QueryWithHash(common.QueryFrequency, h); est != 0 {
+		t.Fatalf("QueryFrequency = %.0f after Reset, want 0", est)
+	}
+	if l1 := s.CM_L1(); l1 != 0 {
+		t.Fatalf("CM_L1 = %.0f after Reset, want 0", l1)
+	}
+	if l2 := s.CM_L2(); l2 != 0 {
+		t.Fatalf("CM_L2 = %.0f after Reset, want 0", l2)
+	}
+}
+
+// TestCMS_Reset_SubsequentInserts verifies that a reset sketch receiving the same
+// inputs as a fresh sketch produces identical estimates.
+func TestCMS_Reset_SubsequentInserts(t *testing.T) {
+	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
+	ref, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
+	h := common.FromString("key").Hash
+
+	// Noise pass
+	for i := 0; i < 200; i++ {
+		s.InsertWithHash(common.FromString("noise").Hash)
+	}
+	s.Reset()
+
+	// Signal pass — identical inputs to both
+	for i := 0; i < 400; i++ {
+		s.InsertWithHash(h)
+		ref.InsertWithHash(h)
+	}
+
+	estReset, _ := s.QueryWithHash(common.QueryFrequency, h)
+	estRef, _ := ref.QueryWithHash(common.QueryFrequency, h)
+	if estReset != estRef {
+		t.Fatalf("estimate mismatch after Reset + re-insert: got %.0f, want %.0f", estReset, estRef)
+	}
+}
+
+// TestCMS_Reset_NoAllocs confirms that Reset() performs no heap allocations.
+func TestCMS_Reset_NoAllocs(t *testing.T) {
+	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
+	h := common.FromString("k").Hash
+	for i := 0; i < 100; i++ {
+		s.InsertWithHash(h)
+	}
+
+	allocs := testing.AllocsPerRun(10, func() { s.Reset() })
+	if allocs != 0 {
+		t.Fatalf("Reset() allocated %.0f times, want 0", allocs)
+	}
+}
+
 func TestCountMinSketchSerializeRoundTrip(t *testing.T) {
 	s, err := NewCountMinSketch(3, 1024)
 	if err != nil {
