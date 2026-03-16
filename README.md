@@ -73,6 +73,71 @@ Hashing rules:
 * No seeded hashing in hot paths
 * **Hash computation is strictly forbidden inside sketches**
 
+#### Storage (`/common/storage`)
+
+The `storage` sub-package provides cache-friendly, allocation-aware backing structures shared by all matrix and vector sketches.
+
+##### Vector1D
+
+A generic, bounds-checked wrapper over a flat Go slice optimized for sketch hot paths.
+
+```go
+v, _ := storage.FilledVector1D[float64](cols, 0)
+v.Push(x)
+ptr, _ := v.Get(i)   // returns *T — no copy
+v.SortBy(cmp)
+```
+
+Key operations: `Push`, `Get` / `GetMut`, `Fill`, `Truncate`, `Clear`, `Append`, `SortBy`, `UpdateIfGreater` / `UpdateIfSmaller`, JSON marshal/unmarshal.
+
+##### Vector2D
+
+A flat row-major matrix (`rows × cols`) with pre-computed mask bits and a `MatrixHashMode` for zero-allocation hash-to-column mapping.
+
+```go
+m, _ := storage.InitVector2D[float64](rows, cols)
+m.FastInsert(value, colFn, updateFn)    // hot path: no allocation
+m.FastQueryMin(colFn)                   // min across derived column positions
+m.FastQueryMedian(colFn, projectFn)     // median with optional sign projection
+m.FastQueryAggregate(colFn, init, agg) // custom reduction
+```
+
+`FlatVector2D` is a pre-bound `Vector2D[float64]` alias used by legacy sketch paths.
+Serialization: `SerializeToBytes` / `DeserializeVector2DFromBytes`.
+
+##### Vector3D
+
+A flat layer × row × col tensor for multi-layer sketch structures (e.g. UnivMon).
+
+```go
+t, _ := storage.InitVector3D[float64](layers, rows, cols)
+t.At(layer, row, col)
+t.Set(layer, row, col, value)
+```
+
+##### MatrixStorage & MatrixHashType
+
+`MatrixStorage` is the interface consumed by all matrix-backed sketches. `DenseMatrixStorage` is its default implementation over `FlatVector2D`.
+
+`MatrixHashType` encodes the fast-path hash representation in one of three modes chosen automatically based on sketch dimensions:
+
+| Mode               | When used                           | Description                            |
+| ------------------ | ----------------------------------- | -------------------------------------- |
+| `MatrixHashPacked64`  | `rows × (maskBits+1) ≤ 64`      | All row bits packed into one `uint64`  |
+| `MatrixHashPacked128` | `rows × (maskBits+1) ≤ 128`     | Bits packed into hi/lo `uint64` pair   |
+| `MatrixHashRows`      | Larger matrices                  | One independent `uint64` hash per row  |
+
+```go
+store, _ := storage.NewDenseMatrixStorage(rows, cols)
+hashed   := store.HashForMatrix(baseHash)        // derive per-row representation
+
+store.FastInsert(hashed, delta)                   // hot path insert
+store.FastQueryMin(hashed)                        // CMS-style point query
+store.FastQueryMedianSigned(hashed)               // CountSketch-style median
+```
+
+Construction helpers: `BuildMatrixHash` (from raw `uint64`) and `BuildMatrixHashFromInput` / `BuildMatrixHashFromInputSeeded` (from `common.SketchInput`).
+
 ---
 
 ### 2. Core Sketches (`/sketches`)
