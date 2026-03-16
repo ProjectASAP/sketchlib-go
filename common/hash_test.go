@@ -7,6 +7,43 @@ import (
 	"testing"
 )
 
+func TestXxh3RegressionVectors(t *testing.T) {
+	key := []byte("projectasap")
+
+	if got := Hash64(key); got != 887548862923853302 {
+		t.Fatalf("Hash64() = %d, want %d", got, uint64(887548862923853302))
+	}
+
+	if got := HashIt(CanonicalHashSeed, key); got != 8535098769003547387 {
+		t.Fatalf("HashIt() = %d, want %d", got, uint64(8535098769003547387))
+	}
+
+	got128 := Hash128It(CanonicalHashSeed, key)
+	if got128.Lo != 17483029675728789163 || got128.Hi != 10822198452898270743 {
+		t.Fatalf(
+			"Hash128It() = {Lo:%d Hi:%d}, want {Lo:%d Hi:%d}",
+			got128.Lo,
+			got128.Hi,
+			uint64(17483029675728789163),
+			uint64(10822198452898270743),
+		)
+	}
+}
+
+func TestHashItNormalizesSeedIndex(t *testing.T) {
+	key := []byte("projectasap")
+
+	if got, want := HashIt(len(seedList)+CanonicalHashSeed, key), HashIt(CanonicalHashSeed, key); got != want {
+		t.Fatalf("HashIt() seed normalization mismatch: got %d want %d", got, want)
+	}
+
+	got128 := Hash128It(len(seedList)+CanonicalHashSeed, key)
+	want128 := Hash128It(CanonicalHashSeed, key)
+	if got128 != want128 {
+		t.Fatalf("Hash128It() seed normalization mismatch: got %+v want %+v", got128, want128)
+	}
+}
+
 func TestFloat64Conversions(t *testing.T) {
 	cases := []float64{
 		0,

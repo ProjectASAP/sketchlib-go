@@ -100,12 +100,23 @@ func (h *HyperLogLog) InsertManyWithHashes(hashes []uint64) {
 
 // InsertWithHash is the FAST PATH (execution layer).
 // It assumes the input has already been hashed.
+//
+// Bit layout (matches Rust DataFusion convention):
+//   bits [63 .. 64-P)  → register index   (upper P = HLLPrecision bits)
+//   bits [64-P-1 .. 0) → leading-zero payload (lower Q = HLLRegisterBits bits)
+//
+// The payload is left-aligned by shifting left P bits; the vacated low P
+// bits are filled with 1s (via OR with HLLRegisterMask) so that an all-zero
+// payload maps to exactly Q leading zeros, matching Rust's formula:
+//   (hash << HLL_P) + HLL_P_MASK
 func (h *HyperLogLog) InsertWithHash(hash uint64) {
 	registers := h.Registers.AsMutSlice()
-	index := int(hash & HLLRegisterMask)
-	w := hash >> HLLPrecision
+	// Upper HLLPrecision bits select the register bucket.
+	index := int((hash >> HLLRegisterBits) & uint64(HLLRegisterMask))
+	// Lower HLLRegisterBits bits, left-aligned and with low bits set to 1.
+	w := (hash << HLLPrecision) | uint64(HLLRegisterMask)
 
-	leadingZeros := uint8(bits.LeadingZeros64(w)-HLLPrecision) + 1
+	leadingZeros := uint8(bits.LeadingZeros64(w)) + 1
 	maxLeadingZeros := uint8(HLLRegisterBits) + 1
 	if leadingZeros > maxLeadingZeros {
 		leadingZeros = maxLeadingZeros

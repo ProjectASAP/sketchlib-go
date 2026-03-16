@@ -322,6 +322,59 @@ func TestHLL_Quality_MergeAccuracy(t *testing.T) {
 	}
 }
 
+// TestHLL_CrossLanguageRegressionVectors verifies that InsertWithHash maps each
+// hash to the same register index and leading-zero value as the Rust implementation.
+//
+// Test vectors are taken verbatim from hll.rs hll_correctness_test (cumulative).
+// Both HyperLogLog (DataFusion estimator) and HyperLogLogVariant are checked.
+func TestHLL_CrossLanguageRegressionVectors(t *testing.T) {
+	type step struct {
+		hash     uint64
+		bucket   int
+		wantReg  uint8
+	}
+	// Assertions are cumulative — each step checks the register state after all
+	// prior insertions, exactly as the Rust test does.
+	steps := []step{
+		{0x0002_0000_0000_0000, 0, 1},
+		{0x0000_0000_0000_0000, 0, 51},
+		{0xfffc_3000_0000_0000, HLLRegisterMask, 5},
+		{0xcafe_0000_0000_0000, 12991, 1},
+		{0xcafc_00ce_cafe_face, 12991, 11},
+		{0xface_cafe_face_cafe, 16051, 1},
+		{0xfacc_ca00_0000_cafe, 16051, 3},
+		{0x0831_8310_0000_0000, 524, 2},
+		{0x3014_1592_6535_8000, 3077, 6},
+		{0xcafc_0ace_cafe_face, 12991, 11}, // idempotent — already 11
+	}
+
+	hll := NewHyperLogLog()
+	variant := NewDataFusion()
+
+	for _, s := range steps {
+		hll.InsertWithHash(s.hash)
+		variant.InsertWithHash(s.hash)
+
+		got := hll.Registers.AsSlice()[s.bucket]
+		if got != s.wantReg {
+			t.Errorf("HyperLogLog hash=0x%016x: register[%d] = %d, want %d",
+				s.hash, s.bucket, got, s.wantReg)
+		}
+
+		gotV := variant.Registers.AsSlice()[s.bucket]
+		if gotV != s.wantReg {
+			t.Errorf("HyperLogLogVariant hash=0x%016x: register[%d] = %d, want %d",
+				s.hash, s.bucket, gotV, s.wantReg)
+		}
+	}
+
+	// Bucket 1000 must remain 0 (no unintended side-effects).
+	if hll.Registers.AsSlice()[1000] != 0 {
+		t.Errorf("register[1000] should be 0 (no collateral writes), got %d",
+			hll.Registers.AsSlice()[1000])
+	}
+}
+
 func TestHLL_Quality_SpecificHIPMergeUnsupported(t *testing.T) {
 	h1 := NewHIP()
 	h2 := NewHIP()

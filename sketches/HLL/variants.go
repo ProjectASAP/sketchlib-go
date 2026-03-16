@@ -49,9 +49,10 @@ func (h *HyperLogLogVariant) InsertInput(input *common.SketchInput) {
 
 func (h *HyperLogLogVariant) InsertWithHash(hash uint64) {
 	registers := h.Registers.AsMutSlice()
-	index := int(hash & HLLRegisterMask)
-	w := hash >> HLLPrecision
-	leadingZeros := uint8(bits.LeadingZeros64(w)-HLLPrecision) + 1
+	// Upper HLLPrecision bits select the register bucket (matches Rust convention).
+	index := int((hash >> HLLRegisterBits) & uint64(HLLRegisterMask))
+	w := (hash << HLLPrecision) | uint64(HLLRegisterMask)
+	leadingZeros := uint8(bits.LeadingZeros64(w)) + 1
 	maxLeadingZeros := uint8(HLLRegisterBits) + 1
 	if leadingZeros > maxLeadingZeros {
 		leadingZeros = maxLeadingZeros
