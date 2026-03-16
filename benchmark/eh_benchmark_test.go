@@ -2,8 +2,10 @@ package benchmark
 
 import (
 	"log"
+	"sort"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	eh "github.com/ProjectASAP/sketchlib-go/sketch_framework/ExponentialHistogram"
@@ -98,6 +100,29 @@ func BenchmarkEH_Throughput_DDSketch(b *testing.B) {
 	benchmarkEHUpdateValue(b, e)
 }
 
+func TestEH_Insert_Latency_P50P99(t *testing.T) {
+	if len(stream) == 0 {
+		t.Skip("CAIDA stream not loaded")
+	}
+	e := eh.NewExpoHistogramCountMin(ehK, windowSize, cmRow, cmCol)
+
+	sampleSize := benchMinInt(20_000, len(stream))
+	latencies := make([]int64, sampleSize)
+	for i := 0; i < sampleSize; i++ {
+		sample := stream[i]
+		key := strconv.FormatUint(uint64(sample.F), 10)
+		start := time.Now()
+		_ = e.UpdateItem(key, sample.T)
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	t.Log("=== EH Insert Latency Report ===")
+	t.Logf(" P50 (Median): %d ns", benchPercentileInt64(latencies, 0.50))
+	t.Logf(" P99:          %d ns", benchPercentileInt64(latencies, 0.99))
+	t.Log("================================")
+}
+
 // --- Helpers for Update using CAIDA Stream ---
 
 func benchmarkEHUpdateString(b *testing.B, e EHUpdater) {
@@ -153,6 +178,29 @@ func BenchmarkEH_Query_KLL(b *testing.B) {
 	e := eh.NewExpoHistogramKLL(ehK, windowSize, kllK)
 	preloadEHValue(e)
 	benchmarkEHQueryValue(b, e)
+}
+
+func TestEH_Query_Latency_Distribution(t *testing.T) {
+	if len(stream) == 0 {
+		t.Skip("CAIDA stream not loaded")
+	}
+	e := eh.NewExpoHistogramCountMin(ehK, windowSize, cmRow, cmCol)
+	preloadEHString(e)
+
+	sampleSize := 2_000
+	latencies := make([]int64, sampleSize)
+	for i := 0; i < sampleSize; i++ {
+		start := time.Now()
+		_, _ = e.QueryInterval(0, windowSize)
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	t.Log("=== EH Query Latency Distribution ===")
+	t.Logf(" P50:  %d ns", benchPercentileInt64(latencies, 0.50))
+	t.Logf(" P99:  %d ns", benchPercentileInt64(latencies, 0.99))
+	t.Logf(" P99.9:%d ns", benchPercentileInt64(latencies, 0.999))
+	t.Log("=====================================")
 }
 
 // --- Helpers for Query ---
@@ -283,6 +331,14 @@ func BenchmarkSketch_Merge_UnivMon(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		s1.Merge(s2)
 	}
+}
+
+func BenchmarkEH_Merge_Unsupported(b *testing.B) {
+	b.Skip("ExponentialHistogram does not expose a native merge operation")
+}
+
+func TestEH_Merge_Latency_Distribution(t *testing.T) {
+	t.Skip("ExponentialHistogram does not expose a native merge operation")
 }
 
 // --- Helper to fill raw sketches ---

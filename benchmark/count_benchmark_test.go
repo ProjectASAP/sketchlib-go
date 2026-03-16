@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"runtime"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,6 +58,64 @@ func BenchmarkCountSketch_Insert_Batch(b *testing.B) {
 	}
 }
 
+// BenchmarkCountSketch_Update_Speed reports sustained single-thread update speed.
+func BenchmarkCountSketch_Update_Speed(b *testing.B) {
+	hashes, n := LoadCAIDAHelper(b)
+	cs, _ := countsketch.NewCountSketch(csBenchRows, csBenchCols)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.SetBytes(8)
+
+	for i := 0; i < b.N; i++ {
+		cs.InsertWithHashAndValue(hashes[i%n], 1)
+	}
+}
+
+// TestCountSketch_Insert_Latency_P50P99 reports insertion latency distribution.
+func TestCountSketch_Insert_Latency_P50P99(t *testing.T) {
+	hashes, n := LoadCAIDAHelper(t)
+	cs, _ := countsketch.NewCountSketch(csBenchRows, csBenchCols)
+
+	sampleSize := minInt(100_000, n)
+	latencies := make([]int64, sampleSize)
+
+	for i := 0; i < sampleSize; i++ {
+		start := time.Now()
+		cs.InsertWithHash(hashes[i%n])
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+
+	p50 := percentileInt64(latencies, 0.50)
+	p99 := percentileInt64(latencies, 0.99)
+
+	t.Log("=== CountSketch Insert Latency Report ===")
+	t.Logf(" Samples:       %d", sampleSize)
+	t.Logf(" P50 (Median):  %d ns", p50)
+	t.Logf(" P99:           %d ns", p99)
+	t.Log("=========================================")
+}
+
+// BenchmarkCountSketch_Insert_Parallel measures sharded parallel ingestion.
+func BenchmarkCountSketch_Insert_Parallel(b *testing.B) {
+	hashes, n := LoadCAIDAHelper(b)
+
+	var counter uint64
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		cs, _ := countsketch.NewCountSketch(csBenchRows, csBenchCols)
+		for pb.Next() {
+			idx := atomic.AddUint64(&counter, 1) - 1
+			cs.InsertWithHash(hashes[idx%uint64(n)])
+		}
+		runtime.KeepAlive(cs)
+	})
+}
+
 // =====================================================
 // 2. QUERY THROUGHPUT & LATENCY
 // =====================================================
@@ -99,9 +158,9 @@ func TestCountSketch_Query_Latency_P99(t *testing.T) {
 
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 
-	p50 := latencies[int(float64(sampleSize)*0.50)]
-	p99 := latencies[int(float64(sampleSize)*0.99)]
-	p999 := latencies[int(float64(sampleSize)*0.999)]
+	p50 := percentileInt64(latencies, 0.50)
+	p99 := percentileInt64(latencies, 0.99)
+	p999 := percentileInt64(latencies, 0.999)
 
 	t.Log("=== CountSketch Query Latency Report ===")
 	t.Logf(" P50 (Median): %d ns", p50)
@@ -146,6 +205,7 @@ func TestCountSketch_Memory_Usage(t *testing.T) {
 
 	t.Log("=== CountSketch Memory Usage Report ===")
 	t.Logf(" Dimensions:      %d x %d", rows, cols)
+	t.Logf(" Memory Footprint:%d bytes (%.2f MB)", heapGrowth, float64(heapGrowth)/1024/1024)
 	t.Logf(" Theoretical:     %d bytes (%.2f MB)", theoretical, float64(theoretical)/1024/1024)
 	t.Logf(" Heap Growth:     %d bytes (%.2f MB)", heapGrowth, float64(heapGrowth)/1024/1024)
 	t.Logf(" Overhead Factor: %.2fx", float64(heapGrowth)/float64(theoretical))
@@ -172,6 +232,74 @@ func TestCountSketch_Memory_Usage(t *testing.T) {
 	mergeOverhead := int64(m2.HeapAlloc) - int64(m1.HeapAlloc)
 	t.Logf(" Merge Overhead:  %d bytes", mergeOverhead)
 	t.Log("=======================================")
+}
+
+func TestCountSketch_HeavyHitter_Recall(t *testing.T) {
+	hashes, n := LoadCAIDAHelper(t)
+	cs, _ := countsketch.NewCountSketch(csBenchRows, csBenchCols)
+
+	groundTruth := make(map[uint64]int)
+	for _, h := range hashes {
+		cs.InsertWithHash(h)
+		groundTruth[h]++
+	}
+
+	type kv struct {
+		Hash  uint64
+		Count int
+	}
+
+	items := make([]kv, 0, len(groundTruth))
+	for h, c := range groundTruth {
+		items = append(items, kv{Hash: h, Count: c})
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Count == items[j].Count {
+			return items[i].Hash < items[j].Hash
+		}
+		return items[i].Count > items[j].Count
+	})
+
+	topK := minInt(100, len(items))
+	if topK == 0 {
+		t.Fatal("empty CAIDA dataset")
+	}
+
+	actualTop := items[:topK]
+	estimatedTop := make([]kv, 0, len(items))
+	for _, item := range items {
+		est, _ := cs.QueryWithHash(common.QueryFrequency, item.Hash)
+		estimatedTop = append(estimatedTop, kv{Hash: item.Hash, Count: int(math.Round(est))})
+	}
+
+	sort.Slice(estimatedTop, func(i, j int) bool {
+		if estimatedTop[i].Count == estimatedTop[j].Count {
+			return estimatedTop[i].Hash < estimatedTop[j].Hash
+		}
+		return estimatedTop[i].Count > estimatedTop[j].Count
+	})
+
+	estimatedSet := make(map[uint64]struct{}, topK)
+	for _, item := range estimatedTop[:topK] {
+		estimatedSet[item.Hash] = struct{}{}
+	}
+
+	hits := 0
+	for _, item := range actualTop {
+		if _, ok := estimatedSet[item.Hash]; ok {
+			hits++
+		}
+	}
+
+	recall := float64(hits) / float64(topK)
+
+	t.Log("=== CountSketch Heavy Hitter Recall ===")
+	t.Logf(" Dataset Size:         %d", n)
+	t.Logf(" Heavy Hitter Top-K:   %d", topK)
+	t.Logf(" Recall:               %.4f", recall)
+	t.Logf(" Hits:                 %d/%d", hits, topK)
+	t.Log("======================================")
 }
 
 // =====================================================
@@ -305,4 +433,60 @@ func TestCountSketch_Merge_Accuracy(t *testing.T) {
 	} else {
 		t.Log("PASS: Merged sketch is identical to monolithic sketch.")
 	}
+}
+
+func TestCountSketch_Merge_Latency_Distribution(t *testing.T) {
+	hashes, n := LoadCAIDAHelper(t)
+	mid := n / 2
+
+	leftSrc, _ := countsketch.NewCountSketch(csBenchRows, csBenchCols)
+	rightSrc, _ := countsketch.NewCountSketch(csBenchRows, csBenchCols)
+	for i, h := range hashes {
+		if i < mid {
+			leftSrc.InsertWithHash(h)
+		} else {
+			rightSrc.InsertWithHash(h)
+		}
+	}
+
+	sampleSize := 1_000
+	latencies := make([]int64, sampleSize)
+	for i := 0; i < sampleSize; i++ {
+		left, _ := countsketch.NewCountSketch(csBenchRows, csBenchCols)
+		right, _ := countsketch.NewCountSketch(csBenchRows, csBenchCols)
+		_ = left.Merge(leftSrc)
+		_ = right.Merge(rightSrc)
+
+		start := time.Now()
+		_ = left.Merge(right)
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	t.Log("=== CountSketch Merge Latency Distribution ===")
+	t.Logf(" P50:  %d ns", benchPercentileInt64(latencies, 0.50))
+	t.Logf(" P99:  %d ns", benchPercentileInt64(latencies, 0.99))
+	t.Logf(" P99.9:%d ns", benchPercentileInt64(latencies, 0.999))
+	t.Log("==============================================")
+}
+
+func percentileInt64(values []int64, p float64) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	idx := int(math.Ceil(p*float64(len(values)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(values) {
+		idx = len(values) - 1
+	}
+	return values[idx]
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

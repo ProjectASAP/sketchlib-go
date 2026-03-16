@@ -86,6 +86,25 @@ func BenchmarkKLL_Insert_Batch(b *testing.B) {
 	}
 }
 
+func TestKLL_Insert_Latency_P50P99(t *testing.T) {
+	data := LoadCAIDAFloats(t)
+	s, _ := kll.NewKLLSketch(kllBenchK)
+
+	sampleSize := benchMinInt(100_000, len(data))
+	latencies := make([]int64, sampleSize)
+	for i := 0; i < sampleSize; i++ {
+		start := time.Now()
+		s.Insert(data[i])
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	t.Log("=== KLL Insert Latency Report ===")
+	t.Logf(" P50 (Median): %d ns", benchPercentileInt64(latencies, 0.50))
+	t.Logf(" P99:          %d ns", benchPercentileInt64(latencies, 0.99))
+	t.Log("=================================")
+}
+
 // =====================================================
 // 2. QUERY THROUGHPUT & LATENCY
 // =====================================================
@@ -384,4 +403,39 @@ func TestKLL_CAIDA_AccuracyReport(t *testing.T) {
 	if maxRankErr > 0.015 {
 		t.Errorf("Accuracy too low: Max Rank Error %.4f%% > 1.5%%", maxRankErr*100)
 	}
+}
+
+func TestKLL_Merge_Latency_Distribution(t *testing.T) {
+	data := LoadCAIDAFloats(t)
+	mid := len(data) / 2
+
+	leftSrc, _ := kll.NewKLLSketch(kllBenchK)
+	rightSrc, _ := kll.NewKLLSketch(kllBenchK)
+	for i, v := range data {
+		if i < mid {
+			leftSrc.Insert(v)
+		} else {
+			rightSrc.Insert(v)
+		}
+	}
+
+	sampleSize := 1_000
+	latencies := make([]int64, sampleSize)
+	for i := 0; i < sampleSize; i++ {
+		left, _ := kll.NewKLLSketch(kllBenchK)
+		right, _ := kll.NewKLLSketch(kllBenchK)
+		_ = left.Merge(leftSrc)
+		_ = right.Merge(rightSrc)
+
+		start := time.Now()
+		_ = left.Merge(right)
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	t.Log("=== KLL Merge Latency Distribution ===")
+	t.Logf(" P50:  %d ns", benchPercentileInt64(latencies, 0.50))
+	t.Logf(" P99:  %d ns", benchPercentileInt64(latencies, 0.99))
+	t.Logf(" P99.9:%d ns", benchPercentileInt64(latencies, 0.999))
+	t.Log("======================================")
 }

@@ -32,8 +32,7 @@ const (
 	HLLRegisterMask = HLLRegisterCount - 1
 )
 
-// HyperLogLog estimates the cardinality of a multiset.
-// This implementation follows a fast-path-first API design.
+// HyperLogLog estimates cardinality using DataFusion-style estimator.
 type HyperLogLog struct {
 	// Registers store leading-zero counts per bucket.
 	Registers *storage.Vector1D[uint8]
@@ -46,7 +45,7 @@ func NewHyperLogLog() *HyperLogLog {
 	}
 }
 
-// New mirrors the Rust constructor naming.
+// New mirrors Rust constructor naming for the DataFusion-style variant.
 func New() *HyperLogLog {
 	return NewHyperLogLog()
 }

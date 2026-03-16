@@ -91,6 +91,7 @@ const (
 	CM_COL_NO = 2048
 )
 
+// NewCountMinSketch creates the float64-counter Count-Min sketch.
 func NewCountMinSketch(row, col int) (*CountMinSketch, error) {
 	if row <= 0 || col <= 0 {
 		return nil, errors.New("row and col must be positive")
@@ -127,12 +128,12 @@ func NewCountMinSketch(row, col int) (*CountMinSketch, error) {
 	}, nil
 }
 
-// New returns a Count-Min sketch with the Rust API default dimensions.
+// New returns a float64-counter Count-Min sketch with Rust default dimensions.
 func New() (*CountMinSketch, error) {
 	return NewCountMinSketch(DefaultRowNum, DefaultColNum)
 }
 
-// WithDimensions mirrors the Rust constructor naming.
+// WithDimensions mirrors Rust constructor naming for the float64 variant.
 func WithDimensions(rows, cols int) (*CountMinSketch, error) {
 	return NewCountMinSketch(rows, cols)
 }

@@ -60,16 +60,25 @@ func loadElasticCAIDA(b *testing.B) ([]string, []*common.SketchInput, []uint64) 
 func mustNewElastic(tb testing.TB) *ElasticSketch {
 	tb.Helper()
 	es, err := New(Config{
-		BucketCount:    4096,
-		SlotsPerBucket: 8,
-		SketchSize:     1 << 20,
-		VoteFactor:     defaultVoteFactor,
-		FlushThreshold: 1024,
+		BucketCount: 4096,
 	})
 	if err != nil {
 		tb.Fatalf("new elasticsketch: %v", err)
 	}
 	return es
+}
+
+func cloneElastic(tb testing.TB, src *ElasticSketch) *ElasticSketch {
+	tb.Helper()
+	data, err := src.SerializeToBytes()
+	if err != nil {
+		tb.Fatalf("serialize elastic: %v", err)
+	}
+	dst, err := DeserializeElasticSketchFromBytes(data)
+	if err != nil {
+		tb.Fatalf("deserialize elastic: %v", err)
+	}
+	return dst
 }
 
 func BenchmarkElasticSketch_Insert_CAIDA(b *testing.B) {
@@ -139,6 +148,56 @@ func BenchmarkElasticSketch_Serialize_CAIDA(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if _, err := es.SerializeToBytes(); err != nil {
 			b.Fatalf("serialize failed: %v", err)
+		}
+	}
+}
+
+func BenchmarkElasticSketch_Query_CAIDA(b *testing.B) {
+	b.Log("[STEP 1] Loading CAIDA keys")
+	keys, _, _ := loadElasticCAIDA(b)
+	n := len(keys)
+	b.Logf("Total packets processed: %d", n)
+
+	b.Log("[STEP 2] Building and pre-filling ElasticSketch")
+	es := mustNewElastic(b)
+	for _, k := range keys {
+		es.Insert(k)
+	}
+
+	b.Log("[STEP 3] Running query benchmark")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = es.Query(keys[i%n])
+	}
+}
+
+func BenchmarkElasticSketch_Merge_CAIDA(b *testing.B) {
+	b.Log("[STEP 1] Loading CAIDA keys")
+	keys, _, _ := loadElasticCAIDA(b)
+	n := len(keys)
+	mid := n / 2
+	b.Logf("Total packets processed: %d", n)
+
+	b.Log("[STEP 2] Building split ElasticSketches")
+	leftSrc := mustNewElastic(b)
+	rightSrc := mustNewElastic(b)
+	for i, key := range keys {
+		if i < mid {
+			leftSrc.Insert(key)
+		} else {
+			rightSrc.Insert(key)
+		}
+	}
+
+	b.Log("[STEP 3] Running merge benchmark (light-part sum merge)")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		left := cloneElastic(b, leftSrc)
+		right := cloneElastic(b, rightSrc)
+		if err := left.Merge(right); err != nil {
+			b.Fatalf("merge failed: %v", err)
 		}
 	}
 }

@@ -313,6 +313,11 @@ func (us *UnivSketch) GetCardinality() float64 {
 	return us.calcGSumHeuristic(func(x float64) float64 { return 1 }, true)
 }
 
+// GetL1 returns the total signed update mass tracked by UnivMon.
+func (us *UnivSketch) GetL1() float64 {
+	return float64(us.bucket_size)
+}
+
 func (us *UnivSketch) QueryTopK(K int) *common.TopKHeap {
 	topk := common.NewTopKHeap(K)
 

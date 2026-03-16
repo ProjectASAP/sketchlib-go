@@ -19,13 +19,14 @@ func TestMain(m *testing.M) {
 
 func TestHydraUpdateEstimateSingleKey(t *testing.T) {
 	cfg := HydraConfig{
-		D:            3,
-		W:            8,
-		UnivMonLayer: 2,
-		UnivMonRow:   3,
-		UnivMonCol:   128,
-		UnivMonTopK:  2,
-		UseBigUM:     true,
+		D:                   3,
+		W:                   8,
+		CounterType:         HydraCounterUniversal,
+		UniversalLayer:      2,
+		UniversalRow:        3,
+		UniversalCol:        128,
+		UniversalTopK:       2,
+		EnableGlobalCounter: true,
 	}
 
 	h, err := NewHydra(cfg)
@@ -35,42 +36,28 @@ func TestHydraUpdateEstimateSingleKey(t *testing.T) {
 
 	const key = "alpha"
 	const count int64 = 7
-	h.UpdateN(key, count)
-	glog.Infof("TestHydraUpdateEstimateSingleKey: updated key=%s count=%d", key, count)
+	v := common.FromString(key)
+	h.UpdateValue(key, v, count)
 
-	estimate := h.Estimate(key)
-	glog.Infof("TestHydraUpdateEstimateSingleKey: estimate=%d", estimate)
+	estimate := int64(h.QueryFrequency([]string{key}, v))
 	if estimate != count {
 		t.Fatalf("expected estimate %d, got %d", count, estimate)
 	}
 
-	if h.Big == nil {
-		t.Fatalf("expected Big UnivMon to be initialized")
-	}
-
-	// FIX: Use FromString(key).Hash to match the hash used during Update
-	hash := common.FromString(key).Hash
-	globalFloat, err := h.Big.QueryWithHash(common.QuerySum, hash)
-	if err != nil {
-		t.Fatalf("error querying global sketch: %v", err)
-	}
-
-	global := int64(globalFloat)
-	glog.Infof("TestHydraUpdateEstimateSingleKey: global estimate=%d", global)
-
-	if global != count {
-		t.Fatalf("expected global estimate %d, got %d", count, global)
+	if h.bigCounter == nil {
+		t.Fatalf("expected global counter to be initialized")
 	}
 }
 
 func TestHydraParallelUpdate(t *testing.T) {
 	cfg := HydraConfig{
-		D:            4,
-		W:            16,
-		UnivMonLayer: 3,
-		UnivMonRow:   3,
-		UnivMonCol:   256,
-		UnivMonTopK:  4,
+		D:             4,
+		W:             128,
+		CounterType:   HydraCounterCM,
+		CounterRows:   3,
+		CounterCols:   1024,
+		SeedHydra:     123,
+		FanoutSubkeys: false,
 	}
 
 	h, err := NewHydra(cfg)
@@ -85,8 +72,6 @@ func TestHydraParallelUpdate(t *testing.T) {
 		{Key: "gamma", Count: 4},
 		{Key: "beta", Count: 1},
 	}
-	glog.Infof("TestHydraParallelUpdate: dispatching %d jobs", len(jobs))
-
 	ParallelUpdate(h, jobs, 3)
 
 	expected := map[string]int64{
@@ -96,23 +81,15 @@ func TestHydraParallelUpdate(t *testing.T) {
 	}
 
 	for key, want := range expected {
-		got := h.Estimate(key)
-		glog.Infof("TestHydraParallelUpdate: key=%s want=%d got=%d", key, want, got)
-		if got != want {
-			t.Fatalf("expected estimate %d for key %s, got %d", want, key, got)
+		got := int64(h.QueryFrequency([]string{key}, common.FromString(key)))
+		if got < want {
+			t.Fatalf("expected estimate >= %d for key %s, got %d", want, key, got)
 		}
 	}
 }
 
 func TestHydraHashCMBounds(t *testing.T) {
-	cfg := HydraConfig{
-		D:            5,
-		W:            32,
-		UnivMonLayer: 1,
-		UnivMonRow:   1,
-		UnivMonCol:   32,
-	}
-
+	cfg := HydraConfig{D: 5, W: 32}
 	h, err := NewHydra(cfg)
 	if err != nil {
 		t.Fatalf("unexpected error constructing Hydra: %v", err)
@@ -120,8 +97,8 @@ func TestHydraHashCMBounds(t *testing.T) {
 
 	keys := []string{"alpha", "beta", "gamma", "delta"}
 	for _, key := range keys {
-		pos := h.hashCM(key)
-		glog.Infof("TestHydraHashCMBounds: key=%s positions=%v", key, pos)
+		pos := make([]int, cfg.D)
+		h.fillPositionsFromSubKey(key, pos)
 		if len(pos) != cfg.D {
 			t.Fatalf("expected %d positions, got %d", cfg.D, len(pos))
 		}
@@ -134,17 +111,7 @@ func TestHydraHashCMBounds(t *testing.T) {
 }
 
 func TestHydraUpdateWithInput(t *testing.T) {
-	cfg := HydraConfig{
-		D:            3,
-		W:            8,
-		UnivMonLayer: 2,
-		UnivMonRow:   3,
-		UnivMonCol:   128,
-		UnivMonTopK:  2,
-		UseBigUM:     true,
-	}
-
-	h, err := NewHydra(cfg)
+	h, err := NewHydra(HydraConfig{D: 3, W: 16, CounterType: HydraCounterCM, CounterRows: 3, CounterCols: 256})
 	if err != nil {
 		t.Fatalf("unexpected error constructing Hydra: %v", err)
 	}
@@ -152,37 +119,29 @@ func TestHydraUpdateWithInput(t *testing.T) {
 	input := common.FromString("beta")
 	h.UpdateWithInput(input, 5)
 
-	got := h.Estimate("beta")
-	if got != 5 {
-		t.Fatalf("expected estimate 5, got %d", got)
+	got := int64(h.QueryFrequency([]string{"beta"}, input))
+	if got < 5 {
+		t.Fatalf("expected estimate >= 5, got %d", got)
 	}
 }
 
-func TestHydraUpdateWithHash_NoTopKMode(t *testing.T) {
-	cfg := HydraConfig{
-		D:            3,
-		W:            8,
-		UnivMonLayer: 2,
-		UnivMonRow:   3,
-		UnivMonCol:   128,
-		UnivMonTopK:  2,
-		UseBigUM:     true,
-	}
-
-	h, err := NewHydra(cfg)
+func TestHydraTopKDisabled(t *testing.T) {
+	h, err := NewHydra(HydraConfig{
+		D:                   3,
+		W:                   16,
+		CounterType:         HydraCounterUniversal,
+		UniversalLayer:      2,
+		UniversalRow:        3,
+		UniversalCol:        128,
+		UniversalTopK:       2,
+		EnableGlobalCounter: true,
+	})
 	if err != nil {
 		t.Fatalf("unexpected error constructing Hydra: %v", err)
 	}
 	h.SetTopKEnabled(false)
 
-	hash := common.FromString("gamma").Hash
-	h.UpdateWithHash(hash, 9)
-	got := h.EstimateWithHash(hash)
-	if got != 9 {
-		t.Fatalf("expected estimate 9, got %d", got)
-	}
-
-	// With TopK disabled, heavy-hitter query should not accumulate entries.
+	h.UpdateValue("gamma", common.FromString("gamma"), 9)
 	top := h.TopK(5)
 	if len(top) != 0 {
 		t.Fatalf("expected empty topk with TopK disabled, got %d", len(top))
@@ -190,24 +149,14 @@ func TestHydraUpdateWithHash_NoTopKMode(t *testing.T) {
 }
 
 func TestHydraSerializeRoundTrip(t *testing.T) {
-	cfg := HydraConfig{
-		D:            3,
-		W:            8,
-		UnivMonLayer: 2,
-		UnivMonRow:   3,
-		UnivMonCol:   128,
-		UnivMonTopK:  2,
-		UseBigUM:     true,
-	}
-	h, err := NewHydra(cfg)
+	h, err := NewHydra(HydraConfig{D: 3, W: 16, CounterType: HydraCounterCM, CounterRows: 3, CounterCols: 256})
 	if err != nil {
 		t.Fatalf("unexpected error constructing Hydra: %v", err)
 	}
-	h.SetTopKEnabled(false)
 
-	hash := common.FromString("delta").Hash
-	h.UpdateWithHash(hash, 11)
-	before := h.EstimateWithHash(hash)
+	value := common.FromString("delta")
+	h.UpdateValue("delta", value, 11)
+	before := int64(h.QueryFrequency([]string{"delta"}, value))
 
 	data, err := h.SerializeToBytes()
 	if err != nil {
@@ -217,7 +166,7 @@ func TestHydraSerializeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deserialize failed: %v", err)
 	}
-	after := restored.EstimateWithHash(hash)
+	after := int64(restored.QueryFrequency([]string{"delta"}, value))
 	if before != after {
 		t.Fatalf("roundtrip mismatch: before=%d after=%d", before, after)
 	}

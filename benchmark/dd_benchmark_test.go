@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"runtime"
 	"sort"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,6 +93,66 @@ func BenchmarkDDSketch_Add_Batch(b *testing.B) {
 	}
 }
 
+// BenchmarkDDSketch_Update_Speed reports sustained single-thread add throughput.
+func BenchmarkDDSketch_Update_Speed(b *testing.B) {
+	data := LoadCAIDAPositiveFloats(b)
+	n := len(data)
+	s := ddsketch.NewDDSketch(ddBenchAlpha)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.SetBytes(8)
+
+	for i := 0; i < b.N; i++ {
+		s.Add(data[i%n])
+	}
+}
+
+// TestDDSketch_Add_Latency_P50P99 reports insertion latency distribution.
+func TestDDSketch_Add_Latency_P50P99(t *testing.T) {
+	data := LoadCAIDAPositiveFloats(t)
+	s := ddsketch.NewDDSketch(ddBenchAlpha)
+
+	sampleSize := minInt(100_000, len(data))
+	latencies := make([]int64, sampleSize)
+
+	for i := 0; i < sampleSize; i++ {
+		start := time.Now()
+		s.Add(data[i])
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+
+	p50 := percentileInt64(latencies, 0.50)
+	p99 := percentileInt64(latencies, 0.99)
+
+	t.Log("=== DDSketch Add Latency Report ===")
+	t.Logf(" Samples:       %d", sampleSize)
+	t.Logf(" P50 (Median):  %d ns", p50)
+	t.Logf(" P99:           %d ns", p99)
+	t.Log("===================================")
+}
+
+// BenchmarkDDSketch_Add_Parallel measures sharded parallel ingestion.
+func BenchmarkDDSketch_Add_Parallel(b *testing.B) {
+	data := LoadCAIDAPositiveFloats(b)
+	n := len(data)
+
+	var counter uint64
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		s := ddsketch.NewDDSketch(ddBenchAlpha)
+		for pb.Next() {
+			idx := atomic.AddUint64(&counter, 1) - 1
+			s.Add(data[idx%uint64(n)])
+		}
+		runtime.KeepAlive(s)
+	})
+}
+
 // =====================================================
 // 2. QUERY THROUGHPUT & LATENCY
 // =====================================================
@@ -109,6 +170,23 @@ func BenchmarkDDSketch_Query_Quantile(b *testing.B) {
 
 	// Queries to cycle through
 	qs := []float64{0.5, 0.9, 0.99, 0.999}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = s.GetValueAtQuantile(qs[i%len(qs)])
+	}
+}
+
+// BenchmarkDDSketch_Query_MixedQuantiles measures mixed hot-path quantile lookups.
+func BenchmarkDDSketch_Query_MixedQuantiles(b *testing.B) {
+	data := LoadCAIDAPositiveFloats(b)
+	s := ddsketch.NewDDSketch(ddBenchAlpha)
+
+	for _, v := range data {
+		s.Add(v)
+	}
+
+	qs := []float64{0.01, 0.1, 0.5, 0.9, 0.95, 0.99, 0.999}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -138,9 +216,9 @@ func TestDDSketch_Query_Latency_P99(t *testing.T) {
 
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 
-	p50 := latencies[int(float64(sampleSize)*0.50)]
-	p99 := latencies[int(float64(sampleSize)*0.99)]
-	p999 := latencies[int(float64(sampleSize)*0.999)]
+	p50 := percentileInt64(latencies, 0.50)
+	p99 := percentileInt64(latencies, 0.99)
+	p999 := percentileInt64(latencies, 0.999)
 
 	t.Log("=== DDSketch Query Latency Report ===")
 	t.Logf(" P50 (Median): %d ns", p50)
@@ -183,6 +261,7 @@ func TestDDSketch_Memory_Usage(t *testing.T) {
 	t.Logf(" Stream Length (N): %d", N)
 	t.Logf(" Alpha (Accuracy):  %.3f", ddBenchAlpha)
 	t.Logf(" Count (N):         %d", s.GetCount())
+	t.Logf(" Memory Footprint:  %.2f KB", float64(heapGrowth)/1024)
 	t.Logf(" Heap Growth:       %.2f KB", float64(heapGrowth)/1024)
 	t.Logf(" Bytes per Item:    %.4f bytes", float64(heapGrowth)/float64(N))
 	t.Log("====================================")
@@ -192,6 +271,25 @@ func TestDDSketch_Memory_Usage(t *testing.T) {
 	if float64(heapGrowth) > 500*1024 {
 		t.Logf("Warning: Memory usage seems high (%.2f KB). Check bucket density.", float64(heapGrowth)/1024)
 	}
+
+	t.Log("Checking post-build dynamic growth...")
+	runtime.ReadMemStats(&m1)
+	for i := 0; i < minInt(1_000_000, N); i++ {
+		s.Add(data[i])
+	}
+	runtime.ReadMemStats(&m2)
+	dynamicGrowth := int64(m2.HeapAlloc) - int64(m1.HeapAlloc)
+	t.Logf(" Dynamic Growth:    %d bytes", dynamicGrowth)
+
+	s2 := ddsketch.NewDDSketch(ddBenchAlpha)
+	for i := 0; i < minInt(100_000, N); i++ {
+		s2.Add(data[N-1-i])
+	}
+	runtime.ReadMemStats(&m1)
+	_ = s.Merge(s2)
+	runtime.ReadMemStats(&m2)
+	mergeOverhead := int64(m2.HeapAlloc) - int64(m1.HeapAlloc)
+	t.Logf(" Merge Overhead:    %d bytes", mergeOverhead)
 }
 
 // =====================================================
@@ -218,6 +316,29 @@ func BenchmarkDDSketch_Merge_2(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = s1.Merge(s2)
+	}
+}
+
+func BenchmarkDDSketch_Merge_PreFilled_CAIDA(b *testing.B) {
+	data := LoadCAIDAPositiveFloats(b)
+	n := len(data)
+	mid := n / 2
+
+	left := ddsketch.NewDDSketch(ddBenchAlpha)
+	right := ddsketch.NewDDSketch(ddBenchAlpha)
+	for i, v := range data {
+		if i < mid {
+			left.Add(v)
+		} else {
+			right.Add(v)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		target := ddsketch.NewDDSketch(ddBenchAlpha)
+		_ = target.Merge(left)
+		_ = target.Merge(right)
 	}
 }
 
@@ -366,4 +487,101 @@ func TestDDSketch_CAIDA_AccuracyReport(t *testing.T) {
 	if maxRelErr > limit {
 		t.Errorf("Accuracy violation: %.4f%% > Limit %.4f%%", maxRelErr*100, limit*100)
 	}
+}
+
+func TestDDSketch_CAIDA_Accuracy_Detailed(t *testing.T) {
+	data := LoadCAIDAPositiveFloats(t)
+	if len(data) == 0 {
+		t.Fatal("empty dataset")
+	}
+
+	s := ddsketch.NewDDSketch(ddBenchAlpha)
+	for _, v := range data {
+		s.Add(v)
+	}
+
+	sorted := make([]float64, len(data))
+	copy(sorted, data)
+	sort.Float64s(sorted)
+
+	quantiles := []float64{0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 0.999}
+	var totalRelErr float64
+	maxRelErr := 0.0
+
+	t.Log("=== DDSketch Detailed Quantile Accuracy ===")
+	t.Logf(" Samples: %d", len(sorted))
+	t.Logf(" Alpha:   %.4f", ddBenchAlpha)
+
+	for _, q := range quantiles {
+		idx := int(math.Ceil(q*float64(len(sorted)))) - 1
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(sorted) {
+			idx = len(sorted) - 1
+		}
+
+		trueVal := sorted[idx]
+		estVal, ok := s.GetValueAtQuantile(q)
+		if !ok {
+			t.Fatalf("quantile query failed at %.3f", q)
+		}
+
+		relErr := 0.0
+		if trueVal != 0 {
+			relErr = math.Abs(estVal-trueVal) / trueVal
+		}
+
+		totalRelErr += relErr
+		if relErr > maxRelErr {
+			maxRelErr = relErr
+		}
+
+		t.Logf(" q=%-5.3f | True=%10.2f | Est=%10.2f | RelErr=%7.4f%%", q, trueVal, estVal, relErr*100)
+	}
+
+	avgRelErr := totalRelErr / float64(len(quantiles))
+	t.Logf(" Average Relative Error: %.4f%%", avgRelErr*100)
+	t.Logf(" Max Relative Error:     %.4f%%", maxRelErr*100)
+	t.Log("==========================================")
+
+	limit := ddBenchAlpha + 1e-5
+	if maxRelErr > limit {
+		t.Errorf("accuracy violation: %.4f%% > limit %.4f%%", maxRelErr*100, limit*100)
+	}
+}
+
+func TestDDSketch_Merge_Latency_Distribution(t *testing.T) {
+	data := LoadCAIDAPositiveFloats(t)
+	mid := len(data) / 2
+
+	leftSrc := ddsketch.NewDDSketch(ddBenchAlpha)
+	rightSrc := ddsketch.NewDDSketch(ddBenchAlpha)
+	for i, v := range data {
+		if i < mid {
+			leftSrc.Add(v)
+		} else {
+			rightSrc.Add(v)
+		}
+	}
+
+	sampleSize := 1_000
+	latencies := make([]int64, sampleSize)
+	for i := 0; i < sampleSize; i++ {
+		left := ddsketch.NewDDSketch(ddBenchAlpha)
+		right := ddsketch.NewDDSketch(ddBenchAlpha)
+		_ = left.Merge(leftSrc)
+		_ = right.Merge(rightSrc)
+
+		start := time.Now()
+		_ = left.Merge(right)
+		latencies[i] = time.Since(start).Nanoseconds()
+	}
+
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	t.Log("=== DDSketch Merge Latency Distribution ===")
+	t.Logf(" P50:  %d ns", benchPercentileInt64(latencies, 0.50))
+	t.Logf(" P99:  %d ns", benchPercentileInt64(latencies, 0.99))
+	t.Logf(" P99.9:%d ns", benchPercentileInt64(latencies, 0.999))
+	t.Log("===========================================")
 }
