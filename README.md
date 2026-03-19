@@ -69,7 +69,7 @@ hash := input.Hash // computed once, reused everywhere
 
 Hashing rules:
 
-* `Hash64` based on `xxhash`
+* `Hash64` based on seeded `xxh3`
 * No seeded hashing in hot paths
 * **Hash computation is strictly forbidden inside sketches**
 

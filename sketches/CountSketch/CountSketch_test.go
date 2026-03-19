@@ -375,6 +375,40 @@ func TestCountSketchSerializeRoundTrip(t *testing.T) {
 		t.Fatalf("new countsketch: %v", err)
 	}
 
+	cs.UpdateString("alpha", 3)
+	cs.UpdateString("beta", -2)
+	cs.InsertWithHashAndValue(common.FromString("gamma").Hash, 4)
+
+	data, err := cs.SerializeToBytes()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	out, err := DeserializeCountSketchFromBytes(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+
+	if out.Rows != cs.Rows || out.Cols != cs.Cols {
+		t.Fatalf("metadata mismatch after round-trip: got rows=%d cols=%d want rows=%d cols=%d", out.Rows, out.Cols, cs.Rows, cs.Cols)
+	}
+
+	for r := 0; r < cs.Rows; r++ {
+		if out.L2[r] != cs.L2[r] {
+			t.Fatalf("L2 mismatch at row %d: got=%v want=%v", r, out.L2[r], cs.L2[r])
+		}
+		for c := 0; c < cs.Cols; c++ {
+			if out.Count[r][c] != cs.Count[r][c] {
+				t.Fatalf("count mismatch at [%d][%d]: got=%v want=%v", r, c, out.Count[r][c], cs.Count[r][c])
+			}
+		}
+	}
+
+	if got, want := out.EstimateStringCount("alpha"), cs.EstimateStringCount("alpha"); got != want {
+		t.Fatalf("estimate mismatch after round-trip for alpha: got=%d want=%d", got, want)
+	}
+}
+
 type csUpdate struct {
 	hash  uint64
 	delta float64
