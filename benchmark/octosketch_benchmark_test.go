@@ -9,7 +9,7 @@ package benchmark
 //	Section 1 — Insert Throughput     (Standalone vs OctoSketch, 1-worker and 4-worker)
 //	Section 2 — Query Throughput      (Standalone vs Aggregator.Query)
 //	Section 3 — Update Throughput     (Weighted standalone vs OctoSketch pipeline)
-//	Section 4 — Comparison Benchmarks
+//	Section 4 — Accuracy Report       (Standalone vs OctoSketch estimate quality after full drain)
 //
 // OctoSketch pipeline shutdown sequence (from aggregator.go §5):
 //  1. Close each worker input channel.
@@ -20,6 +20,8 @@ package benchmark
 
 import (
 	"fmt"
+	"math"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -588,5 +590,382 @@ func BenchmarkOcto_Update_DDSketch(b *testing.B) {
 				return octosketch.NewDDSketchSystem(octoDDAlpha, octoTau, numW, octoDeltaBuf)
 			})
 		})
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Section 4 — Accuracy Report
+//
+// Each test builds a standalone sketch and an OctoSketch pipeline that both
+// consume the full CAIDA stream, then compares their estimates against exact
+// ground truth.  Both paths see identical inputs; the only structural
+// difference is the τ-buffering in OctoSketch workers.
+//
+// Metrics reported per test:
+//   Standalone error  — relative error of the baseline sketch vs ground truth
+//   OctoSketch error  — relative error of the aggregator vs ground truth
+//   Divergence        — |octo_est − baseline_est| / max(baseline_est, 1)
+//
+// After a full pipeline drain (all workers flushed, aggregator drained) the
+// OctoSketch convergence guarantee states the aggregator is equivalent to a
+// single-machine sketch.  Divergence should therefore be at or near zero.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const octoAccuracyWorkers = 4
+
+// octoRelErr returns |est − truth| / max(truth, 1).
+func octoRelErr(est, truth float64) float64 {
+	d := est - truth
+	if d < 0 {
+		d = -d
+	}
+	denom := truth
+	if denom < 1 {
+		denom = 1
+	}
+	return d / denom
+}
+
+// octoFreqEntry pairs a representative *SketchInput with its exact stream count.
+type octoFreqEntry struct {
+	inp   *common.SketchInput
+	count int
+}
+
+// octoHeavyHitters builds a frequency map from inputs and returns the top-n
+// entries sorted by descending count.
+func octoHeavyHitters(inputs []*common.SketchInput, n int) []*octoFreqEntry {
+	m := make(map[uint64]*octoFreqEntry, len(inputs))
+	for _, inp := range inputs {
+		if e, ok := m[inp.Hash]; ok {
+			e.count++
+		} else {
+			m[inp.Hash] = &octoFreqEntry{inp: inp, count: 1}
+		}
+	}
+	all := make([]*octoFreqEntry, 0, len(m))
+	for _, e := range m {
+		all = append(all, e)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].count > all[j].count })
+	if n > len(all) {
+		n = len(all)
+	}
+	return all[:n]
+}
+
+// ─── CountMin ────────────────────────────────────────────────────────────────
+
+// TestOctoAccuracy_CountMin compares frequency estimates from the standalone
+// CountMinSketch against the OctoSketch aggregator over the top-200 heavy
+// hitters in the CAIDA stream.
+func TestOctoAccuracy_CountMin(t *testing.T) {
+	inputs := loadCAIDAInputs(t)
+
+	probes := octoHeavyHitters(inputs, 200)
+
+	// Standalone baseline: insert every item directly.
+	baseline, _ := countminsketch.NewCountMinSketch(octoCMRows, octoCMCols)
+	for _, inp := range inputs {
+		baseline.Insert(inp)
+	}
+
+	// OctoSketch pipeline: drain all items then query the aggregator.
+	agg, workers, inputChans, deltaCh, err := octosketch.NewCountMinSystem(
+		octoCMRows, octoCMCols, octoTau, octoAccuracyWorkers, octoDeltaBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg.Run()
+	for _, w := range workers {
+		w.Run()
+	}
+	drainOctoFixed(t, agg, workers, inputChans, deltaCh, inputs)
+
+	// Compute ARE / max-RE over the probe set.
+	var baseARE, octoARE, divARE float64
+	var baseMaxRE, octoMaxRE, divMaxRE float64
+	for _, e := range probes {
+		truth := float64(e.count)
+		bEst := baseline.Estimate(e.inp)
+		oEst := agg.Query(e.inp)
+
+		bRE := octoRelErr(bEst, truth)
+		oRE := octoRelErr(oEst, truth)
+		dRE := octoRelErr(oEst, bEst)
+
+		baseARE += bRE
+		octoARE += oRE
+		divARE += dRE
+		if bRE > baseMaxRE {
+			baseMaxRE = bRE
+		}
+		if oRE > octoMaxRE {
+			octoMaxRE = oRE
+		}
+		if dRE > divMaxRE {
+			divMaxRE = dRE
+		}
+	}
+	n := float64(len(probes))
+	baseARE /= n
+	octoARE /= n
+	divARE /= n
+
+	t.Log("══════════════════════════════════════════════════════════")
+	t.Logf(" OctoSketch Accuracy — CountMin  (%d workers, τ=%.0f)", octoAccuracyWorkers, octoTau)
+	t.Logf(" Stream: %d items  |  Probes: top-%d heavy hitters", len(inputs), len(probes))
+	t.Logf(" Rows=%-2d  Cols=%-6d", octoCMRows, octoCMCols)
+	t.Log("──────────────────────────────────────────────────────────")
+	t.Logf(" Standalone  ARE: %6.3f%%   max-RE: %6.3f%%", baseARE*100, baseMaxRE*100)
+	t.Logf(" OctoSketch  ARE: %6.3f%%   max-RE: %6.3f%%", octoARE*100, octoMaxRE*100)
+	t.Logf(" Divergence  ARE: %6.3f%%   max-RE: %6.3f%%", divARE*100, divMaxRE*100)
+	t.Log("══════════════════════════════════════════════════════════")
+
+	// After a full drain divergence must not exceed 2× the standalone sketch's
+	// own error, plus a small absolute tolerance for very low-count keys.
+	limit := 2*baseARE + 0.01
+	if divARE > limit {
+		t.Errorf("convergence failure: divergence ARE %.4f%% > 2×standalone ARE %.4f%%",
+			divARE*100, baseARE*100)
+	}
+}
+
+// ─── CountSketch ─────────────────────────────────────────────────────────────
+
+// TestOctoAccuracy_CountSketch mirrors TestOctoAccuracy_CountMin for the signed
+// CountSketch estimator.
+func TestOctoAccuracy_CountSketch(t *testing.T) {
+	inputs := loadCAIDAInputs(t)
+
+	probes := octoHeavyHitters(inputs, 200)
+
+	baseline, _ := countsketch.NewCountSketch(octoCSRows, octoCSCols)
+	for _, inp := range inputs {
+		baseline.Insert(inp)
+	}
+
+	agg, workers, inputChans, deltaCh, err := octosketch.NewCountSketchSystem(
+		octoCSRows, octoCSCols, octoTau, octoAccuracyWorkers, octoDeltaBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg.Run()
+	for _, w := range workers {
+		w.Run()
+	}
+	drainOctoFixed(t, agg, workers, inputChans, deltaCh, inputs)
+
+	var baseARE, octoARE, divARE float64
+	var baseMaxRE, octoMaxRE, divMaxRE float64
+	for _, e := range probes {
+		truth := float64(e.count)
+		bEst := math.Abs(baseline.Estimate(e.inp))
+		oEst := math.Abs(agg.Query(e.inp))
+
+		bRE := octoRelErr(bEst, truth)
+		oRE := octoRelErr(oEst, truth)
+		dRE := octoRelErr(oEst, bEst)
+
+		baseARE += bRE
+		octoARE += oRE
+		divARE += dRE
+		if bRE > baseMaxRE {
+			baseMaxRE = bRE
+		}
+		if oRE > octoMaxRE {
+			octoMaxRE = oRE
+		}
+		if dRE > divMaxRE {
+			divMaxRE = dRE
+		}
+	}
+	n := float64(len(probes))
+	baseARE /= n
+	octoARE /= n
+	divARE /= n
+
+	t.Log("══════════════════════════════════════════════════════════")
+	t.Logf(" OctoSketch Accuracy — CountSketch  (%d workers, τ=%.0f)", octoAccuracyWorkers, octoTau)
+	t.Logf(" Stream: %d items  |  Probes: top-%d heavy hitters", len(inputs), len(probes))
+	t.Logf(" Rows=%-2d  Cols=%-6d", octoCSRows, octoCSCols)
+	t.Log("──────────────────────────────────────────────────────────")
+	t.Logf(" Standalone  ARE: %6.3f%%   max-RE: %6.3f%%", baseARE*100, baseMaxRE*100)
+	t.Logf(" OctoSketch  ARE: %6.3f%%   max-RE: %6.3f%%", octoARE*100, octoMaxRE*100)
+	t.Logf(" Divergence  ARE: %6.3f%%   max-RE: %6.3f%%", divARE*100, divMaxRE*100)
+	t.Log("══════════════════════════════════════════════════════════")
+
+	limit := 2*baseARE + 0.01
+	if divARE > limit {
+		t.Errorf("convergence failure: divergence ARE %.4f%% > 2×standalone ARE %.4f%%",
+			divARE*100, baseARE*100)
+	}
+}
+
+// ─── HLL ─────────────────────────────────────────────────────────────────────
+
+// TestOctoAccuracy_HLL compares the HyperLogLog cardinality estimate from the
+// standalone sketch and the OctoSketch aggregator against the exact cardinality
+// counted from the CAIDA stream.
+func TestOctoAccuracy_HLL(t *testing.T) {
+	inputs := loadCAIDAInputs(t)
+
+	// Exact cardinality via a set of unique input hashes.
+	unique := make(map[uint64]struct{}, len(inputs))
+	for _, inp := range inputs {
+		unique[inp.Hash] = struct{}{}
+	}
+	trueCard := float64(len(unique))
+
+	// Standalone baseline.
+	baseline := hll.NewHyperLogLog()
+	for _, inp := range inputs {
+		baseline.Insert(inp)
+	}
+	baseEst := float64(baseline.EstimateCardinality())
+
+	// OctoSketch pipeline.
+	agg, workers, inputChans, deltaCh, err := octosketch.NewHLLSystem(
+		octoAccuracyWorkers, octoDeltaBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg.Run()
+	for _, w := range workers {
+		w.Run()
+	}
+	drainOctoFixed(t, agg, workers, inputChans, deltaCh, inputs)
+	octoEst := agg.Query(inputs[0]) // input ignored by HLL.Estimate
+
+	baseRE := octoRelErr(baseEst, trueCard)
+	octoRE := octoRelErr(octoEst, trueCard)
+	divRE := octoRelErr(octoEst, baseEst)
+
+	t.Log("══════════════════════════════════════════════════════════")
+	t.Logf(" OctoSketch Accuracy — HLL  (%d workers)", octoAccuracyWorkers)
+	t.Logf(" Stream: %d items  |  Precision: %d", len(inputs), hll.HLLPrecision)
+	t.Log("──────────────────────────────────────────────────────────")
+	t.Logf(" True cardinality:    %d", int(trueCard))
+	t.Logf(" Standalone estimate: %d   RE: %.4f%%", int(baseEst), baseRE*100)
+	t.Logf(" OctoSketch estimate: %d   RE: %.4f%%", int(octoEst), octoRE*100)
+	t.Logf(" Divergence (octo vs standalone):   %.4f%%", divRE*100)
+	t.Log("══════════════════════════════════════════════════════════")
+
+	// HLL theoretical standard error at precision 14 is ~0.81%.
+	// Both sketches must stay within 3σ (~2.5%) and OctoSketch must not add
+	// meaningful error beyond the standalone.
+	if baseRE > 0.025 {
+		t.Errorf("standalone HLL error %.4f%% exceeds 2.5%% threshold", baseRE*100)
+	}
+	if octoRE > 0.025 {
+		t.Errorf("OctoSketch HLL error %.4f%% exceeds 2.5%% threshold", octoRE*100)
+	}
+	limit := 2*baseRE + 0.005
+	if divRE > limit {
+		t.Errorf("convergence failure: divergence %.4f%% > 2×standalone error %.4f%%",
+			divRE*100, baseRE*100)
+	}
+}
+
+// ─── DDSketch ─────────────────────────────────────────────────────────────────
+
+// TestOctoAccuracy_DDSketch compares quantile estimates from the standalone
+// DDSketch and the OctoSketch aggregator against exact quantiles computed from
+// the sorted CAIDA float64 values.
+func TestOctoAccuracy_DDSketch(t *testing.T) {
+	inputs, values := loadCAIDAF64Inputs(t)
+
+	// Exact quantile lookup from sorted values.
+	sorted := make([]float64, len(values))
+	copy(sorted, values)
+	sort.Float64s(sorted)
+	exactQuantile := func(q float64) float64 {
+		idx := int(math.Ceil(q*float64(len(sorted)))) - 1
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(sorted) {
+			idx = len(sorted) - 1
+		}
+		return sorted[idx]
+	}
+
+	// Standalone baseline.
+	baseline := ddsketch.NewDDSketch(octoDDAlpha)
+	for _, v := range values {
+		baseline.Add(v)
+	}
+
+	// OctoSketch pipeline.
+	agg, workers, inputChans, deltaCh, err := octosketch.NewDDSketchSystem(
+		octoDDAlpha, octoTau, octoAccuracyWorkers, octoDeltaBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agg.Run()
+	for _, w := range workers {
+		w.Run()
+	}
+	drainOctoFixed(t, agg, workers, inputChans, deltaCh, inputs)
+
+	type quantileRow struct {
+		q        float64
+		exact    float64
+		baseEst  float64
+		octoEst  float64
+		baseRE   float64
+		octoRE   float64
+		divRE    float64
+	}
+
+	quantiles := []float64{0.50, 0.75, 0.90, 0.99}
+	rows := make([]quantileRow, len(quantiles))
+	for i, q := range quantiles {
+		exact := exactQuantile(q)
+		bEst, _ := baseline.GetValueAtQuantile(q)
+		oEst := agg.Query(common.FromF64(q))
+
+		rows[i] = quantileRow{
+			q:       q,
+			exact:   exact,
+			baseEst: bEst,
+			octoEst: oEst,
+			baseRE:  octoRelErr(bEst, exact),
+			octoRE:  octoRelErr(oEst, exact),
+			divRE:   octoRelErr(oEst, bEst),
+		}
+	}
+
+	t.Log("══════════════════════════════════════════════════════════════════════")
+	t.Logf(" OctoSketch Accuracy — DDSketch  (%d workers, τ=%.0f, α=%.2f)",
+		octoAccuracyWorkers, octoTau, octoDDAlpha)
+	t.Logf(" Stream: %d items", len(inputs))
+	t.Log("──────────────────────────────────────────────────────────────────────")
+	t.Logf(" %-6s  %-10s  %-10s  %-10s  %-8s  %-8s  %-8s",
+		"Pctile", "Exact", "Standalone", "OctoSketch", "Base-RE%", "Octo-RE%", "Div%")
+	t.Log("──────────────────────────────────────────────────────────────────────")
+	for _, r := range rows {
+		t.Logf(" p%-5.0f  %-10.3f  %-10.3f  %-10.3f  %6.3f%%   %6.3f%%   %6.3f%%",
+			r.q*100, r.exact, r.baseEst, r.octoEst,
+			r.baseRE*100, r.octoRE*100, r.divRE*100)
+	}
+	t.Log("══════════════════════════════════════════════════════════════════════")
+
+	// DDSketch relative-error guarantee is α=1% per bucket. Both sketches must
+	// stay within that bound; divergence must not exceed 2× standalone error.
+	for _, r := range rows {
+		if r.baseRE > octoDDAlpha*2 {
+			t.Errorf("p%.0f standalone RE %.4f%% exceeds 2×α bound",
+				r.q*100, r.baseRE*100)
+		}
+		if r.octoRE > octoDDAlpha*2 {
+			t.Errorf("p%.0f OctoSketch RE %.4f%% exceeds 2×α bound",
+				r.q*100, r.octoRE*100)
+		}
+		limit := 2*r.baseRE + 0.01
+		if r.divRE > limit {
+			t.Errorf("p%.0f convergence failure: divergence %.4f%% > 2×standalone RE %.4f%%",
+				r.q*100, r.divRE*100, r.baseRE*100)
+		}
 	}
 }
