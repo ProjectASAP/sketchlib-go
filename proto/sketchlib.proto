@@ -502,3 +502,114 @@ message HydraCell {
     UnivMonState     univmon      = 5;
   }
 }
+
+// ============================================================================
+// Delta Transmission — Sparse Snapshots
+// ============================================================================
+// These messages carry only the cells / registers that changed since the last
+// transmitted snapshot. They are wrapped in SketchDeltaEnvelope and carried in
+// the sketch_payload bytes field on OTel data points, distinguished from
+// full-sketch payloads by the encoding="proto_delta" attribute.
+//
+// Receiver semantics:
+//   CountMin / CountSketch:  agg[r][c] += cell.d_*
+//   HLL:                     agg[i]    = max(agg[i], update.value)
+//   DDSketch buckets:        agg[b]   += bucket.d_count
+//   DDSketch min/max:        lossless  — only transmitted when changed
+
+// SketchDeltaEnvelope is the top-level wire container for delta payloads.
+message SketchDeltaEnvelope {
+  // Identifies which partition this delta belongs to.
+  string partition_key   = 1;
+
+  // Unix milliseconds of the current window start. 0 when no window (Mode 1).
+  int64  window_start_ms = 2;
+
+  // When true, the receiver should finalize and reset its accumulator for
+  // this (partition_key, window_start_ms) after applying this delta.
+  bool   is_window_close = 3;
+
+  oneof delta {
+    CountMinDelta    count_min    = 10;
+    CountSketchDelta count_sketch = 11;
+    HLLDelta         hll          = 12;
+    DDSketchDelta    ddsketch     = 13;
+  }
+}
+
+// ── CountMin delta ────────────────────────────────────────────────────────────
+
+// CountMinDelta carries only the cells where at least one of the three counter
+// arrays (Count, Sum, Sum2) changed by at least the configured threshold T.
+// L1 and L2 row vectors are always transmitted in full (one float64 per row).
+message CountMinDelta {
+  uint32                rows  = 1;
+  uint32                cols  = 2;
+  repeated CountMinCell cells = 3;
+  repeated double       l1    = 4 [packed = true];
+  repeated double       l2    = 5 [packed = true];
+}
+
+// CountMinCell encodes deltas for all three counter arrays at a single (row, col).
+message CountMinCell {
+  uint32 row     = 1;
+  uint32 col     = 2;
+  double d_count = 3;
+  double d_sum   = 4;
+  double d_sum2  = 5;
+}
+
+// ── CountSketch delta ─────────────────────────────────────────────────────────
+
+// CountSketchDelta for the signed Count array. TopK is non-linear (cannot be
+// subtracted), so it is always transmitted in full using the existing TopKState.
+message CountSketchDelta {
+  uint32                  rows  = 1;
+  uint32                  cols  = 2;
+  repeated CountSketchCell cells = 3;
+  repeated double         l2    = 4 [packed = true];
+  TopKState               topk  = 5;
+}
+
+// CountSketchCell encodes the signed delta for a single (row, col).
+message CountSketchCell {
+  uint32 row     = 1;
+  uint32 col     = 2;
+  double d_count = 3;
+}
+
+// ── HLL delta ─────────────────────────────────────────────────────────────────
+
+// HLLDelta carries every register that increased since the last snapshot.
+// No threshold is applied — any missed register update causes permanent
+// underestimation (max semantics, not addition).
+message HLLDelta {
+  repeated HLLRegisterUpdate updates = 1;
+}
+
+// HLLRegisterUpdate records a register whose value increased.
+message HLLRegisterUpdate {
+  uint32 index = 1;  // register index, 0 – 2^precision-1
+  uint32 value = 2;  // new value (only sent when > snapshot value)
+}
+
+// ── DDSketch delta ────────────────────────────────────────────────────────────
+
+// DDSketchDelta carries only the buckets that changed above threshold T.
+// count/sum are additive deltas. min/max are lossless scalars transmitted
+// only when they changed (min can only decrease, max can only increase).
+message DDSketchDelta {
+  repeated DDSketchBucketDelta buckets     = 1;
+  int64   d_count     = 2;
+  double  d_sum       = 3;
+  double  new_min     = 4;
+  double  new_max     = 5;
+  bool    min_changed = 6;
+  bool    max_changed = 7;
+}
+
+// DDSketchBucketDelta is the delta for one log-scale bucket.
+message DDSketchBucketDelta {
+  sint32 index   = 1;  // signed bucket index (negative for values < 1)
+  uint64 d_count = 2;  // Δcount ≥ threshold T
+}
