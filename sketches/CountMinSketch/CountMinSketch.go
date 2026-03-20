@@ -436,6 +436,96 @@ func (s *CountMinSketch) Merge(other common.Sketch) error {
 	return nil
 }
 
+// ── OctoSketch cell-level accessors ──────────────────────────────────────────
+//
+// These thin methods expose per-cell operations on the internal countStore so
+// that the CountMinOcto adapter (sketch_framework/OctoSketch) can delegate all
+// storage and hash logic here instead of duplicating it.
+//
+// They operate only on countStore; L1/L2 norms and sumStore/sum2Store are
+// whole-stream statistics that are irrelevant to the per-cell OctoSketch loop.
+
+// ColForRow derives the column index for row r from input's pre-computed hash,
+// using the same bit-slicing as InsertWithHash. Pure: same input → same col.
+func (s *CountMinSketch) ColForRow(input *common.SketchInput, row int) int {
+	return s.deriveIndex(input.Hash, row)
+}
+
+// GetCell returns the current count at countStore[row][col].
+func (s *CountMinSketch) GetCell(row, col int) float64 {
+	return s.countStore.RowSlice(row)[col]
+}
+
+// IncrCell increments countStore[row][col] by delta and returns the new value.
+// L1/L2 norms are NOT updated; use Insert for whole-stream accounting.
+func (s *CountMinSketch) IncrCell(row, col int, delta float64) float64 {
+	row_ := s.countStore.RowSlice(row)
+	row_[col] += delta
+	return row_[col]
+}
+
+// SetCell writes countStore[row][col] = val directly.
+func (s *CountMinSketch) SetCell(row, col int, val float64) {
+	s.countStore.RowSlice(row)[col] = val
+}
+
+// ForEachNonZeroCell calls fn(row, col, val) for every cell where val > 0.
+// Iteration order is unspecified. Used by CountMinOcto.Flush.
+func (s *CountMinSketch) ForEachNonZeroCell(fn func(row, col int, val float64)) {
+	for r := range s.Rows {
+		rowSlice := s.countStore.RowSlice(r)
+		for c := range s.Cols {
+			if v := rowSlice[c]; v > 0 {
+				fn(r, c, v)
+			}
+		}
+	}
+}
+
+// ── CellSketch interface ───────────────────────────────────────────────────────
+
+// NumRows returns the depth of the sketch matrix.
+func (s *CountMinSketch) NumRows() int { return s.Rows }
+
+// UpdateCell increments count[row][col] by 1. Always returns changed=true.
+func (s *CountMinSketch) UpdateCell(row, col int, _ *common.SketchInput) (float64, bool) {
+	return s.IncrCell(row, col, 1), true
+}
+
+// ShouldEmit returns true when newVal >= τ (CMS no-underestimate threshold).
+func (s *CountMinSketch) ShouldEmit(newVal, tau float64) bool { return newVal >= tau }
+
+// BuildDelta constructs the DeltaUpdate to emit for (row, col).
+func (s *CountMinSketch) BuildDelta(row, col int, input *common.SketchInput) common.DeltaUpdate {
+	return common.DeltaUpdate{
+		Row:   row,
+		Col:   col,
+		Value: s.GetCell(row, col),
+		Key:   input.Bytes,
+	}
+}
+
+// ResetCell zeros count[row][col] after a delta has been emitted.
+func (s *CountMinSketch) ResetCell(row, col int) { s.SetCell(row, col, 0) }
+
+// MergeDelta adds delta.Value to the global counter at (delta.Row, delta.Col).
+// Out-of-bounds indices are silently dropped.
+func (s *CountMinSketch) MergeDelta(delta common.DeltaUpdate) {
+	if delta.Row < 0 || delta.Row >= s.Rows ||
+		delta.Col < 0 || delta.Col >= s.Cols {
+		return
+	}
+	s.IncrCell(delta.Row, delta.Col, delta.Value)
+}
+
+// Flush emits every non-zero cell and resets it to zero.
+func (s *CountMinSketch) Flush(emit func(common.DeltaUpdate)) {
+	s.ForEachNonZeroCell(func(row, col int, val float64) {
+		emit(common.DeltaUpdate{Row: row, Col: col, Value: val})
+		s.SetCell(row, col, 0)
+	})
+}
+
 // SerializeToBytes serializes CountMinSketch into bytes.
 func (s *CountMinSketch) SerializeToBytes() ([]byte, error) {
 	return common.EncodeToBytes(s)

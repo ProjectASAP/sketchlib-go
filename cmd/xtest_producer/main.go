@@ -112,7 +112,7 @@ func main() {
 	for i := 0; i < 50_000; i++ {
 		h.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("hll:%d", i))))
 	}
-	fmt.Printf("[HLL] Step 3/3 — cardinality≈%d (expect ~50000)\n", h.Estimate())
+	fmt.Printf("[HLL] Step 3/3 — cardinality≈%d (expect ~50000)\n", h.EstimateCardinality())
 	writeEnvelope(outDir, "hll.pb", must(h.SerializePortable()))
 
 	// -----------------------------------------------------------------------

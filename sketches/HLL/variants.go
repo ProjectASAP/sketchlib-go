@@ -67,7 +67,7 @@ func (h *HyperLogLogVariant) Estimate() int {
 		return h.estimateRegular()
 	}
 	base := &HyperLogLog{Registers: h.Registers}
-	return base.Estimate()
+	return base.EstimateCardinality()
 }
 
 func (h *HyperLogLogVariant) estimateRegular() int {

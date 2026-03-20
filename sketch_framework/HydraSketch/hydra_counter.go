@@ -259,7 +259,7 @@ func (c *hllCounter) Query(q HydraQuery) (float64, error) {
 	if q.Kind != HydraQueryCardinality {
 		return 0, errors.New("hll only supports cardinality query")
 	}
-	return float64(c.s.Estimate()), nil
+	return float64(c.s.EstimateCardinality()), nil
 }
 func (c *hllCounter) Merge(other HydraCounter) error {
 	o, ok := other.(*hllCounter)
