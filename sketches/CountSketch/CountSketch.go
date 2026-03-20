@@ -448,6 +448,39 @@ func (s *CountSketch) UpdateCell(row, col int, input *common.SketchInput) (float
 	return s.IncrCell(row, col, sign), true
 }
 
+// ProcessInput is an optimized OctoSketch worker fast path that derives the
+// packed row hashes once and updates/emits without repeated sign extraction.
+func (s *CountSketch) ProcessInput(input *common.SketchInput, tau float64, emit func(common.DeltaUpdate)) {
+	if input == nil {
+		return
+	}
+	hashed := storage.BuildMatrixHash(input.Hash, s.Rows, s.Cols)
+	count := s.Count
+	if hashed.Mode() == storage.MatrixHashPacked64 {
+		packed := hashed.Lower64()
+		for row := 0; row < s.Rows; row++ {
+			col, sign := s.fastPacked64PosAndSign(packed, row)
+			newVal := count[row][col] + sign
+			count[row][col] = newVal
+			if (newVal >= tau) || (newVal <= -tau) {
+				emit(common.DeltaUpdate{Row: row, Col: col, Value: newVal})
+				count[row][col] = 0
+			}
+		}
+		return
+	}
+
+	for row := 0; row < s.Rows; row++ {
+		col, sign := s.derivePosAndSignFromHashed(hashed, row)
+		newVal := count[row][col] + sign
+		count[row][col] = newVal
+		if (newVal >= tau) || (newVal <= -tau) {
+			emit(common.DeltaUpdate{Row: row, Col: col, Value: newVal})
+			count[row][col] = 0
+		}
+	}
+}
+
 // ShouldEmit returns true when |newVal| >= τ.
 func (s *CountSketch) ShouldEmit(newVal, tau float64) bool {
 	if newVal < 0 {

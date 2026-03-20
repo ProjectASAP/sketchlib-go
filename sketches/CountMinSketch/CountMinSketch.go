@@ -492,6 +492,29 @@ func (s *CountMinSketch) UpdateCell(row, col int, _ *common.SketchInput) (float6
 	return s.IncrCell(row, col, 1), true
 }
 
+// ProcessInput is an optimized OctoSketch worker fast path that slices all row
+// indices from the precomputed hash once and emits deltas without interface churn.
+func (s *CountMinSketch) ProcessInput(input *common.SketchInput, tau float64, emit func(common.DeltaUpdate)) {
+	if input == nil {
+		return
+	}
+	hash := input.Hash
+	shift := uint(0)
+	for row := 0; row < s.Rows; row++ {
+		col := int((hash >> shift) & s.mask)
+		if col >= s.Cols {
+			col %= s.Cols
+		}
+		shift += s.bitsPerRow
+
+		newVal := s.IncrCell(row, col, 1)
+		if newVal >= tau {
+			emit(common.DeltaUpdate{Row: row, Col: col, Value: newVal})
+			s.SetCell(row, col, 0)
+		}
+	}
+}
+
 // ShouldEmit returns true when newVal >= τ (CMS no-underestimate threshold).
 func (s *CountMinSketch) ShouldEmit(newVal, tau float64) bool { return newVal >= tau }
 

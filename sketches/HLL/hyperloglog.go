@@ -91,7 +91,7 @@ func (h *HyperLogLog) InsertInput(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
-	h.InsertWithHash(common.HashIt(common.CanonicalHashSeed, input.Bytes))
+	h.InsertWithHash(input.CanonicalHash)
 }
 
 func (h *HyperLogLog) InsertMany(inputs []*common.SketchInput) {
@@ -267,7 +267,22 @@ func (h *HyperLogLog) IndexAndLZ(hash uint64) (index int, lz uint8) {
 // IndexAndLZ. This encapsulates the "which seed does HLL use" decision inside
 // the sketch package, keeping it out of the adapter.
 func (h *HyperLogLog) IndexAndLZFromInput(input *common.SketchInput) (index int, lz uint8) {
-	return h.IndexAndLZ(common.HashIt(common.CanonicalHashSeed, input.Bytes))
+	if input == nil {
+		return 0, 0
+	}
+	return h.IndexAndLZ(input.CanonicalHash)
+}
+
+// ProcessInput is an optimized OctoSketch worker fast path that reuses the
+// precomputed canonical hash stored in SketchInput and derives (index, lz) once.
+func (h *HyperLogLog) ProcessInput(input *common.SketchInput, _ float64, emit func(common.DeltaUpdate)) {
+	if input == nil {
+		return
+	}
+	index, lz := h.IndexAndLZ(input.CanonicalHash)
+	if newVal, changed := h.UpdateRegister(index, lz); changed {
+		emit(common.DeltaUpdate{Row: 0, Col: index, Value: newVal})
+	}
 }
 
 // RegisterValue returns the current value of register at index.

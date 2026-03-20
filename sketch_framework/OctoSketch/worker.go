@@ -2,6 +2,20 @@ package octosketch
 
 import "github.com/ProjectASAP/sketchlib-go/common"
 
+const defaultDeltaBatchSize = 64
+
+type deltaBatch struct {
+	deltas []DeltaUpdate
+}
+
+func newDeltaBatch() *deltaBatch {
+	return &deltaBatch{deltas: make([]DeltaUpdate, 0, defaultDeltaBatchSize)}
+}
+
+type optimizedProcessor interface {
+	ProcessInput(input *common.SketchInput, tau float64, emit func(DeltaUpdate))
+}
+
 // Worker maintains a per-core CellSketch, processes stream items via the generic
 // Process loop, and emits DeltaUpdates to the shared delta channel when local
 // counters cross the adaptive threshold τ.
@@ -16,12 +30,18 @@ import "github.com/ProjectASAP/sketchlib-go/common"
 //  4. Close the input channel to signal end-of-stream.
 //  5. Wait on Done() for the goroutine to flush and exit.
 type Worker struct {
-	id      int
-	sketch  CellSketch
-	tau     *AdaptiveTau
-	deltaCh chan<- DeltaUpdate
-	inputCh <-chan *common.SketchInput
-	doneCh  chan struct{}
+	id        int
+	sketch    CellSketch
+	tau       *AdaptiveTau
+	deltaCh   chan<- DeltaUpdate
+	batchCh   chan<- *deltaBatch
+	recycleCh <-chan *deltaBatch
+	inputCh   <-chan *common.SketchInput
+	doneCh    chan struct{}
+	batchBuf  *deltaBatch
+	// emitFn is w.emitDelta bound once at construction to avoid a 16-byte
+	// closure allocation on every call to Process.
+	emitFn func(DeltaUpdate)
 }
 
 // NewWorker creates a Worker.
@@ -36,7 +56,7 @@ func NewWorker(
 	deltaCh chan<- DeltaUpdate,
 	inputCh <-chan *common.SketchInput,
 ) *Worker {
-	return &Worker{
+	w := &Worker{
 		id:      id,
 		sketch:  sketch,
 		tau:     tau,
@@ -44,6 +64,49 @@ func NewWorker(
 		inputCh: inputCh,
 		doneCh:  make(chan struct{}),
 	}
+	w.emitFn = w.emitDelta
+	return w
+}
+
+func newBatchedWorker(
+	id int,
+	sketch CellSketch,
+	tau *AdaptiveTau,
+	batchCh chan<- *deltaBatch,
+	recycleCh <-chan *deltaBatch,
+	inputCh <-chan *common.SketchInput,
+) *Worker {
+	w := &Worker{
+		id:        id,
+		sketch:    sketch,
+		tau:       tau,
+		batchCh:   batchCh,
+		recycleCh: recycleCh,
+		inputCh:   inputCh,
+		doneCh:    make(chan struct{}),
+		batchBuf:  <-recycleCh,
+	}
+	w.emitFn = w.emitDelta
+	return w
+}
+
+func (w *Worker) emitDelta(delta DeltaUpdate) {
+	if w.batchCh == nil {
+		w.deltaCh <- delta
+		return
+	}
+	w.batchBuf.deltas = append(w.batchBuf.deltas, delta)
+	if len(w.batchBuf.deltas) >= cap(w.batchBuf.deltas) {
+		w.flushBatch()
+	}
+}
+
+func (w *Worker) flushBatch() {
+	if w.batchCh == nil || len(w.batchBuf.deltas) == 0 {
+		return
+	}
+	w.batchCh <- w.batchBuf
+	w.batchBuf = <-w.recycleCh
 }
 
 // Process is the generic OctoSketch worker loop (spec §4).
@@ -60,11 +123,15 @@ func (w *Worker) Process(input *common.SketchInput) {
 		return
 	}
 	tau := w.tau.Current()
+	if fast, ok := w.sketch.(optimizedProcessor); ok {
+		fast.ProcessInput(input, tau, w.emitFn)
+		return
+	}
 	for row := range w.sketch.NumRows() {
 		col := w.sketch.ColForRow(input, row)
 		newVal, changed := w.sketch.UpdateCell(row, col, input)
 		if changed && w.sketch.ShouldEmit(newVal, tau) {
-			w.deltaCh <- w.sketch.BuildDelta(row, col, input)
+			w.emitDelta(w.sketch.BuildDelta(row, col, input))
 			w.sketch.ResetCell(row, col)
 		}
 	}
@@ -74,7 +141,8 @@ func (w *Worker) Process(input *common.SketchInput) {
 // Flush with the worker's delta channel as the emit target.
 // Workers call this when their input stream ends (before closing the delta channel).
 func (w *Worker) Flush() {
-	w.sketch.Flush(func(d DeltaUpdate) { w.deltaCh <- d })
+	w.sketch.Flush(w.emitFn)
+	w.flushBatch()
 }
 
 // Run launches the worker goroutine.
@@ -83,6 +151,9 @@ func (w *Worker) Flush() {
 func (w *Worker) Run() {
 	go func() {
 		defer close(w.doneCh)
+		if w.batchCh != nil {
+			defer close(w.batchCh)
+		}
 		for input := range w.inputCh {
 			w.Process(input)
 		}

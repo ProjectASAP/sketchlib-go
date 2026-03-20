@@ -2,6 +2,7 @@ package octosketch
 
 import (
 	"errors"
+	"sync"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	countminsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
@@ -20,9 +21,12 @@ import (
 //  5. Wait on Done() for the aggregator goroutine to drain and exit.
 //  6. Call Query() for estimates.
 type Aggregator struct {
-	sketch  CellSketch
-	deltaCh <-chan DeltaUpdate
-	doneCh  chan struct{}
+	sketch        CellSketch
+	deltaCh       <-chan DeltaUpdate
+	shardSketches []CellSketch
+	batchChans    []<-chan *deltaBatch
+	recycleChans  []chan<- *deltaBatch
+	doneCh        chan struct{}
 }
 
 // NewAggregator creates an Aggregator backed by sketch that reads deltas from deltaCh.
@@ -34,10 +38,55 @@ func NewAggregator(sketch CellSketch, deltaCh <-chan DeltaUpdate) *Aggregator {
 	}
 }
 
+func newShardedAggregator(
+	sketch CellSketch,
+	shardSketches []CellSketch,
+	batchChans []<-chan *deltaBatch,
+	recycleChans []chan<- *deltaBatch,
+) *Aggregator {
+	return &Aggregator{
+		sketch:        sketch,
+		shardSketches: shardSketches,
+		batchChans:    batchChans,
+		recycleChans:  recycleChans,
+		doneCh:        make(chan struct{}),
+	}
+}
+
 // Run launches the aggregator goroutine (spec §5).
 // Drains deltaCh, applying each delta via sketch.MergeDelta.
 // Done() is closed after the channel is fully drained.
 func (a *Aggregator) Run() {
+	if len(a.batchChans) > 0 {
+		go func() {
+			defer close(a.doneCh)
+			var wg sync.WaitGroup
+			for i := range a.batchChans {
+				wg.Add(1)
+				shardSketch := a.shardSketches[i]
+				batchCh := a.batchChans[i]
+				recycleCh := a.recycleChans[i]
+				go func() {
+					defer wg.Done()
+					for batch := range batchCh {
+						for _, delta := range batch.deltas {
+							shardSketch.MergeDelta(delta)
+						}
+						batch.deltas = batch.deltas[:0]
+						recycleCh <- batch
+					}
+				}()
+			}
+			wg.Wait()
+			for _, shard := range a.shardSketches {
+				if err := mergeCellSketch(a.sketch, shard); err != nil {
+					return
+				}
+			}
+		}()
+		return
+	}
+
 	go func() {
 		defer close(a.doneCh)
 		for delta := range a.deltaCh {
@@ -113,22 +162,21 @@ func NewCountMinSystemAdaptive(
 	tauCfg TauConfig,
 	numWorkers, deltaBufSize int,
 ) (*Aggregator, []*Worker, []chan<- *common.SketchInput, chan DeltaUpdate, *TauController, error) {
-	deltaCh := make(chan DeltaUpdate, deltaBufSize)
 	sharedTau := NewAdaptiveTau(tauCfg)
-	tauCtrl := NewTauController(sharedTau, deltaCh)
+	deltaCh := make(chan DeltaUpdate, deltaBufSize)
 
 	aggSketch, err := NewCountMinOcto(rows, cols)
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
-	agg := NewAggregator(aggSketch, deltaCh)
-
-	workers, inputChans, err := buildWorkers(numWorkers, deltaCh, sharedTau, func() (CellSketch, error) {
+	workers, inputChans, shardSketches, batchChans, recycleChans, err := buildBatchedWorkers(numWorkers, deltaBufSize, sharedTau, func() (CellSketch, error) {
 		return NewCountMinOcto(rows, cols)
 	})
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
+	agg := newShardedAggregator(aggSketch, shardSketches, readonlyBatchChans(batchChans), writeonlyBatchChans(recycleChans))
+	tauCtrl := NewTauController(sharedTau, batchQueueDepth(batchChans))
 
 	return agg, workers, inputChans, deltaCh, tauCtrl, nil
 }
@@ -141,22 +189,21 @@ func NewCountSketchSystemAdaptive(
 	tauCfg TauConfig,
 	numWorkers, deltaBufSize int,
 ) (*Aggregator, []*Worker, []chan<- *common.SketchInput, chan DeltaUpdate, *TauController, error) {
-	deltaCh := make(chan DeltaUpdate, deltaBufSize)
 	sharedTau := NewAdaptiveTau(tauCfg)
-	tauCtrl := NewTauController(sharedTau, deltaCh)
+	deltaCh := make(chan DeltaUpdate, deltaBufSize)
 
 	aggSketch, err := NewCountSketchOcto(rows, cols)
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
-	agg := NewAggregator(aggSketch, deltaCh)
-
-	workers, inputChans, err := buildWorkers(numWorkers, deltaCh, sharedTau, func() (CellSketch, error) {
+	workers, inputChans, shardSketches, batchChans, recycleChans, err := buildBatchedWorkers(numWorkers, deltaBufSize, sharedTau, func() (CellSketch, error) {
 		return NewCountSketchOcto(rows, cols)
 	})
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
+	agg := newShardedAggregator(aggSketch, shardSketches, readonlyBatchChans(batchChans), writeonlyBatchChans(recycleChans))
+	tauCtrl := NewTauController(sharedTau, batchQueueDepth(batchChans))
 
 	return agg, workers, inputChans, deltaCh, tauCtrl, nil
 }
@@ -168,41 +215,61 @@ func NewHLLSystemAdaptive(
 	tauCfg TauConfig,
 	numWorkers, deltaBufSize int,
 ) (*Aggregator, []*Worker, []chan<- *common.SketchInput, chan DeltaUpdate, *TauController, error) {
-	deltaCh := make(chan DeltaUpdate, deltaBufSize)
 	sharedTau := NewAdaptiveTau(tauCfg)
-	tauCtrl := NewTauController(sharedTau, deltaCh)
+	deltaCh := make(chan DeltaUpdate, deltaBufSize)
 
-	agg := NewAggregator(NewHLLOcto(), deltaCh)
+	aggSketch := NewHLLOcto()
 
-	workers, inputChans, err := buildWorkers(numWorkers, deltaCh, sharedTau, func() (CellSketch, error) {
+	workers, inputChans, shardSketches, batchChans, recycleChans, err := buildBatchedWorkers(numWorkers, deltaBufSize, sharedTau, func() (CellSketch, error) {
 		return NewHLLOcto(), nil
 	})
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
+	agg := newShardedAggregator(aggSketch, shardSketches, readonlyBatchChans(batchChans), writeonlyBatchChans(recycleChans))
+	tauCtrl := NewTauController(sharedTau, batchQueueDepth(batchChans))
 
 	return agg, workers, inputChans, deltaCh, tauCtrl, nil
 }
 
-// buildWorkers is a shared helper that creates numWorkers Workers.
-func buildWorkers(
+// buildBatchedWorkers creates one batched worker and one aggregator shard per worker.
+func buildBatchedWorkers(
 	numWorkers int,
-	deltaCh chan DeltaUpdate,
+	deltaBufSize int,
 	tau *AdaptiveTau,
 	newSketch func() (CellSketch, error),
-) ([]*Worker, []chan<- *common.SketchInput, error) {
+) ([]*Worker, []chan<- *common.SketchInput, []CellSketch, []chan *deltaBatch, []chan *deltaBatch, error) {
 	workers := make([]*Worker, numWorkers)
 	inputChans := make([]chan<- *common.SketchInput, numWorkers)
+	shardSketches := make([]CellSketch, numWorkers)
+	batchChans := make([]chan *deltaBatch, numWorkers)
+	recycleChans := make([]chan *deltaBatch, numWorkers)
+	batchQueueSize := deltaBufSize / defaultDeltaBatchSize
+	if batchQueueSize < 1 {
+		batchQueueSize = 1
+	}
 	for i := range numWorkers {
-		sketch, err := newSketch()
+		workerSketch, err := newSketch()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, nil, nil, err
+		}
+		shardSketch, err := newSketch()
+		if err != nil {
+			return nil, nil, nil, nil, nil, err
+		}
+		batchCh := make(chan *deltaBatch, batchQueueSize)
+		recycleCh := make(chan *deltaBatch, batchQueueSize+1)
+		for j := 0; j < cap(recycleCh); j++ {
+			recycleCh <- newDeltaBatch()
 		}
 		inputCh := make(chan *common.SketchInput, 1024)
+		shardSketches[i] = shardSketch
+		batchChans[i] = batchCh
+		recycleChans[i] = recycleCh
 		inputChans[i] = inputCh
-		workers[i] = NewWorker(i, sketch, tau, deltaCh, inputCh)
+		workers[i] = newBatchedWorker(i, workerSketch, tau, batchCh, recycleCh, inputCh)
 	}
-	return workers, inputChans, nil
+	return workers, inputChans, shardSketches, batchChans, recycleChans, nil
 }
 
 // NewDDSketchSystem wires up numWorkers DDSketch Workers and one Aggregator
@@ -233,24 +300,61 @@ func NewDDSketchSystemAdaptive(
 	tauCfg TauConfig,
 	numWorkers, deltaBufSize int,
 ) (*Aggregator, []*Worker, []chan<- *common.SketchInput, chan DeltaUpdate, *TauController, error) {
-	deltaCh := make(chan DeltaUpdate, deltaBufSize)
 	sharedTau := NewAdaptiveTau(tauCfg)
-	tauCtrl := NewTauController(sharedTau, deltaCh)
+	deltaCh := make(chan DeltaUpdate, deltaBufSize)
 
 	aggSketch, err := NewDDSketchOcto(alpha)
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
-	agg := NewAggregator(aggSketch, deltaCh)
-
-	workers, inputChans, err := buildWorkers(numWorkers, deltaCh, sharedTau, func() (CellSketch, error) {
+	workers, inputChans, shardSketches, batchChans, recycleChans, err := buildBatchedWorkers(numWorkers, deltaBufSize, sharedTau, func() (CellSketch, error) {
 		return NewDDSketchOcto(alpha)
 	})
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
+	agg := newShardedAggregator(aggSketch, shardSketches, readonlyBatchChans(batchChans), writeonlyBatchChans(recycleChans))
+	tauCtrl := NewTauController(sharedTau, batchQueueDepth(batchChans))
 
 	return agg, workers, inputChans, deltaCh, tauCtrl, nil
+}
+
+func readonlyBatchChans(batchChans []chan *deltaBatch) []<-chan *deltaBatch {
+	readonly := make([]<-chan *deltaBatch, len(batchChans))
+	for i := range batchChans {
+		readonly[i] = batchChans[i]
+	}
+	return readonly
+}
+
+func writeonlyBatchChans(batchChans []chan *deltaBatch) []chan<- *deltaBatch {
+	writeonly := make([]chan<- *deltaBatch, len(batchChans))
+	for i := range batchChans {
+		writeonly[i] = batchChans[i]
+	}
+	return writeonly
+}
+
+func batchQueueDepth(batchChans []chan *deltaBatch) func() int {
+	return func() int {
+		depth := 0
+		for _, ch := range batchChans {
+			depth += len(ch)
+		}
+		return depth
+	}
+}
+
+func mergeCellSketch(dst, src CellSketch) error {
+	mergeDst, ok := dst.(common.Sketch)
+	if !ok {
+		return errors.New("octosketch: destination sketch does not implement common.Sketch")
+	}
+	mergeSrc, ok := src.(common.Sketch)
+	if !ok {
+		return errors.New("octosketch: source sketch does not implement common.Sketch")
+	}
+	return mergeDst.Merge(mergeSrc)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,8 @@
 package octosketch
 
 import (
-	"sync"
+	"math"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,7 +47,7 @@ func FixedTauConfig(value float64) TauConfig {
 
 // AdaptiveTau is a concurrency-safe, dynamically-adjusting threshold τ.
 //
-// Workers call Current() on each insert (read-heavy, RWMutex optimised).
+// Workers call Current() on each insert through an atomic load.
 // TauController calls Adjust() periodically based on observed queue depth.
 //
 // Adjustment rule (matches spec):
@@ -54,22 +55,20 @@ func FixedTauConfig(value float64) TauConfig {
 //	if queueLen > UpperBound  →  τ = min(τ + Step, Max)   // slow down emission
 //	if queueLen < LowerBound  →  τ = max(τ - Step, Min)   // speed up emission
 type AdaptiveTau struct {
-	mu      sync.RWMutex
-	current float64
+	current atomic.Uint64
 	cfg     TauConfig
 }
 
 // NewAdaptiveTau creates an AdaptiveTau starting at cfg.Initial.
 func NewAdaptiveTau(cfg TauConfig) *AdaptiveTau {
-	return &AdaptiveTau{current: cfg.Initial, cfg: cfg}
+	a := &AdaptiveTau{cfg: cfg}
+	a.current.Store(math.Float64bits(cfg.Initial))
+	return a
 }
 
-// Current returns the current τ value. Lock-free on the read path.
+// Current returns the current τ value via a single atomic load.
 func (a *AdaptiveTau) Current() float64 {
-	a.mu.RLock()
-	v := a.current
-	a.mu.RUnlock()
-	return v
+	return math.Float64frombits(a.current.Load())
 }
 
 // Adjust updates τ based on observed queue depth.
@@ -78,20 +77,32 @@ func (a *AdaptiveTau) Adjust(queueLen int) {
 	if a.cfg.Step == 0 {
 		return // fixed tau — nothing to do
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if queueLen > a.cfg.UpperBound {
-		next := a.current + a.cfg.Step
-		if next > a.cfg.Max {
-			next = a.cfg.Max
+
+	for {
+		curBits := a.current.Load()
+		cur := math.Float64frombits(curBits)
+		next := cur
+
+		if queueLen > a.cfg.UpperBound {
+			next += a.cfg.Step
+			if next > a.cfg.Max {
+				next = a.cfg.Max
+			}
+		} else if queueLen < a.cfg.LowerBound {
+			next -= a.cfg.Step
+			if next < a.cfg.Min {
+				next = a.cfg.Min
+			}
+		} else {
+			return
 		}
-		a.current = next
-	} else if queueLen < a.cfg.LowerBound {
-		next := a.current - a.cfg.Step
-		if next < a.cfg.Min {
-			next = a.cfg.Min
+
+		if next == cur {
+			return
 		}
-		a.current = next
+		if a.current.CompareAndSwap(curBits, math.Float64bits(next)) {
+			return
+		}
 	}
 }
 
@@ -105,20 +116,19 @@ func (a *AdaptiveTau) Config() TauConfig { return a.cfg }
 // TauController monitors the shared delta channel depth and adjusts τ on each tick.
 // One controller is typically shared across all workers in a system.
 type TauController struct {
-	tau     *AdaptiveTau
-	queueCh chan DeltaUpdate // read-only reference for len() checks
-	stopCh  chan struct{}
-	doneCh  chan struct{}
+	tau      *AdaptiveTau
+	queueLen func() int
+	stopCh   chan struct{}
+	doneCh   chan struct{}
 }
 
-// NewTauController creates a controller that observes queueCh and adjusts tau.
-// queueCh must be the same bidirectional channel the workers write to.
-func NewTauController(tau *AdaptiveTau, queueCh chan DeltaUpdate) *TauController {
+// NewTauController creates a controller that observes an aggregate queue depth.
+func NewTauController(tau *AdaptiveTau, queueLen func() int) *TauController {
 	return &TauController{
-		tau:     tau,
-		queueCh: queueCh,
-		stopCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
+		tau:      tau,
+		queueLen: queueLen,
+		stopCh:   make(chan struct{}),
+		doneCh:   make(chan struct{}),
 	}
 }
 
@@ -131,7 +141,7 @@ func (c *TauController) Run() {
 		for {
 			select {
 			case <-ticker.C:
-				c.tau.Adjust(len(c.queueCh))
+				c.tau.Adjust(c.queueLen())
 			case <-c.stopCh:
 				return
 			}

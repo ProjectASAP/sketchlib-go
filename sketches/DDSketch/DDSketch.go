@@ -458,6 +458,13 @@ func (d *DDSketch) EachBucket(f func(k int32, count uint64)) {
 // valueFromInput recovers the float64 inserted via common.FromF64(v).
 // Returns (0, false) for non-positive, NaN, Inf, or too-short Bytes.
 func (d *DDSketch) valueFromInput(input *common.SketchInput) (float64, bool) {
+	if input == nil {
+		return 0, false
+	}
+	if input.HasFloat64 {
+		v := input.Float64
+		return v, v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)
+	}
 	if len(input.Bytes) < 8 {
 		return 0, false
 	}
@@ -467,6 +474,13 @@ func (d *DDSketch) valueFromInput(input *common.SketchInput) (float64, bool) {
 
 // phiFromInput recovers a quantile phi ∈ [0,1] from input.Bytes.
 func (d *DDSketch) phiFromInput(input *common.SketchInput) (float64, bool) {
+	if input == nil {
+		return 0, false
+	}
+	if input.HasFloat64 {
+		phi := input.Float64
+		return phi, phi >= 0 && phi <= 1 && !math.IsNaN(phi)
+	}
 	if len(input.Bytes) < 8 {
 		return 0, false
 	}
@@ -500,6 +514,25 @@ func (d *DDSketch) UpdateCell(_, col int, _ *common.SketchInput) (float64, bool)
 	}
 	d.AddToBucket(int32(col), 1)
 	return float64(d.BucketCount(int32(col))), true
+}
+
+// ProcessInput is an optimized OctoSketch worker fast path that decodes the
+// float payload once, derives the bucket index once, and emits directly.
+func (d *DDSketch) ProcessInput(input *common.SketchInput, tau float64, emit func(common.DeltaUpdate)) {
+	if input == nil {
+		return
+	}
+	v, ok := d.valueFromInput(input)
+	if !ok {
+		return
+	}
+	col := int32(d.BucketIndex(v))
+	d.AddToBucket(col, 1)
+	count := d.BucketCount(col)
+	if float64(count) >= tau {
+		emit(common.DeltaUpdate{Row: 0, Col: int(col), Value: float64(count)})
+		d.ResetBucket(col)
+	}
 }
 
 // ShouldEmit returns true when the local bucket count newVal reaches threshold τ.
