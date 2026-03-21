@@ -14,10 +14,14 @@ import (
 // than accumulated counts (better gob varint compression).
 //
 // In window/accumulation mode all bucket counts are monotonically non-decreasing,
-// so the incremental sketch is a lossless representation of the change.
-// In batch mode bucket decreases are omitted (positive-only), which can cause
-// slight reconstruction error; the caller should use a size-based fallback
-// (send full if delta >= full) to cap the regression.
+// so the incremental sketch is a lossless representation of the change and is
+// always smaller than the accumulated full sketch (which grows over time).
+//
+// Delta is NOT useful in batch mode: each batch window builds an independent
+// sketch from scratch, so the "full" payload is already maximally compact —
+// DDSketch SerializeToBytes only stores the contiguous range of occupied
+// buckets, omitting leading and trailing zeros.  Callers should skip
+// ComputeDelta entirely for batch mode and always transmit the full sketch.
 func ComputeDelta(snapshot, current *DDSketch, threshold uint64) ([]byte, error) {
 	incr := &DDSketch{
 		mapping: current.mapping,
