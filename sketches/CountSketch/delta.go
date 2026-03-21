@@ -51,7 +51,7 @@ func ComputeDelta(snapshot, current *CountSketch, threshold float64) (*Delta, er
 		curCount := current.Count[r]
 		for c := 0; c < cols; c++ {
 			dc := curCount[c] - snapCount[c]
-			if dc < -threshold || dc > threshold {
+			if dc != 0 && (dc <= -threshold || dc >= threshold) {
 				d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
 			}
 		}
