@@ -1,2 +1,19 @@
 testdata/caida
 caida_zip.zip
+
+# Go build outputs
+bin/
+build/
+dist/
+out/
+
+# Compiled binaries and libraries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.a
+
+# Local binaries without extension
+xtest_producer
