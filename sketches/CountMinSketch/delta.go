@@ -1,110 +1,101 @@
 package countminsketch
 
-import (
-	"fmt"
-	"math"
+import "fmt"
 
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
-	"google.golang.org/protobuf/proto"
-)
+// CellDelta holds the additive deltas for a single (row, col) cell.
+type CellDelta struct {
+	Row, Col            uint32
+	DCount, DSum, DSum2 float64
+}
 
-// ComputeDeltaMsg computes a sparse delta between snapshot and current.
-// A cell (r,c) is included when |Δcount| + |Δsum| + |Δsum2| ≥ threshold.
-// L1/L2 per-row deltas are always included.
-// Returns the CountMinDelta proto message.
-// If snapshot and current have different dimensions the caller should fall
-// back to a full serialization; this function returns an error in that case.
-func ComputeDeltaMsg(snapshot, current *CountMinSketch, threshold float64) (*pb.CountMinDelta, error) {
+// Delta is the native Go representation of a sparse CountMinSketch delta.
+// All fields are plain Go types; no proto dependency.
+type Delta struct {
+	Rows, Cols uint32
+	Cells      []CellDelta // only cells where |ΔCount|+|ΔSum|+|ΔSum2| ≥ threshold
+	L1, L2     []float64   // full per-row norm deltas (one entry per row)
+}
+
+// ComputeDelta computes a sparse delta between snapshot and current.
+// A cell is included when |ΔCount|+|ΔSum|+|ΔSum2| ≥ threshold.
+// L1/L2 row deltas are always included in full (negligible size).
+// Returns an error if the two sketches have different dimensions.
+func ComputeDelta(snapshot, current *CountMinSketch, threshold float64) (*Delta, error) {
 	if snapshot.Rows != current.Rows || snapshot.Cols != current.Cols {
 		return nil, fmt.Errorf("countminsketch: dimension mismatch (%d×%d vs %d×%d)",
 			snapshot.Rows, snapshot.Cols, current.Rows, current.Cols)
 	}
+	rows, cols := current.Rows, current.Cols
 
-	delta := &pb.CountMinDelta{
-		Rows: uint32(current.Rows),
-		Cols: uint32(current.Cols),
+	d := &Delta{
+		Rows:  uint32(rows),
+		Cols:  uint32(cols),
+		Cells: make([]CellDelta, 0, rows*cols/20), // ~5% fill hint
+		L1:    make([]float64, rows),
+		L2:    make([]float64, rows),
 	}
 
-	for r := 0; r < current.Rows; r++ {
-		for c := 0; c < current.Cols; c++ {
-			dCount := current.Count[r][c] - snapshot.Count[r][c]
-			dSum := current.Sum[r][c] - snapshot.Sum[r][c]
-			dSum2 := current.Sum2[r][c] - snapshot.Sum2[r][c]
-			if math.Abs(dCount)+math.Abs(dSum)+math.Abs(dSum2) >= threshold {
-				delta.Cells = append(delta.Cells, &pb.CountMinCell{
-					Row:    uint32(r),
-					Col:    uint32(c),
-					DCount: dCount,
-					DSum:   dSum,
-					DSum2:  dSum2,
+	for r := 0; r < rows; r++ {
+		snapCount := snapshot.Count[r]
+		snapSum := snapshot.Sum[r]
+		snapSum2 := snapshot.Sum2[r]
+		curCount := current.Count[r]
+		curSum := current.Sum[r]
+		curSum2 := current.Sum2[r]
+
+		for c := 0; c < cols; c++ {
+			dc := curCount[c] - snapCount[c]
+			ds := curSum[c] - snapSum[c]
+			ds2 := curSum2[c] - snapSum2[c]
+			mag := dc
+			if mag < 0 {
+				mag = -mag
+			}
+			if s := ds; s < 0 {
+				mag += -s
+			} else {
+				mag += s
+			}
+			if s := ds2; s < 0 {
+				mag += -s
+			} else {
+				mag += s
+			}
+			if mag >= threshold {
+				d.Cells = append(d.Cells, CellDelta{
+					Row: uint32(r), Col: uint32(c),
+					DCount: dc, DSum: ds, DSum2: ds2,
 				})
 			}
 		}
-		delta.L1 = append(delta.L1, current.L1[r]-snapshot.L1[r])
-		delta.L2 = append(delta.L2, current.L2[r]-snapshot.L2[r])
+		d.L1[r] = current.L1[r] - snapshot.L1[r]
+		d.L2[r] = current.L2[r] - snapshot.L2[r]
 	}
 
-	return delta, nil
+	return d, nil
 }
 
-// ApplyDeltaMsg applies a CountMinDelta proto message to target using += semantics.
-// Cells outside the target's dimensions are silently skipped.
-func ApplyDeltaMsg(target *CountMinSketch, delta *pb.CountMinDelta) error {
-	for _, cell := range delta.Cells {
-		r, c := int(cell.Row), int(cell.Col)
-		if r >= target.Rows || c >= target.Cols {
+// ApplyDelta applies d to target using += semantics.
+// Cells outside target's dimensions are silently skipped.
+func ApplyDelta(target *CountMinSketch, d *Delta) {
+	for i := range d.Cells {
+		c := &d.Cells[i]
+		r, col := int(c.Row), int(c.Col)
+		if r >= target.Rows || col >= target.Cols {
 			continue
 		}
-		target.Count[r][c] += cell.DCount
-		target.Sum[r][c] += cell.DSum
-		target.Sum2[r][c] += cell.DSum2
+		target.Count[r][col] += c.DCount
+		target.Sum[r][col] += c.DSum
+		target.Sum2[r][col] += c.DSum2
 	}
-
-	for r, dL1 := range delta.L1 {
+	for r, v := range d.L1 {
 		if r < target.Rows {
-			target.L1[r] += dL1
+			target.L1[r] += v
 		}
 	}
-	for r, dL2 := range delta.L2 {
+	for r, v := range d.L2 {
 		if r < target.Rows {
-			target.L2[r] += dL2
+			target.L2[r] += v
 		}
 	}
-
-	return nil
-}
-
-// SerializeDeltaBytes marshals a CountMinDelta proto message to bytes.
-func SerializeDeltaBytes(delta *pb.CountMinDelta) ([]byte, error) {
-	return proto.Marshal(delta)
-}
-
-// DeserializeDeltaBytes unmarshals bytes into a CountMinDelta proto message.
-func DeserializeDeltaBytes(data []byte) (*pb.CountMinDelta, error) {
-	var delta pb.CountMinDelta
-	if err := proto.Unmarshal(data, &delta); err != nil {
-		return nil, err
-	}
-	return &delta, nil
-}
-
-// ComputeDelta computes a sparse delta and returns proto-marshalled bytes.
-// Kept for backward compatibility. Falls back to full serialization on dimension mismatch.
-func ComputeDelta(snapshot, current *CountMinSketch, threshold float64) ([]byte, error) {
-	msg, err := ComputeDeltaMsg(snapshot, current, threshold)
-	if err != nil {
-		// Dimension mismatch — fall back to full serialization.
-		return current.SerializeToBytes()
-	}
-	return SerializeDeltaBytes(msg)
-}
-
-// ApplyDelta applies a proto-marshalled CountMinDelta to target using += semantics.
-// Kept for backward compatibility.
-func ApplyDelta(target *CountMinSketch, data []byte) error {
-	msg, err := DeserializeDeltaBytes(data)
-	if err != nil {
-		return err
-	}
-	return ApplyDeltaMsg(target, msg)
 }
