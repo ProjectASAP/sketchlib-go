@@ -1,22 +1,23 @@
 package countminsketch
 
 import (
+	"fmt"
 	"math"
 
 	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
 	"google.golang.org/protobuf/proto"
 )
 
-// ComputeDelta computes a sparse delta between snapshot and current.
+// ComputeDeltaMsg computes a sparse delta between snapshot and current.
 // A cell (r,c) is included when |Δcount| + |Δsum| + |Δsum2| ≥ threshold.
 // L1/L2 per-row deltas are always included.
-// Returns the proto-marshalled CountMinDelta bytes.
+// Returns the CountMinDelta proto message.
 // If snapshot and current have different dimensions the caller should fall
 // back to a full serialization; this function returns an error in that case.
-func ComputeDelta(snapshot, current *CountMinSketch, threshold float64) ([]byte, error) {
+func ComputeDeltaMsg(snapshot, current *CountMinSketch, threshold float64) (*pb.CountMinDelta, error) {
 	if snapshot.Rows != current.Rows || snapshot.Cols != current.Cols {
-		// Dimension mismatch – cannot compute a meaningful sparse delta.
-		return current.SerializeToBytes()
+		return nil, fmt.Errorf("countminsketch: dimension mismatch (%d×%d vs %d×%d)",
+			snapshot.Rows, snapshot.Cols, current.Rows, current.Cols)
 	}
 
 	delta := &pb.CountMinDelta{
@@ -43,17 +44,12 @@ func ComputeDelta(snapshot, current *CountMinSketch, threshold float64) ([]byte,
 		delta.L2 = append(delta.L2, current.L2[r]-snapshot.L2[r])
 	}
 
-	return proto.Marshal(delta)
+	return delta, nil
 }
 
-// ApplyDelta applies a proto-marshalled CountMinDelta to target using += semantics.
+// ApplyDeltaMsg applies a CountMinDelta proto message to target using += semantics.
 // Cells outside the target's dimensions are silently skipped.
-func ApplyDelta(target *CountMinSketch, data []byte) error {
-	var delta pb.CountMinDelta
-	if err := proto.Unmarshal(data, &delta); err != nil {
-		return err
-	}
-
+func ApplyDeltaMsg(target *CountMinSketch, delta *pb.CountMinDelta) error {
 	for _, cell := range delta.Cells {
 		r, c := int(cell.Row), int(cell.Col)
 		if r >= target.Rows || c >= target.Cols {
@@ -76,4 +72,39 @@ func ApplyDelta(target *CountMinSketch, data []byte) error {
 	}
 
 	return nil
+}
+
+// SerializeDeltaBytes marshals a CountMinDelta proto message to bytes.
+func SerializeDeltaBytes(delta *pb.CountMinDelta) ([]byte, error) {
+	return proto.Marshal(delta)
+}
+
+// DeserializeDeltaBytes unmarshals bytes into a CountMinDelta proto message.
+func DeserializeDeltaBytes(data []byte) (*pb.CountMinDelta, error) {
+	var delta pb.CountMinDelta
+	if err := proto.Unmarshal(data, &delta); err != nil {
+		return nil, err
+	}
+	return &delta, nil
+}
+
+// ComputeDelta computes a sparse delta and returns proto-marshalled bytes.
+// Kept for backward compatibility. Falls back to full serialization on dimension mismatch.
+func ComputeDelta(snapshot, current *CountMinSketch, threshold float64) ([]byte, error) {
+	msg, err := ComputeDeltaMsg(snapshot, current, threshold)
+	if err != nil {
+		// Dimension mismatch — fall back to full serialization.
+		return current.SerializeToBytes()
+	}
+	return SerializeDeltaBytes(msg)
+}
+
+// ApplyDelta applies a proto-marshalled CountMinDelta to target using += semantics.
+// Kept for backward compatibility.
+func ApplyDelta(target *CountMinSketch, data []byte) error {
+	msg, err := DeserializeDeltaBytes(data)
+	if err != nil {
+		return err
+	}
+	return ApplyDeltaMsg(target, msg)
 }
