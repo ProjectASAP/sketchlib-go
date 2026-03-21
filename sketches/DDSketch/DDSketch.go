@@ -400,6 +400,29 @@ func (d *DDSketch) AddToBucket(k int32, delta uint64) {
 	}
 }
 
+// SubtractFromBucket decrements bucket k's count by n and adjusts d.count.
+// If n exceeds the bucket's current count the bucket is clamped to zero.
+// Used by ApplyDelta when applying a negative (decrease) bucket entry.
+func (d *DDSketch) SubtractFromBucket(k int32, n uint64) {
+	if n == 0 || d.store.IsEmpty() {
+		return
+	}
+	idx := int(k - d.store.offset)
+	counts := d.store.counts.AsMutSlice()
+	if idx < 0 || idx >= len(counts) {
+		return
+	}
+	if counts[idx] < n {
+		n = counts[idx]
+	}
+	counts[idx] -= n
+	if d.count >= n {
+		d.count -= n
+	} else {
+		d.count = 0
+	}
+}
+
 // ResetBucket zeroes bucket k and decrements d.count by the bucket's current count.
 // Used by DDSketchOcto.ResetCell to drain a worker-local bucket after emitting a delta.
 func (d *DDSketch) ResetBucket(k int32) {
