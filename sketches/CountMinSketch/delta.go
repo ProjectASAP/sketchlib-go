@@ -61,7 +61,7 @@ func ComputeDelta(snapshot, current *CountMinSketch, threshold float64) (*Delta,
 			} else {
 				mag += s
 			}
-			if mag >= threshold {
+			if mag > 0 && mag >= threshold {
 				d.Cells = append(d.Cells, CellDelta{
 					Row: uint32(r), Col: uint32(c),
 					DCount: dc, DSum: ds, DSum2: ds2,
