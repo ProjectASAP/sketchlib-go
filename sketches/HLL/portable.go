@@ -1,7 +1,11 @@
 package hll
 
 import (
+	"fmt"
+
 	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
+	"google.golang.org/protobuf/proto"
 )
 
 // SerializePortable serializes the DataFusion-style HyperLogLog as a SketchEnvelope.
@@ -56,6 +60,36 @@ func hllEnvelope(state *pb.HyperLogLogState) *pb.SketchEnvelope {
 			Hll: state,
 		},
 	}
+}
+
+// SerializeProtoBytes serializes the HyperLogLog as a proto-encoded SketchEnvelope.
+func (h *HyperLogLog) SerializeProtoBytes() ([]byte, error) {
+	env, err := h.SerializePortable()
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(env)
+}
+
+// DeserializeHyperLogLogFromProtoBytes restores a HyperLogLog from a proto-encoded SketchEnvelope.
+func DeserializeHyperLogLogFromProtoBytes(data []byte) (*HyperLogLog, error) {
+	var env pb.SketchEnvelope
+	if err := proto.Unmarshal(data, &env); err != nil {
+		return nil, err
+	}
+	st := env.GetHll()
+	if st == nil {
+		return nil, fmt.Errorf("hll: proto envelope does not contain HyperLogLogState")
+	}
+
+	regs := append([]byte(nil), st.GetRegisters()...)
+	if len(regs) != HLLRegisterCount {
+		return nil, fmt.Errorf("hll: invalid register length %d, expected %d", len(regs), HLLRegisterCount)
+	}
+
+	return &HyperLogLog{
+		Registers: storage.Vector1DFromSlice(regs),
+	}, nil
 }
 
 func portableHashSpec() *pb.HashSpec {

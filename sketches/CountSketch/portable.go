@@ -1,8 +1,11 @@
 package countsketch
 
 import (
+	"fmt"
+
 	"github.com/ProjectASAP/sketchlib-go/common"
 	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	"google.golang.org/protobuf/proto"
 )
 
 // SerializePortable serializes the CountSketch into a portable protobuf SketchEnvelope.
@@ -50,6 +53,73 @@ func (s *CountSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 			CountSketch: state,
 		},
 	}, nil
+}
+
+// SerializeProtoBytes serializes the CountSketch as a proto-encoded SketchEnvelope.
+func (s *CountSketch) SerializeProtoBytes() ([]byte, error) {
+	env, err := s.SerializePortable()
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(env)
+}
+
+// DeserializeCountSketchFromProtoBytes restores a CountSketch from a proto-encoded SketchEnvelope.
+func DeserializeCountSketchFromProtoBytes(data []byte) (*CountSketch, error) {
+	var env pb.SketchEnvelope
+	if err := proto.Unmarshal(data, &env); err != nil {
+		return nil, err
+	}
+	st := env.GetCountSketch()
+	if st == nil {
+		return nil, fmt.Errorf("countsketch: proto envelope does not contain CountSketchState")
+	}
+
+	rows := int(st.GetRows())
+	cols := int(st.GetCols())
+	if rows <= 0 || cols <= 0 {
+		return nil, fmt.Errorf("countsketch: invalid dimensions %d×%d", rows, cols)
+	}
+
+	flat := st.GetCountsFloat()
+	expected := rows * cols
+	if len(flat) != expected {
+		return nil, fmt.Errorf("countsketch: unexpected matrix size")
+	}
+
+	count := make([][]float64, rows)
+	for r := 0; r < rows; r++ {
+		count[r] = append([]float64(nil), flat[r*cols:(r+1)*cols]...)
+	}
+
+	l2 := append([]float64(nil), st.GetL2()...)
+
+	var topk *common.TopKHeap
+	if pbTopK := st.GetTopk(); pbTopK != nil && len(pbTopK.GetEntries()) > 0 {
+		k := int(pbTopK.GetK())
+		if k <= 0 {
+			k = TOPK_SIZE
+		}
+		topk = common.NewTopKHeap(k)
+		for _, e := range pbTopK.GetEntries() {
+			topk.Heap = append(topk.Heap, common.Item{
+				Key:   e.GetKey(),
+				Count: int64(e.GetCount()),
+			})
+		}
+	}
+
+	cs := &CountSketch{
+		Rows:  rows,
+		Cols:  cols,
+		Count: count,
+		L2:    l2,
+		TopK:  topk,
+	}
+	if err := cs.rehydrateStorage(); err != nil {
+		return nil, err
+	}
+	return cs, nil
 }
 
 func portableHashSpec() *pb.HashSpec {

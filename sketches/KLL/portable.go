@@ -1,7 +1,10 @@
 package kll
 
 import (
+	"fmt"
+
 	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	"google.golang.org/protobuf/proto"
 )
 
 // SerializePortable serializes the KLLSketch into a portable protobuf SketchEnvelope.
@@ -38,6 +41,70 @@ func (s *KLLSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 			Kll: state,
 		},
 	}, nil
+}
+
+// SerializeProtoBytes serializes the KLLSketch as a proto-encoded SketchEnvelope.
+func (s *KLLSketch) SerializeProtoBytes() ([]byte, error) {
+	env, err := s.SerializePortable()
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(env)
+}
+
+// DeserializeKLLSketchFromProtoBytes restores a KLLSketch from a proto-encoded SketchEnvelope.
+func DeserializeKLLSketchFromProtoBytes(data []byte) (*KLLSketch, error) {
+	var env pb.SketchEnvelope
+	if err := proto.Unmarshal(data, &env); err != nil {
+		return nil, err
+	}
+	st := env.GetKll()
+	if st == nil {
+		return nil, fmt.Errorf("kll: proto envelope does not contain KLLState")
+	}
+
+	k := int(st.GetK())
+	m := int(st.GetM())
+	if k <= 0 || m <= 0 {
+		return nil, fmt.Errorf("kll: invalid parameters k=%d m=%d", k, m)
+	}
+
+	pbLevels := st.GetLevels()
+	levels := make([]int, len(pbLevels))
+	for i, v := range pbLevels {
+		levels[i] = int(v)
+	}
+	if len(levels) < 2 {
+		return nil, fmt.Errorf("kll: invalid levels length %d", len(levels))
+	}
+
+	items := append([]float64(nil), st.GetItems()...)
+	if levels[len(levels)-1] != len(items) {
+		return nil, fmt.Errorf("kll: invalid item layout")
+	}
+
+	var co coin
+	if pbCoin := st.GetCoin(); pbCoin != nil {
+		co = coin{
+			state:         normalizeSeed(pbCoin.GetState()),
+			bitCache:      pbCoin.GetBitCache(),
+			remainingBits: uint8(pbCoin.GetRemainingBits()),
+		}
+	} else {
+		co = newCoin()
+	}
+
+	sketch := &KLLSketch{
+		items:     items,
+		levels:    levels,
+		k:         k,
+		m:         m,
+		numLevels: len(levels) - 1,
+		co:        co,
+	}
+	sketch.bindStoresFromSlices()
+	sketch.rebuildCapacityCache()
+	return sketch, nil
 }
 
 // portableHashSpec returns the standard HashSpec for sketchlib-go.
