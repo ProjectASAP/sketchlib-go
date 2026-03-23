@@ -1,12 +1,15 @@
 package elasticsketch
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
+	cmpb "github.com/ProjectASAP/sketchlib-go/proto/countminsketch"
+	elasticpb "github.com/ProjectASAP/sketchlib-go/proto/elasticsketch"
+	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
 )
 
 // SerializePortable serializes the ElasticSketch into a portable protobuf SketchEnvelope.
 // The heavy buckets are stored as parallel arrays; the light CountMin layer as CountMinState.
-func (es *ElasticSketch) SerializePortable() (*pb.SketchEnvelope, error) {
+func (es *ElasticSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	es.mu.Lock()
 	defer es.mu.Unlock()
 
@@ -31,14 +34,14 @@ func (es *ElasticSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 		countsFloat = append(countsFloat, es.light.RowSlice(r)...)
 	}
 
-	light := &pb.CountMinState{
+	light := &cmpb.CountMinState{
 		Rows:        uint32(rows),
 		Cols:        uint32(cols),
-		CounterType: pb.CounterType_COUNTER_TYPE_FLOAT64,
+		CounterType: commonpb.CounterType_COUNTER_TYPE_FLOAT64,
 		CountsFloat: countsFloat,
 	}
 
-	state := &pb.ElasticState{
+	state := &elasticpb.ElasticState{
 		BucketCount: uint32(n),
 		FlowIds:     flowIDs,
 		VotePos:     votePos,
@@ -47,22 +50,22 @@ func (es *ElasticSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 		Light:       light,
 	}
 
-	return &pb.SketchEnvelope{
+	return &envpb.SketchEnvelope{
 		FormatVersion: 1,
-		Producer: &pb.ProducerInfo{
+		Producer: &commonpb.ProducerInfo{
 			Library: "sketchlib-go",
 			Version: "0.1.0",
 		},
 		HashSpec: portableHashSpec(),
-		SketchState: &pb.SketchEnvelope_Elastic{
+		SketchState: &envpb.SketchEnvelope_Elastic{
 			Elastic: state,
 		},
 	}, nil
 }
 
-func portableHashSpec() *pb.HashSpec {
-	return &pb.HashSpec{
-		Algorithm:          pb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
+func portableHashSpec() *commonpb.HashSpec {
+	return &commonpb.HashSpec{
+		Algorithm:          commonpb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
 		CanonicalSeedIndex: 5,
 		SeedList: []uint64{
 			0xcafe3553, 0xade3415118, 0x8cc70208, 0x2f024b2b, 0x451a3df5,
@@ -70,6 +73,6 @@ func portableHashSpec() *pb.HashSpec {
 			0x9b05688c, 0x1f83d9ab, 0x5be0cd19, 0xcbbb9d5d, 0x629a292a,
 			0x9159015a, 0x152fecd8, 0x67332667, 0x8eb44a87, 0xdb0c2e0d,
 		},
-		SeedDerivation: pb.SeedDerivation_SEED_DERIVATION_PACKED,
+		SeedDerivation: commonpb.SeedDerivation_SEED_DERIVATION_PACKED,
 	}
 }

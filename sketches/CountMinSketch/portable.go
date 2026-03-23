@@ -1,12 +1,14 @@
 package countminsketch
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
+	cmpb "github.com/ProjectASAP/sketchlib-go/proto/countminsketch"
+	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
 )
 
 // SerializePortable serializes the CountMinSketch into a portable protobuf SketchEnvelope.
 // The counter matrix is stored flat in row-major order using FLOAT64 counters.
-func (s *CountMinSketch) SerializePortable() (*pb.SketchEnvelope, error) {
+func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	// Flatten the count matrix to row-major float64 slice.
 	countsFloat := make([]float64, 0, s.Rows*s.Cols)
 	sumCounts := make([]float64, 0, s.Rows*s.Cols)
@@ -20,10 +22,10 @@ func (s *CountMinSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 	l1 := append([]float64(nil), s.L1...)
 	l2 := append([]float64(nil), s.L2...)
 
-	state := &pb.CountMinState{
+	state := &cmpb.CountMinState{
 		Rows:        uint32(s.Rows),
 		Cols:        uint32(s.Cols),
-		CounterType: pb.CounterType_COUNTER_TYPE_FLOAT64,
+		CounterType: commonpb.CounterType_COUNTER_TYPE_FLOAT64,
 		CountsFloat: countsFloat,
 		SumCounts:   sumCounts,
 		Sum2Counts:  sum2Counts,
@@ -31,23 +33,23 @@ func (s *CountMinSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 		L2:          l2,
 	}
 
-	return &pb.SketchEnvelope{
+	return &envpb.SketchEnvelope{
 		FormatVersion: 1,
-		Producer: &pb.ProducerInfo{
+		Producer: &commonpb.ProducerInfo{
 			Library: "sketchlib-go",
 			Version: "0.1.0",
 		},
 		HashSpec: portableHashSpec(),
-		SketchState: &pb.SketchEnvelope_CountMin{
+		SketchState: &envpb.SketchEnvelope_CountMin{
 			CountMin: state,
 		},
 	}, nil
 }
 
 // portableHashSpec returns the standard HashSpec for sketchlib-go.
-func portableHashSpec() *pb.HashSpec {
-	return &pb.HashSpec{
-		Algorithm:          pb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
+func portableHashSpec() *commonpb.HashSpec {
+	return &commonpb.HashSpec{
+		Algorithm:          commonpb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
 		CanonicalSeedIndex: 5,
 		SeedList: []uint64{
 			0xcafe3553,
@@ -71,6 +73,6 @@ func portableHashSpec() *pb.HashSpec {
 			0x8eb44a87,
 			0xdb0c2e0d,
 		},
-		SeedDerivation: pb.SeedDerivation_SEED_DERIVATION_PACKED,
+		SeedDerivation: commonpb.SeedDerivation_SEED_DERIVATION_PACKED,
 	}
 }
