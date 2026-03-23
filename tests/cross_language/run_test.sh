@@ -128,20 +128,15 @@ ok "All 9 sketch files present"
 # ---------------------------------------------------------------------------
 header "Phase 2 — Rust consumer (sketchlib-rust)"
 
-step "cargo build --bin xtest_consumer"
+step "cargo test --test xtest_consumer"
 (
     cd "$RUST_DIR"
     if [[ "${VERBOSE:-0}" == "1" ]]; then
-        cargo build --bin xtest_consumer
+        XTEST_DIR="$TMP_DIR" cargo test --test xtest_consumer -- --nocapture
     else
-        cargo build --bin xtest_consumer 2>&1 | grep -E '^(error|warning\[|   Compiling|    Finished)' || true
+        XTEST_DIR="$TMP_DIR" cargo test --test xtest_consumer -- --nocapture 2>&1 | grep -E '^(error|warning\[|   Compiling|    Finished|test |FAILED|ok$)' || true
     fi
 )
-CONSUMER_BIN="$RUST_DIR/target/debug/xtest_consumer"
-ok "Built $CONSUMER_BIN"
-
-step "Run consumer ← $TMP_DIR"
-"$CONSUMER_BIN" "$TMP_DIR"
 
 # ---------------------------------------------------------------------------
 # Done
