@@ -45,8 +45,11 @@ func ComputeRegisterDelta(snapshot, current *HyperLogLog) *RegisterDelta {
 // ApplyRegisterDelta applies d to target using max semantics.
 // Each update sets target[index] = max(target[index], value).
 func ApplyRegisterDelta(target *HyperLogLog, d *RegisterDelta) {
+	regs := target.Registers.AsMutSlice()
 	for i := range d.Updates {
 		u := &d.Updates[i]
-		target.SetRegisterIfGreater(int(u.Index), u.Value)
+		if int(u.Index) < len(regs) && u.Value > regs[u.Index] {
+			regs[u.Index] = u.Value
+		}
 	}
 }

@@ -8,7 +8,7 @@ import (
 )
 
 func hllInsert(h *HyperLogLog, key string) {
-	h.Insert(common.FromString(key))
+	h.InsertWithHash(common.Hash64([]byte(key)))
 }
 
 // hllRegistersEqual checks that two HLL sketches have identical register arrays.
@@ -162,7 +162,7 @@ func TestHLLDelta_CardinalityConvergence(t *testing.T) {
 	// Registers must be identical — cardinality follows automatically.
 	hllRegistersEqual(t, "CardinalityConvergence", current, recv)
 
-	got := recv.EstimateCardinality()
+	got := recv.Estimate()
 	t.Logf("true=%d estimated=%d", n, got)
 }
 

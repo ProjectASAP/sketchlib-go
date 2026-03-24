@@ -72,3 +72,24 @@ message HeapEntry {
 
   reserved 3;  // Reserved for bytes_key alternative.
 }
+
+// ============================================================================
+// CountSketch Delta
+// ============================================================================
+
+// CountSketchDelta for the signed Count array. TopK is non-linear (cannot be
+// subtracted), so it is always transmitted in full using the existing TopKState.
+message CountSketchDelta {
+  uint32                   rows  = 1;
+  uint32                   cols  = 2;
+  repeated CountSketchCell cells = 3;
+  repeated double          l2    = 4 [packed = true];
+  TopKState                topk  = 5;
+}
+
+// CountSketchCell encodes the signed delta for a single (row, col).
+message CountSketchCell {
+  uint32 row     = 1;
+  uint32 col     = 2;
+  double d_count = 3;
+}

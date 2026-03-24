@@ -1,7 +1,7 @@
 package countsketch
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	pb "github.com/ProjectASAP/sketchlib-go/proto/countsketch"
 	"google.golang.org/protobuf/proto"
 )
 

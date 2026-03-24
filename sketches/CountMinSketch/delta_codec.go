@@ -1,7 +1,7 @@
 package countminsketch
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	pb "github.com/ProjectASAP/sketchlib-go/proto/countminsketch"
 	"google.golang.org/protobuf/proto"
 )
 

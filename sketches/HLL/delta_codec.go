@@ -1,7 +1,7 @@
 package hll
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	pb "github.com/ProjectASAP/sketchlib-go/proto/hll"
 	"google.golang.org/protobuf/proto"
 )
 

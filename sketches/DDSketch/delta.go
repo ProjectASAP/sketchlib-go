@@ -1,7 +1,7 @@
 package ddsketch
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	pb "github.com/ProjectASAP/sketchlib-go/proto/ddsketch"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -28,16 +28,33 @@ func ComputeDelta(snapshot, current *DDSketch, threshold uint64) ([]byte, error)
 	}
 
 	// Compute per-bucket deltas by iterating all buckets in current.
-	current.EachBucket(func(k int32, count uint64) {
-		snapCount := snapshot.BucketCount(k)
-		dc := count - snapCount
-		if dc >= threshold {
-			delta.Buckets = append(delta.Buckets, &pb.DDSketchBucketDelta{
-				Index:  k,
-				DCount: dc,
-			})
+	if !current.store.IsEmpty() {
+		currCounts := current.store.counts.AsSlice()
+		var snapCounts []uint64
+		if !snapshot.store.IsEmpty() {
+			snapCounts = snapshot.store.counts.AsSlice()
 		}
-	})
+		for i, c := range currCounts {
+			if c == 0 {
+				continue
+			}
+			k := current.store.offset + int32(i)
+			var snapCount uint64
+			if snapCounts != nil {
+				idx := k - snapshot.store.offset
+				if idx >= 0 && int(idx) < len(snapCounts) {
+					snapCount = snapCounts[idx]
+				}
+			}
+			dc := c - snapCount
+			if dc >= threshold {
+				delta.Buckets = append(delta.Buckets, &pb.DDSketchBucketDelta{
+					Index:  k,
+					DCount: dc,
+				})
+			}
+		}
+	}
 
 	return proto.Marshal(delta)
 }
@@ -52,16 +69,11 @@ func ApplyDelta(target *DDSketch, data []byte) error {
 	}
 
 	for _, b := range delta.Buckets {
-		target.AddToBucket(b.Index, b.DCount)
+		target.store.ensure(b.Index)
+		target.store.counts.AsMutSlice()[int(b.Index-target.store.offset)] += b.DCount
+		target.count += b.DCount
 	}
 
-	// Adjust count and sum directly; AddToBucket already incremented count per
-	// bucket but did not add sum (DDSketch doesn't track per-bucket sums).
-	// We add the d_count separately only for count tracking that AddToBucket
-	// already did, so we must NOT double-count. Instead we only adjust sum.
-	// Note: AddToBucket increments d.count for each bucket call, so the
-	// bucket loop above already accounted for the count delta correctly.
-	// We only need to add the sum delta here.
 	target.sum += delta.DSum
 
 	if delta.MinChanged {
