@@ -46,3 +46,26 @@ message DDSketchState {
 
   reserved 8 to 15;
 }
+
+// ============================================================================
+// DDSketch Delta
+// ============================================================================
+
+// DDSketchDelta carries only the buckets that changed above threshold T.
+// count/sum are additive deltas. min/max are lossless scalars transmitted
+// only when they changed (min can only decrease, max can only increase).
+message DDSketchDelta {
+  repeated DDSketchBucketDelta buckets     = 1;
+  int64   d_count     = 2;
+  double  d_sum       = 3;
+  double  new_min     = 4;
+  double  new_max     = 5;
+  bool    min_changed = 6;
+  bool    max_changed = 7;
+}
+
+// DDSketchBucketDelta is the delta for one log-scale bucket.
+message DDSketchBucketDelta {
+  sint32 index   = 1;  // signed bucket index (negative for values < 1)
+  uint64 d_count = 2;  // Δcount ≥ threshold T
+}

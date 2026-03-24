@@ -57,3 +57,27 @@ message CountMinState {
 
   reserved 10 to 15;
 }
+
+// ============================================================================
+// CountMin Delta
+// ============================================================================
+
+// CountMinDelta carries only the cells where at least one of the three counter
+// arrays (Count, Sum, Sum2) changed by at least the configured threshold T.
+// L1 and L2 row vectors are always transmitted in full (one float64 per row).
+message CountMinDelta {
+  uint32                rows  = 1;
+  uint32                cols  = 2;
+  repeated CountMinCell cells = 3;
+  repeated double       l1    = 4 [packed = true];
+  repeated double       l2    = 5 [packed = true];
+}
+
+// CountMinCell encodes deltas for all three counter arrays at a single (row, col).
+message CountMinCell {
+  uint32 row     = 1;
+  uint32 col     = 2;
+  double d_count = 3;
+  double d_sum   = 4;
+  double d_sum2  = 5;
+}

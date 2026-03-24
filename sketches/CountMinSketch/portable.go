@@ -1,9 +1,12 @@
 package countminsketch
 
 import (
+	"fmt"
+
 	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
 	cmpb "github.com/ProjectASAP/sketchlib-go/proto/countminsketch"
 	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
+	"google.golang.org/protobuf/proto"
 )
 
 // SerializePortable serializes the CountMinSketch into a portable protobuf SketchEnvelope.
@@ -44,6 +47,67 @@ func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 			CountMin: state,
 		},
 	}, nil
+}
+
+// SerializeProtoBytes serializes the CountMinSketch as a proto-encoded SketchEnvelope.
+func (s *CountMinSketch) SerializeProtoBytes() ([]byte, error) {
+	env, err := s.SerializePortable()
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(env)
+}
+
+// DeserializeCountMinSketchFromProtoBytes restores a CountMinSketch from a proto-encoded SketchEnvelope.
+func DeserializeCountMinSketchFromProtoBytes(data []byte) (*CountMinSketch, error) {
+	var env envpb.SketchEnvelope
+	if err := proto.Unmarshal(data, &env); err != nil {
+		return nil, err
+	}
+	st := env.GetCountMin()
+	if st == nil {
+		return nil, fmt.Errorf("countminsketch: proto envelope does not contain CountMinState")
+	}
+
+	rows := int(st.GetRows())
+	cols := int(st.GetCols())
+	if rows <= 0 || cols <= 0 {
+		return nil, fmt.Errorf("countminsketch: invalid dimensions %d×%d", rows, cols)
+	}
+
+	flat := st.GetCountsFloat()
+	sumFlat := st.GetSumCounts()
+	sum2Flat := st.GetSum2Counts()
+	expected := rows * cols
+	if len(flat) != expected || len(sumFlat) != expected || len(sum2Flat) != expected {
+		return nil, fmt.Errorf("countminsketch: unexpected matrix size")
+	}
+
+	count := make([][]float64, rows)
+	sumC := make([][]float64, rows)
+	sum2C := make([][]float64, rows)
+	for r := 0; r < rows; r++ {
+		count[r] = append([]float64(nil), flat[r*cols:(r+1)*cols]...)
+		sumC[r] = append([]float64(nil), sumFlat[r*cols:(r+1)*cols]...)
+		sum2C[r] = append([]float64(nil), sum2Flat[r*cols:(r+1)*cols]...)
+	}
+
+	l1 := append([]float64(nil), st.GetL1()...)
+	l2 := append([]float64(nil), st.GetL2()...)
+
+	s := &CountMinSketch{
+		Rows:  rows,
+		Cols:  cols,
+		Count: count,
+		Sum:   sumC,
+		Sum2:  sum2C,
+		L1:    l1,
+		L2:    l2,
+	}
+	if err := s.rehydrateStorage(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // portableHashSpec returns the standard HashSpec for sketchlib-go.

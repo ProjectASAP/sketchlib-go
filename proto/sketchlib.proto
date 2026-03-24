@@ -4,11 +4,11 @@
 // message types live in their per-sketch proto files:
 //
 //   common/common.proto              — HashSpec, ProducerInfo, CounterType, ...
-//   countminsketch/countminsketch.proto — CountMinState
-//   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry
-//   hll/hll.proto                    — HyperLogLogState, HLLVariant
+//   countminsketch/countminsketch.proto — CountMinState, CountMinDelta, CountMinCell
+//   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry, CountSketchDelta, CountSketchCell
+//   hll/hll.proto                    — HyperLogLogState, HLLVariant, HLLDelta, HLLRegisterUpdate
 //   kll/kll.proto                    — KLLState, CoinState
-//   ddsketch/ddsketch.proto          — DDSketchState
+//   ddsketch/ddsketch.proto          — DDSketchState, DDSketchDelta, DDSketchBucketDelta
 //   univmon/univmon.proto            — UnivMonState, UnivMonLayer
 //   hydra/hydra.proto                — HydraState, HydraCounterType, HydraCell
 //
@@ -78,4 +78,44 @@ message SketchEnvelope {
   }
 
   reserved 19 to 31;  // Reserved for future sketch types.
+}
+
+// ============================================================================
+// Delta Transmission — Sparse Snapshots
+// ============================================================================
+// These messages carry only the cells / registers that changed since the last
+// transmitted snapshot. They are wrapped in SketchDeltaEnvelope and carried in
+// the sketch_payload bytes field on OTel data points, distinguished from
+// full-sketch payloads by the encoding="proto_delta" attribute.
+//
+// Receiver semantics:
+//   CountMin / CountSketch:  agg[r][c] += cell.d_*
+//   HLL:                     agg[i]    = max(agg[i], update.value)
+//   DDSketch buckets:        agg[b]   += bucket.d_count
+//   DDSketch min/max:        lossless  — only transmitted when changed
+//
+// Per-sketch delta message types live in their per-sketch proto files:
+//   countminsketch/countminsketch.proto — CountMinDelta, CountMinCell
+//   countsketch/countsketch.proto       — CountSketchDelta, CountSketchCell
+//   hll/hll.proto                       — HLLDelta, HLLRegisterUpdate
+//   ddsketch/ddsketch.proto             — DDSketchDelta, DDSketchBucketDelta
+
+// SketchDeltaEnvelope is the top-level wire container for delta payloads.
+message SketchDeltaEnvelope {
+  // Identifies which partition this delta belongs to.
+  string partition_key   = 1;
+
+  // Unix milliseconds of the current window start. 0 when no window (Mode 1).
+  int64  window_start_ms = 2;
+
+  // When true, the receiver should finalize and reset its accumulator for
+  // this (partition_key, window_start_ms) after applying this delta.
+  bool   is_window_close = 3;
+
+  oneof delta {
+    CountMinDelta    count_min    = 10;
+    CountSketchDelta count_sketch = 11;
+    HLLDelta         hll          = 12;
+    DDSketchDelta    ddsketch     = 13;
+  }
 }
