@@ -1,12 +1,14 @@
 package cocosketch
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
+	cocopb "github.com/ProjectASAP/sketchlib-go/proto/cocosketch"
+	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
 )
 
 // SerializePortable serializes the CocoSketch into a portable protobuf SketchEnvelope.
 // The bucket table is stored flat in row-major order as three parallel arrays.
-func (c *CocoSketch) SerializePortable() (*pb.SketchEnvelope, error) {
+func (c *CocoSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	n := c.d * c.length
 	hashes := make([]uint64, n)
 	vals := make([]uint64, n)
@@ -22,7 +24,7 @@ func (c *CocoSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 		}
 	}
 
-	state := &pb.CocoSketchState{
+	state := &cocopb.CocoSketchState{
 		D:       uint32(c.d),
 		Width:   uint32(c.length),
 		Hashes:  hashes,
@@ -30,22 +32,22 @@ func (c *CocoSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 		HasKeys: hasKeys,
 	}
 
-	return &pb.SketchEnvelope{
+	return &envpb.SketchEnvelope{
 		FormatVersion: 1,
-		Producer: &pb.ProducerInfo{
+		Producer: &commonpb.ProducerInfo{
 			Library: "sketchlib-go",
 			Version: "0.1.0",
 		},
 		HashSpec: portableHashSpec(),
-		SketchState: &pb.SketchEnvelope_Coco{
+		SketchState: &envpb.SketchEnvelope_Coco{
 			Coco: state,
 		},
 	}, nil
 }
 
-func portableHashSpec() *pb.HashSpec {
-	return &pb.HashSpec{
-		Algorithm:          pb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
+func portableHashSpec() *commonpb.HashSpec {
+	return &commonpb.HashSpec{
+		Algorithm:          commonpb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
 		CanonicalSeedIndex: 5,
 		SeedList: []uint64{
 			0xcafe3553, 0xade3415118, 0x8cc70208, 0x2f024b2b, 0x451a3df5,
@@ -53,6 +55,6 @@ func portableHashSpec() *pb.HashSpec {
 			0x9b05688c, 0x1f83d9ab, 0x5be0cd19, 0xcbbb9d5d, 0x629a292a,
 			0x9159015a, 0x152fecd8, 0x67332667, 0x8eb44a87, 0xdb0c2e0d,
 		},
-		SeedDerivation: pb.SeedDerivation_SEED_DERIVATION_PACKED,
+		SeedDerivation: commonpb.SeedDerivation_SEED_DERIVATION_PACKED,
 	}
 }

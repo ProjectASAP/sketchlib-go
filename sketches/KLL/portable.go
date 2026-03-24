@@ -1,11 +1,13 @@
 package kll
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
+	kllpb "github.com/ProjectASAP/sketchlib-go/proto/kll"
+	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
 )
 
 // SerializePortable serializes the KLLSketch into a portable protobuf SketchEnvelope.
-func (s *KLLSketch) SerializePortable() (*pb.SketchEnvelope, error) {
+func (s *KLLSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	// Convert []int levels to []uint32.
 	levels := make([]uint32, len(s.levels))
 	for i, v := range s.levels {
@@ -14,36 +16,36 @@ func (s *KLLSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 
 	items := append([]float64(nil), s.items...)
 
-	state := &pb.KLLState{
+	state := &kllpb.KLLState{
 		K:         uint32(s.k),
 		M:         uint32(s.m),
 		NumLevels: uint32(s.numLevels),
 		Levels:    levels,
 		Items:     items,
-		Coin: &pb.CoinState{
+		Coin: &kllpb.CoinState{
 			State:         s.co.state,
 			BitCache:      s.co.bitCache,
 			RemainingBits: uint32(s.co.remainingBits),
 		},
 	}
 
-	return &pb.SketchEnvelope{
+	return &envpb.SketchEnvelope{
 		FormatVersion: 1,
-		Producer: &pb.ProducerInfo{
+		Producer: &commonpb.ProducerInfo{
 			Library: "sketchlib-go",
 			Version: "0.1.0",
 		},
 		HashSpec: portableHashSpec(),
-		SketchState: &pb.SketchEnvelope_Kll{
+		SketchState: &envpb.SketchEnvelope_Kll{
 			Kll: state,
 		},
 	}, nil
 }
 
 // portableHashSpec returns the standard HashSpec for sketchlib-go.
-func portableHashSpec() *pb.HashSpec {
-	return &pb.HashSpec{
-		Algorithm:          pb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
+func portableHashSpec() *commonpb.HashSpec {
+	return &commonpb.HashSpec{
+		Algorithm:          commonpb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
 		CanonicalSeedIndex: 5,
 		SeedList: []uint64{
 			0xcafe3553,
@@ -67,6 +69,6 @@ func portableHashSpec() *pb.HashSpec {
 			0x8eb44a87,
 			0xdb0c2e0d,
 		},
-		SeedDerivation: pb.SeedDerivation_SEED_DERIVATION_PACKED,
+		SeedDerivation: commonpb.SeedDerivation_SEED_DERIVATION_PACKED,
 	}
 }

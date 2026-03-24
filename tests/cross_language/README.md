@@ -23,25 +23,26 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 ```
 sketchlib-go/
   tests/cross_language/
-    run_test.sh     ← orchestrates build + run of both sides
-    README.md       ← this file
-  cmd/xtest_producer/
-    main.go         ← Go binary that writes the 9 .pb files
+    run_test.sh          ← orchestrates both phases
+    producer_test.go     ← Go test that writes the 9 .pb files (no binary)
+    README.md            ← this file
 
 sketchlib-rust/
-  src/bin/
-    xtest_consumer.rs ← Rust binary that reads and verifies those files
+  tests/
+    xtest_consumer.rs    ← Rust integration test that reads and verifies those files (no binary)
 ```
+
+Neither side produces a standalone binary. The producer runs via `go test` and the
+consumer runs via `cargo test`.
 
 ## Quick start
 
 ```bash
 # From any directory inside the repo:
-sketchlib-go/tests/cross_language/run_test.sh
+./tests/cross_language/run_test.sh
 
-# Or from this directory:
-cd sketchlib-go/tests/cross_language
-./run_test.sh
+# Or from the sketchlib-go directory:
+sketchlib-go/tests/cross_language/run_test.sh
 ```
 
 ### Options
@@ -50,7 +51,7 @@ cd sketchlib-go/tests/cross_language
 |----------|---------|--------|
 | `KEEP_TMP=1` | off | Keep the `.pb` output directory after the test |
 | `TMP_DIR=/some/path` | auto | Write `.pb` files to a specific directory |
-| `VERBOSE=1` | off | Show full build output |
+| `VERBOSE=1` | off | Show full build and test output |
 
 Examples:
 
@@ -61,15 +62,31 @@ KEEP_TMP=1 ./run_test.sh
 # Use a fixed output directory
 TMP_DIR=/tmp/xtest ./run_test.sh
 
-# Verbose build output
+# Verbose output
 VERBOSE=1 ./run_test.sh
+```
+
+## Running each phase independently
+
+**Go producer only:**
+
+```bash
+cd sketchlib-go
+XTEST_DIR=/tmp/mytest go test -v -run TestXtestProducer ./tests/cross_language/
+```
+
+**Rust consumer only** (requires `.pb` files to already exist):
+
+```bash
+cd sketchlib-rust
+XTEST_DIR=/tmp/mytest cargo test --test xtest_consumer -- --nocapture
 ```
 
 ## How it works
 
 ```
-Go producer                  proto wire format           Rust consumer
-─────────────────────────────────────────────────────────────────────
+Go producer (go test)            proto wire format           Rust consumer (cargo test)
+──────────────────────────────────────────────────────────────────────────────────────
 CountMinSketch.SerializePortable()  →  countmin.pb  →  decode + min-freq query
 KLL.SerializePortable()             →  kll.pb       →  decode + quantile query
 DDSketch.SerializePortable()        →  ddsketch.pb  →  decode + quantile query
@@ -96,17 +113,18 @@ Seed roles:
 
 ### Protobuf schema
 
-`proto/sketchlib.proto` is shared between both libraries. Go regenerates
-`sketchlib-go/proto/sketchlibpb/sketchlib.pb.go` via `protoc-gen-go`.
-Rust regenerates `sketchlib.v1.rs` at build time via `prost-build` in `build.rs`.
+Each sketch type has its own `.proto` file under `proto/<sketch>/`. The envelope
+`proto/sketchlib.proto` wraps all types via a `oneof`. Go regenerates per-package
+`.pb.go` files via `protoc-gen-go`. Rust regenerates `sketchlib.v1.rs` at build
+time via `prost-build` in `build.rs`.
 
 ## Adding a new sketch
 
-1. Implement `SerializePortable() (*pb.SketchEnvelope, error)` in the sketch's Go package.
-2. Add a message and oneof arm to `proto/sketchlib.proto`.
+1. Implement `SerializePortable() (*envpb.SketchEnvelope, error)` in the sketch's Go package.
+2. Add a `.proto` file under `sketchlib-go/proto/<sketch>/` and a `oneof` arm in `proto/sketchlib.proto`.
 3. Regenerate the Go and Rust proto bindings.
-4. Add a producer section in `cmd/xtest_producer/main.go`.
-5. Add a consumer section in `sketchlib-rust/src/bin/xtest_consumer.rs`.
+4. Add a producer section in `sketchlib-go/tests/cross_language/producer_test.go`.
+5. Add a consumer section in `sketchlib-rust/tests/xtest_consumer.rs`.
 
 ## Running from CI
 
@@ -115,5 +133,5 @@ The script exits non-zero on any failure and is suitable for use as a CI step:
 ```yaml
 # GitHub Actions example
 - name: Cross-language integration test
-  run: sketchlib-go/tests/cross_language/run_test.sh
+  run: ./tests/cross_language/run_test.sh
 ```

@@ -1,14 +1,16 @@
 package hll
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
+	hllpb "github.com/ProjectASAP/sketchlib-go/proto/hll"
+	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
 )
 
 // SerializePortable serializes the DataFusion-style HyperLogLog as a SketchEnvelope.
-func (h *HyperLogLog) SerializePortable() (*pb.SketchEnvelope, error) {
+func (h *HyperLogLog) SerializePortable() (*envpb.SketchEnvelope, error) {
 	regs := append([]byte(nil), h.Registers.AsSlice()...)
-	state := &pb.HyperLogLogState{
-		Variant:   pb.HLLVariant_HLL_VARIANT_DATAFUSION,
+	state := &hllpb.HyperLogLogState{
+		Variant:   hllpb.HLLVariant_HLL_VARIANT_DATAFUSION,
 		Precision: HLLPrecision,
 		Registers: regs,
 	}
@@ -16,13 +18,13 @@ func (h *HyperLogLog) SerializePortable() (*pb.SketchEnvelope, error) {
 }
 
 // SerializePortable serializes a HyperLogLogVariant (Regular or DataFusion) as a SketchEnvelope.
-func (h *HyperLogLogVariant) SerializePortable() (*pb.SketchEnvelope, error) {
-	variant := pb.HLLVariant_HLL_VARIANT_REGULAR
+func (h *HyperLogLogVariant) SerializePortable() (*envpb.SketchEnvelope, error) {
+	variant := hllpb.HLLVariant_HLL_VARIANT_REGULAR
 	if h.Variant == HLLDataFusion {
-		variant = pb.HLLVariant_HLL_VARIANT_DATAFUSION
+		variant = hllpb.HLLVariant_HLL_VARIANT_DATAFUSION
 	}
 	regs := append([]byte(nil), h.Registers.AsSlice()...)
-	state := &pb.HyperLogLogState{
+	state := &hllpb.HyperLogLogState{
 		Variant:   variant,
 		Precision: HLLPrecision,
 		Registers: regs,
@@ -31,10 +33,10 @@ func (h *HyperLogLogVariant) SerializePortable() (*pb.SketchEnvelope, error) {
 }
 
 // SerializePortable serializes a HyperLogLogHIP as a SketchEnvelope.
-func (h *HyperLogLogHIP) SerializePortable() (*pb.SketchEnvelope, error) {
+func (h *HyperLogLogHIP) SerializePortable() (*envpb.SketchEnvelope, error) {
 	regs := append([]byte(nil), h.Registers.AsSlice()...)
-	state := &pb.HyperLogLogState{
-		Variant:   pb.HLLVariant_HLL_VARIANT_HIP,
+	state := &hllpb.HyperLogLogState{
+		Variant:   hllpb.HLLVariant_HLL_VARIANT_HIP,
 		Precision: HLLPrecision,
 		Registers: regs,
 		HipKxq0:   h.kxq0,
@@ -44,23 +46,23 @@ func (h *HyperLogLogHIP) SerializePortable() (*pb.SketchEnvelope, error) {
 	return hllEnvelope(state), nil
 }
 
-func hllEnvelope(state *pb.HyperLogLogState) *pb.SketchEnvelope {
-	return &pb.SketchEnvelope{
+func hllEnvelope(state *hllpb.HyperLogLogState) *envpb.SketchEnvelope {
+	return &envpb.SketchEnvelope{
 		FormatVersion: 1,
-		Producer: &pb.ProducerInfo{
+		Producer: &commonpb.ProducerInfo{
 			Library: "sketchlib-go",
 			Version: "0.1.0",
 		},
 		HashSpec: portableHashSpec(),
-		SketchState: &pb.SketchEnvelope_Hll{
+		SketchState: &envpb.SketchEnvelope_Hll{
 			Hll: state,
 		},
 	}
 }
 
-func portableHashSpec() *pb.HashSpec {
-	return &pb.HashSpec{
-		Algorithm:          pb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
+func portableHashSpec() *commonpb.HashSpec {
+	return &commonpb.HashSpec{
+		Algorithm:          commonpb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
 		CanonicalSeedIndex: 5,
 		SeedList: []uint64{
 			0xcafe3553, 0xade3415118, 0x8cc70208, 0x2f024b2b, 0x451a3df5,
@@ -68,6 +70,6 @@ func portableHashSpec() *pb.HashSpec {
 			0x9b05688c, 0x1f83d9ab, 0x5be0cd19, 0xcbbb9d5d, 0x629a292a,
 			0x9159015a, 0x152fecd8, 0x67332667, 0x8eb44a87, 0xdb0c2e0d,
 		},
-		SeedDerivation: pb.SeedDerivation_SEED_DERIVATION_PACKED,
+		SeedDerivation: commonpb.SeedDerivation_SEED_DERIVATION_PACKED,
 	}
 }
