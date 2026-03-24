@@ -909,13 +909,13 @@ func TestOctoAccuracy_DDSketch(t *testing.T) {
 	drainOctoFixed(t, agg, workers, inputChans, deltaCh, inputs)
 
 	type quantileRow struct {
-		q        float64
-		exact    float64
-		baseEst  float64
-		octoEst  float64
-		baseRE   float64
-		octoRE   float64
-		divRE    float64
+		q       float64
+		exact   float64
+		baseEst float64
+		octoEst float64
+		baseRE  float64
+		octoRE  float64
+		divRE   float64
 	}
 
 	quantiles := []float64{0.50, 0.75, 0.90, 0.99}

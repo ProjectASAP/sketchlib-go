@@ -39,7 +39,7 @@ func TestCMSErrorBoundPreserved(t *testing.T) {
 	const cols = 2048
 	const tau = 8.0
 	const hotKeyCount = 5000
-	const coldKeyCount = 200  // per cold key
+	const coldKeyCount = 200 // per cold key
 	const numColdKeys = 50
 
 	deltaCh := make(chan octosketch.DeltaUpdate, 1<<20)
@@ -352,7 +352,7 @@ func TestAdaptiveTauPreservesGuarantees(t *testing.T) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func TestDDSketchRelativeErrorPreserved(t *testing.T) {
-	const alpha = 0.01  // 1% relative error guarantee
+	const alpha = 0.01 // 1% relative error guarantee
 	const tau = 10.0
 	const N = 5_000
 
