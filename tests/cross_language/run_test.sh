@@ -2,7 +2,7 @@
 # run_test.sh — Cross-language integration test for sketchlib.
 #
 # Builds and runs:
-#   1. Go producer  (sketchlib-go)   — writes 9 .pb sketch files into a tmp dir
+#   1. Go producer  (sketchlib-go)   — writes 9 .pb sketch files into a tmp dir (go test)
 #   2. Rust consumer (sketchlib-rust) — reads those files, deserialises each sketch,
 #      runs sanity queries, and asserts correctness
 #
@@ -68,11 +68,6 @@ ok()     { echo "${GREEN}[OK]${RESET}  $*"; }
 err()    { echo "${RED}[ERR]${RESET} $*" >&2; }
 step()   { echo "  ${BOLD}>${RESET} $*"; }
 
-BUILD_FLAGS=""
-if [[ "${VERBOSE:-0}" == "1" ]]; then
-    BUILD_FLAGS="-v"
-fi
-
 # ---------------------------------------------------------------------------
 # Sanity-check prerequisites
 # ---------------------------------------------------------------------------
@@ -93,17 +88,15 @@ done
 # ---------------------------------------------------------------------------
 header "Phase 1 — Go producer (sketchlib-go)"
 
-PRODUCER_BIN="$TMP_DIR/xtest_producer"
-
-step "go build ./cmd/xtest_producer"
+step "go test -run TestXtestProducer ./tests/cross_language/"
 (
     cd "$GO_DIR"
-    go build $BUILD_FLAGS -o "$PRODUCER_BIN" ./cmd/xtest_producer
+    if [[ "${VERBOSE:-0}" == "1" ]]; then
+        XTEST_DIR="$TMP_DIR" go test -v -run TestXtestProducer ./tests/cross_language/
+    else
+        XTEST_DIR="$TMP_DIR" go test -v -run TestXtestProducer ./tests/cross_language/ 2>&1 | grep -E '^(ok|FAIL|---|    )' || true
+    fi
 )
-ok "Built $PRODUCER_BIN"
-
-step "Run producer → $TMP_DIR"
-"$PRODUCER_BIN" "$TMP_DIR"
 
 echo ""
 step "Produced .pb files:"
@@ -128,20 +121,15 @@ ok "All 9 sketch files present"
 # ---------------------------------------------------------------------------
 header "Phase 2 — Rust consumer (sketchlib-rust)"
 
-step "cargo build --bin xtest_consumer"
+step "cargo test --test xtest_consumer"
 (
     cd "$RUST_DIR"
     if [[ "${VERBOSE:-0}" == "1" ]]; then
-        cargo build --bin xtest_consumer
+        XTEST_DIR="$TMP_DIR" cargo test --test xtest_consumer -- --nocapture
     else
-        cargo build --bin xtest_consumer 2>&1 | grep -E '^(error|warning\[|   Compiling|    Finished)' || true
+        XTEST_DIR="$TMP_DIR" cargo test --test xtest_consumer -- --nocapture 2>&1 | grep -E '^(error|warning\[|   Compiling|    Finished|test |FAILED|ok$)' || true
     fi
 )
-CONSUMER_BIN="$RUST_DIR/target/debug/xtest_consumer"
-ok "Built $CONSUMER_BIN"
-
-step "Run consumer ← $TMP_DIR"
-"$CONSUMER_BIN" "$TMP_DIR"
 
 # ---------------------------------------------------------------------------
 # Done

@@ -1,12 +1,17 @@
 package countminsketch
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	"fmt"
+
+	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
+	cmpb "github.com/ProjectASAP/sketchlib-go/proto/countminsketch"
+	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
+	"google.golang.org/protobuf/proto"
 )
 
 // SerializePortable serializes the CountMinSketch into a portable protobuf SketchEnvelope.
 // The counter matrix is stored flat in row-major order using FLOAT64 counters.
-func (s *CountMinSketch) SerializePortable() (*pb.SketchEnvelope, error) {
+func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	// Flatten the count matrix to row-major float64 slice.
 	countsFloat := make([]float64, 0, s.Rows*s.Cols)
 	sumCounts := make([]float64, 0, s.Rows*s.Cols)
@@ -20,10 +25,10 @@ func (s *CountMinSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 	l1 := append([]float64(nil), s.L1...)
 	l2 := append([]float64(nil), s.L2...)
 
-	state := &pb.CountMinState{
+	state := &cmpb.CountMinState{
 		Rows:        uint32(s.Rows),
 		Cols:        uint32(s.Cols),
-		CounterType: pb.CounterType_COUNTER_TYPE_FLOAT64,
+		CounterType: commonpb.CounterType_COUNTER_TYPE_FLOAT64,
 		CountsFloat: countsFloat,
 		SumCounts:   sumCounts,
 		Sum2Counts:  sum2Counts,
@@ -31,23 +36,84 @@ func (s *CountMinSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 		L2:          l2,
 	}
 
-	return &pb.SketchEnvelope{
+	return &envpb.SketchEnvelope{
 		FormatVersion: 1,
-		Producer: &pb.ProducerInfo{
+		Producer: &commonpb.ProducerInfo{
 			Library: "sketchlib-go",
 			Version: "0.1.0",
 		},
 		HashSpec: portableHashSpec(),
-		SketchState: &pb.SketchEnvelope_CountMin{
+		SketchState: &envpb.SketchEnvelope_CountMin{
 			CountMin: state,
 		},
 	}, nil
 }
 
+// SerializeProtoBytes serializes the CountMinSketch as a proto-encoded SketchEnvelope.
+func (s *CountMinSketch) SerializeProtoBytes() ([]byte, error) {
+	env, err := s.SerializePortable()
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(env)
+}
+
+// DeserializeCountMinSketchFromProtoBytes restores a CountMinSketch from a proto-encoded SketchEnvelope.
+func DeserializeCountMinSketchFromProtoBytes(data []byte) (*CountMinSketch, error) {
+	var env envpb.SketchEnvelope
+	if err := proto.Unmarshal(data, &env); err != nil {
+		return nil, err
+	}
+	st := env.GetCountMin()
+	if st == nil {
+		return nil, fmt.Errorf("countminsketch: proto envelope does not contain CountMinState")
+	}
+
+	rows := int(st.GetRows())
+	cols := int(st.GetCols())
+	if rows <= 0 || cols <= 0 {
+		return nil, fmt.Errorf("countminsketch: invalid dimensions %d×%d", rows, cols)
+	}
+
+	flat := st.GetCountsFloat()
+	sumFlat := st.GetSumCounts()
+	sum2Flat := st.GetSum2Counts()
+	expected := rows * cols
+	if len(flat) != expected || len(sumFlat) != expected || len(sum2Flat) != expected {
+		return nil, fmt.Errorf("countminsketch: unexpected matrix size")
+	}
+
+	count := make([][]float64, rows)
+	sumC := make([][]float64, rows)
+	sum2C := make([][]float64, rows)
+	for r := 0; r < rows; r++ {
+		count[r] = append([]float64(nil), flat[r*cols:(r+1)*cols]...)
+		sumC[r] = append([]float64(nil), sumFlat[r*cols:(r+1)*cols]...)
+		sum2C[r] = append([]float64(nil), sum2Flat[r*cols:(r+1)*cols]...)
+	}
+
+	l1 := append([]float64(nil), st.GetL1()...)
+	l2 := append([]float64(nil), st.GetL2()...)
+
+	s := &CountMinSketch{
+		Rows:  rows,
+		Cols:  cols,
+		Count: count,
+		Sum:   sumC,
+		Sum2:  sum2C,
+		L1:    l1,
+		L2:    l2,
+	}
+	if err := s.rehydrateStorage(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 // portableHashSpec returns the standard HashSpec for sketchlib-go.
-func portableHashSpec() *pb.HashSpec {
-	return &pb.HashSpec{
-		Algorithm:          pb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
+func portableHashSpec() *commonpb.HashSpec {
+	return &commonpb.HashSpec{
+		Algorithm:          commonpb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
 		CanonicalSeedIndex: 5,
 		SeedList: []uint64{
 			0xcafe3553,
@@ -71,6 +137,6 @@ func portableHashSpec() *pb.HashSpec {
 			0x8eb44a87,
 			0xdb0c2e0d,
 		},
-		SeedDerivation: pb.SeedDerivation_SEED_DERIVATION_PACKED,
+		SeedDerivation: commonpb.SeedDerivation_SEED_DERIVATION_PACKED,
 	}
 }

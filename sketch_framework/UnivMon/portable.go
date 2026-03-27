@@ -1,14 +1,17 @@
 package univmon
 
 import (
-	pb "github.com/ProjectASAP/sketchlib-go/proto/sketchlibpb"
+	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
+	cspb "github.com/ProjectASAP/sketchlib-go/proto/countsketch"
+	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
+	umpb "github.com/ProjectASAP/sketchlib-go/proto/univmon"
 )
 
 // SerializePortable serializes the UnivSketch into a portable protobuf SketchEnvelope.
 // Each layer's CountSketchUniv is stored as a CountSketchState with INT64 counters.
 // Each layer's TopK heap is stored as a TopKState.
-func (us *UnivSketch) SerializePortable() (*pb.SketchEnvelope, error) {
-	layers := make([]*pb.UnivMonLayer, us.layer)
+func (us *UnivSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
+	layers := make([]*umpb.UnivMonLayer, us.layer)
 	for i := 0; i < us.layer; i++ {
 		cs := us.cs_layers[i]
 
@@ -24,31 +27,31 @@ func (us *UnivSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 			l2[r] = float64(cs.l2[r])
 		}
 
-		csState := &pb.CountSketchState{
+		csState := &cspb.CountSketchState{
 			Rows:        uint32(cs.row),
 			Cols:        uint32(cs.col),
-			CounterType: pb.CounterType_COUNTER_TYPE_INT64,
+			CounterType: commonpb.CounterType_COUNTER_TYPE_INT64,
 			CountsInt:   countsInt,
 			L2:          l2,
 		}
 
 		hh := us.HH_layers[i]
-		var topk *pb.TopKState
+		var topk *cspb.TopKState
 		if hh != nil {
-			entries := make([]*pb.HeapEntry, 0, len(hh.Heap))
+			entries := make([]*cspb.HeapEntry, 0, len(hh.Heap))
 			for _, item := range hh.Heap {
-				entries = append(entries, &pb.HeapEntry{
+				entries = append(entries, &cspb.HeapEntry{
 					Key:   item.Key,
 					Count: float64(item.Count),
 				})
 			}
-			topk = &pb.TopKState{
+			topk = &cspb.TopKState{
 				K:       uint32(hh.K),
 				Entries: entries,
 			}
 		}
 
-		layers[i] = &pb.UnivMonLayer{
+		layers[i] = &umpb.UnivMonLayer{
 			Sketch: csState,
 			Heap:   topk,
 		}
@@ -64,7 +67,7 @@ func (us *UnivSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 		}
 	}
 
-	state := &pb.UnivMonState{
+	state := &umpb.UnivMonState{
 		LayerSize:  uint32(us.layer),
 		SketchRows: sketchRows,
 		SketchCols: sketchCols,
@@ -73,22 +76,22 @@ func (us *UnivSketch) SerializePortable() (*pb.SketchEnvelope, error) {
 		Layers:     layers,
 	}
 
-	return &pb.SketchEnvelope{
+	return &envpb.SketchEnvelope{
 		FormatVersion: 1,
-		Producer: &pb.ProducerInfo{
+		Producer: &commonpb.ProducerInfo{
 			Library: "sketchlib-go",
 			Version: "0.1.0",
 		},
 		HashSpec: portableHashSpec(),
-		SketchState: &pb.SketchEnvelope_Univmon{
+		SketchState: &envpb.SketchEnvelope_Univmon{
 			Univmon: state,
 		},
 	}, nil
 }
 
-func portableHashSpec() *pb.HashSpec {
-	return &pb.HashSpec{
-		Algorithm:          pb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
+func portableHashSpec() *commonpb.HashSpec {
+	return &commonpb.HashSpec{
+		Algorithm:          commonpb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
 		CanonicalSeedIndex: 5,
 		SeedList: []uint64{
 			0xcafe3553, 0xade3415118, 0x8cc70208, 0x2f024b2b, 0x451a3df5,
@@ -96,6 +99,6 @@ func portableHashSpec() *pb.HashSpec {
 			0x9b05688c, 0x1f83d9ab, 0x5be0cd19, 0xcbbb9d5d, 0x629a292a,
 			0x9159015a, 0x152fecd8, 0x67332667, 0x8eb44a87, 0xdb0c2e0d,
 		},
-		SeedDerivation: pb.SeedDerivation_SEED_DERIVATION_PACKED,
+		SeedDerivation: commonpb.SeedDerivation_SEED_DERIVATION_PACKED,
 	}
 }

@@ -19,3 +19,4 @@ out/
 xtest_producer
 benchmark.test
 benchmark_results/
+tests/cross_language/xtest_producer_test_*.go
