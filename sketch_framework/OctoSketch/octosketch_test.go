@@ -494,31 +494,45 @@ func TestHLLSystemWiring(t *testing.T) {
 func TestAdaptiveTauIncreaseOnHighQueue(t *testing.T) {
 	cfg := octosketch.TauConfig{
 		Initial: 10, Min: 1, Max: 100, Step: 1,
-		UpperBound: 5, LowerBound: 1,
+		TargetQueue: 5, Deadband: 0,
 	}
 	tau := octosketch.NewAdaptiveTau(cfg)
-	tau.Adjust(10) // above upper bound
+	tau.Adjust(10) // Qhat = 10 + (10-10) = 10 > Q
 	assert.Equal(t, 11.0, tau.Current())
 }
 
 func TestAdaptiveTauDecreaseOnLowQueue(t *testing.T) {
 	cfg := octosketch.TauConfig{
 		Initial: 10, Min: 1, Max: 100, Step: 1,
-		UpperBound: 50, LowerBound: 5,
+		TargetQueue: 5, Deadband: 0,
 	}
 	tau := octosketch.NewAdaptiveTau(cfg)
-	tau.Adjust(0) // below lower bound
+	tau.Adjust(0) // Qhat = 0 + (0-0) = 0 < Q
 	assert.Equal(t, 9.0, tau.Current())
 }
 
 func TestAdaptiveTauClamping(t *testing.T) {
 	cfg := octosketch.TauConfig{
 		Initial: 1, Min: 1, Max: 5, Step: 10,
-		UpperBound: 0, LowerBound: -1, // UpperBound=0 → always adjust up
+		TargetQueue: 1, Deadband: 0,
 	}
 	tau := octosketch.NewAdaptiveTau(cfg)
-	tau.Adjust(99) // large queue
+	tau.Adjust(99) // very large predicted queue
 	assert.Equal(t, 5.0, tau.Current(), "tau must be clamped to Max")
+}
+
+func TestAdaptiveTauTrendPrediction(t *testing.T) {
+	cfg := octosketch.TauConfig{
+		Initial: 10, Min: 1, Max: 100, Step: 1,
+		TargetQueue: 10, Deadband: 0,
+	}
+	tau := octosketch.NewAdaptiveTau(cfg)
+	tau.Adjust(8) // first sample, Qhat = 8 -> decrease
+	assert.Equal(t, 9.0, tau.Current())
+	tau.Adjust(9) // Qhat = 9 + (9-8) = 10 -> hold
+	assert.Equal(t, 9.0, tau.Current())
+	tau.Adjust(10) // Qhat = 10 + (10-9) = 11 -> increase
+	assert.Equal(t, 10.0, tau.Current())
 }
 
 func TestFixedTauNeverChanges(t *testing.T) {

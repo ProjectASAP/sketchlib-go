@@ -36,6 +36,15 @@ const (
 type HyperLogLog struct {
 	// Registers store leading-zero counts per bucket.
 	Registers *storage.Vector1D[uint8]
+
+	// OctoSketch τ-batching state (used only on worker-side instances).
+	// pendingCount tracks how many registers have changed since the last
+	// batch emission. pendingMask is a bitset of those register indices.
+	// When pendingCount reaches τ, all dirty registers are emitted at once
+	// and the dirty state is cleared. This makes τ meaningful for HLL by
+	// amortising the per-register delta cost over τ register changes.
+	pendingCount int32
+	pendingMask  [HLLRegisterCount / 64]uint64
 }
 
 // NewHyperLogLog returns a new zero-initialized HLL sketch.
@@ -48,6 +57,14 @@ func NewHyperLogLog() *HyperLogLog {
 // New mirrors Rust constructor naming for the DataFusion-style variant.
 func New() *HyperLogLog {
 	return NewHyperLogLog()
+}
+
+// clearPending resets the pending dirty-register state.
+func (h *HyperLogLog) clearPending() {
+	for i := range h.pendingMask {
+		h.pendingMask[i] = 0
+	}
+	h.pendingCount = 0
 }
 
 // Debug prints raw register values (for inspection only).
@@ -221,6 +238,7 @@ func (h *HyperLogLog) QueryWithHash(q common.QueryType, hash uint64) (float64, e
 // Reset clears all registers, returning the sketch to its zero state.
 func (h *HyperLogLog) Reset() {
 	clear(h.Registers.AsMutSlice())
+	h.clearPending()
 }
 
 // Merge combines another HLL into this one.
@@ -273,15 +291,36 @@ func (h *HyperLogLog) IndexAndLZFromInput(input *common.SketchInput) (index int,
 	return h.IndexAndLZ(input.CanonicalHash)
 }
 
-// ProcessInput is an optimized OctoSketch worker fast path that reuses the
-// precomputed canonical hash stored in SketchInput and derives (index, lz) once.
-func (h *HyperLogLog) ProcessInput(input *common.SketchInput, _ float64, emit func(common.DeltaUpdate)) {
+// ProcessInput is the optimized OctoSketch worker fast path.
+//
+// Unlike CountMin/CountSketch, HLL registers are monotone: they never reset after
+// a delta is emitted, so the standard "emit when cell ≥ τ, then reset" model cannot
+// reduce the delta rate for HLL. Instead, τ controls how many register changes are
+// accumulated before a batch emission: when pendingCount reaches τ, all dirty
+// registers (those changed since the last batch) are emitted at once and the dirty
+// state is cleared. This gives the same O(1/τ) reduction in delta traffic as the
+// reset-based model does for CountMin.
+func (h *HyperLogLog) ProcessInput(input *common.SketchInput, tau float64, emit func(common.DeltaUpdate)) {
 	if input == nil {
 		return
 	}
 	index, lz := h.IndexAndLZ(input.CanonicalHash)
-	if newVal, changed := h.UpdateRegister(index, lz); changed {
-		emit(common.DeltaUpdate{Row: 0, Col: index, Value: newVal})
+	if _, changed := h.UpdateRegister(index, lz); changed {
+		h.pendingMask[index/64] |= 1 << uint(index%64)
+		h.pendingCount++
+		if float64(h.pendingCount) >= tau {
+			// Emit all dirty registers as a single batch, then clear state.
+			regs := h.Registers.AsSlice()
+			for i, mask := range h.pendingMask {
+				for mask != 0 {
+					bit := bits.TrailingZeros64(mask)
+					idx := i*64 + bit
+					emit(common.DeltaUpdate{Row: 0, Col: idx, Value: float64(regs[idx])})
+					mask &^= 1 << uint(bit)
+				}
+			}
+			h.clearPending()
+		}
 	}
 }
 
@@ -342,12 +381,13 @@ func (h *HyperLogLog) UpdateCell(_ int, col int, input *common.SketchInput) (flo
 func (h *HyperLogLog) ShouldEmit(_, _ float64) bool { return true }
 
 // BuildDelta emits the updated register value. Row is always 0; Col is the register index.
-func (h *HyperLogLog) BuildDelta(_ int, col int, input *common.SketchInput) common.DeltaUpdate {
+// Key is not set: MergeDelta uses only Col and Value, so carrying input.Bytes would
+// add GC pressure without any benefit.
+func (h *HyperLogLog) BuildDelta(_ int, col int, _ *common.SketchInput) common.DeltaUpdate {
 	return common.DeltaUpdate{
 		Row:   0,
 		Col:   col,
 		Value: float64(h.RegisterValue(col)),
-		Key:   input.Bytes,
 	}
 }
 
@@ -367,12 +407,18 @@ func (h *HyperLogLog) Estimate(_ *common.SketchInput) float64 {
 	return float64(h.EstimateCardinality())
 }
 
-// Flush emits all non-zero registers as DeltaUpdates via ForEachNonZeroRegister.
-// Registers are NOT reset — they are monotone.
+// Flush emits all non-zero registers as DeltaUpdates and clears the pending dirty
+// state. Emitting a full register snapshot (rather than only the pending dirty
+// registers) preserves snapshot semantics: a late-joining aggregator that calls
+// Flush alone receives the complete current state. For the primary aggregator,
+// re-sending already-delivered register values is harmless because MergeDelta
+// applies max and is therefore idempotent. Registers are NOT reset — they are
+// monotone.
 func (h *HyperLogLog) Flush(emit func(common.DeltaUpdate)) {
 	h.ForEachNonZeroRegister(func(index int, val uint8) {
 		emit(common.DeltaUpdate{Row: 0, Col: index, Value: float64(val)})
 	})
+	h.clearPending()
 }
 
 // SerializeToBytes serializes HyperLogLog into bytes.

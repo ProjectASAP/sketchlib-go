@@ -380,16 +380,17 @@ func (d *DDSketch) BucketCount(k int32) uint64 {
 	return counts[idx]
 }
 
-// AddToBucket increments bucket k's count by delta and adjusts d.count.
-// Grows the bucket store if k is outside the current range.
-// Also updates d.min and d.max from the bucket representative so that
-// GetValueAtQuantile's safety-clamp remains meaningful.
-func (d *DDSketch) AddToBucket(k int32, delta uint64) {
+// AddToBucket increments bucket k's count by delta, adjusts d.count, updates
+// d.min/d.max, and returns the new bucket count. Grows the bucket store if k is
+// outside the current range.
+func (d *DDSketch) AddToBucket(k int32, delta uint64) uint64 {
 	if delta == 0 {
-		return
+		return d.BucketCount(k)
 	}
 	d.store.ensure(k)
-	d.store.counts.AsMutSlice()[int(k-d.store.offset)] += delta
+	idx := int(k - d.store.offset)
+	counts := d.store.counts.AsMutSlice()
+	counts[idx] += delta
 	d.count += delta
 	rep := d.mapping.Value(k)
 	if rep < d.min {
@@ -398,6 +399,35 @@ func (d *DDSketch) AddToBucket(k int32, delta uint64) {
 	if rep > d.max {
 		d.max = rep
 	}
+	return counts[idx]
+}
+
+// addOneFast is the hot-path variant of AddToBucket(k, 1).
+// It avoids the ensure() call when bucket k is already within the store's range,
+// saving a function call and two bounds checks on every insert of a hot bucket.
+// It falls back to AddToBucket for new or out-of-range buckets.
+func (d *DDSketch) addOneFast(k int32) uint64 {
+	if !d.store.IsEmpty() {
+		idx := int(k - d.store.offset)
+		counts := d.store.counts.AsMutSlice()
+		if uint(idx) < uint(len(counts)) {
+			prev := counts[idx]
+			counts[idx]++
+			d.count++
+			if prev == 0 {
+				// First write to this bucket: initialise min/max from representative.
+				rep := d.mapping.Value(k)
+				if rep < d.min {
+					d.min = rep
+				}
+				if rep > d.max {
+					d.max = rep
+				}
+			}
+			return counts[idx]
+		}
+	}
+	return d.AddToBucket(k, 1)
 }
 
 // ResetBucket zeroes bucket k and decrements d.count by the bucket's current count.
@@ -508,16 +538,20 @@ func (d *DDSketch) ColForRow(input *common.SketchInput, _ int) int {
 
 // UpdateCell increments the local count for bucket col by 1.
 // Returns (0, false) for the sentinel bucket; (newVal, true) otherwise.
+// Uses the AddToBucket return value directly to avoid a separate BucketCount read.
 func (d *DDSketch) UpdateCell(_, col int, _ *common.SketchInput) (float64, bool) {
 	if col == math.MinInt32 {
 		return 0, false
 	}
-	d.AddToBucket(int32(col), 1)
-	return float64(d.BucketCount(int32(col))), true
+	count := d.AddToBucket(int32(col), 1)
+	return float64(count), true
 }
 
-// ProcessInput is an optimized OctoSketch worker fast path that decodes the
-// float payload once, derives the bucket index once, and emits directly.
+// ProcessInput is the optimized OctoSketch worker fast path.
+// It decodes the float payload once, derives the bucket index once, and uses
+// addOneFast to update the bucket while returning the new count in one pass —
+// avoiding the separate BucketCount read that the generic UpdateCell path would
+// require. For hot (already-allocated) buckets this also skips the ensure() call.
 func (d *DDSketch) ProcessInput(input *common.SketchInput, tau float64, emit func(common.DeltaUpdate)) {
 	if input == nil {
 		return
@@ -527,8 +561,7 @@ func (d *DDSketch) ProcessInput(input *common.SketchInput, tau float64, emit fun
 		return
 	}
 	col := int32(d.BucketIndex(v))
-	d.AddToBucket(col, 1)
-	count := d.BucketCount(col)
+	count := d.addOneFast(col)
 	if float64(count) >= tau {
 		emit(common.DeltaUpdate{Row: 0, Col: int(col), Value: float64(count)})
 		d.ResetBucket(col)

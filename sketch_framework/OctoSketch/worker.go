@@ -4,6 +4,12 @@ import "github.com/ProjectASAP/sketchlib-go/common"
 
 const defaultDeltaBatchSize = 64
 
+// DefaultBatchPoolSize is the number of deltaBatch objects pre-allocated per
+// worker in the recycle pool. A small fixed pool is sufficient because each
+// worker's dedicated aggregator goroutine drains its channel continuously;
+// the pool only needs to cover in-flight batches between drain cycles.
+const DefaultBatchPoolSize = 8
+
 type deltaBatch struct {
 	deltas []DeltaUpdate
 }
@@ -31,6 +37,7 @@ type optimizedProcessor interface {
 //  5. Wait on Done() for the goroutine to flush and exit.
 type Worker struct {
 	id        int
+	coreID    int
 	sketch    CellSketch
 	tau       *AdaptiveTau
 	deltaCh   chan<- DeltaUpdate
@@ -58,6 +65,7 @@ func NewWorker(
 ) *Worker {
 	w := &Worker{
 		id:      id,
+		coreID:  id,
 		sketch:  sketch,
 		tau:     tau,
 		deltaCh: deltaCh,
@@ -78,6 +86,7 @@ func newBatchedWorker(
 ) *Worker {
 	w := &Worker{
 		id:        id,
+		coreID:    id,
 		sketch:    sketch,
 		tau:       tau,
 		batchCh:   batchCh,
@@ -150,11 +159,38 @@ func (w *Worker) Flush() {
 // Done() is closed after Flush() completes.
 func (w *Worker) Run() {
 	go func() {
+		unlock := lockThreadToCore(w.coreID)
+		defer unlock()
 		defer close(w.doneCh)
 		if w.batchCh != nil {
 			defer close(w.batchCh)
 		}
 		for input := range w.inputCh {
+			w.Process(input)
+		}
+		w.Flush()
+	}()
+}
+
+// RunDirect processes a pre-partitioned slice of inputs directly, bypassing
+// the inputCh channel. This eliminates channel-dispatch overhead for callers
+// that can partition inputs before goroutine creation (e.g. benchmarks).
+//
+// Unlike Run(), RunDirect does NOT lock the goroutine to an OS thread. Thread
+// pinning is intentionally omitted here because RunDirect is designed for
+// concurrent scenarios where workers and aggregator shards share a fixed CPU
+// pool: locking N worker threads on an M-core machine (N close to M) starves
+// the N aggregator shard goroutines, causing them to pile up on the remaining
+// M-N threads and block workers on recycleCh.
+//
+// Do NOT call both Run() and RunDirect() on the same Worker.
+func (w *Worker) RunDirect(inputs []*common.SketchInput) {
+	go func() {
+		defer close(w.doneCh)
+		if w.batchCh != nil {
+			defer close(w.batchCh)
+		}
+		for _, input := range inputs {
 			w.Process(input)
 		}
 		w.Flush()
