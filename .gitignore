@@ -18,3 +18,4 @@ out/
 # Local binaries without extension
 xtest_producer
 benchmark.test
+benchmark_results/
