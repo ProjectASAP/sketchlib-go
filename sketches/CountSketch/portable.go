@@ -11,37 +11,36 @@ import (
 )
 
 // SerializePortable serializes the CountSketch into a portable protobuf SketchEnvelope.
-// The counter matrix is stored flat in row-major order using FLOAT64 counters (signed).
+// Opt-2: counter matrix is encoded as packed sint64 (zigzag varint), giving 4–8×
+// size reduction over float64 for typical small-integer counter values.
+// Opt-4: heavy-hitter candidates are serialized as plain string keys from the
+// Space-Saving tracker; downstream queries the merged CS for accurate counts.
 func (s *CountSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
-	countsFloat := make([]float64, 0, s.Rows*s.Cols)
+	// Opt-2: sint64 packed varint instead of float64.
+	countsInt := make([]int64, 0, s.Rows*s.Cols)
 	for r := 0; r < s.Rows; r++ {
-		countsFloat = append(countsFloat, s.Count[r]...)
+		for _, v := range s.Count[r] {
+			countsInt = append(countsInt, int64(v))
+		}
 	}
 
 	l2 := append([]float64(nil), s.L2...)
 
-	var topk *cspb.TopKState
-	if s.TopK != nil && len(s.TopK.Heap) > 0 {
-		entries := make([]*cspb.HeapEntry, 0, len(s.TopK.Heap))
-		for _, item := range s.TopK.Heap {
-			entries = append(entries, &cspb.HeapEntry{
-				Key:   item.Key,
-				Count: float64(item.Count),
-			})
-		}
-		topk = &cspb.TopKState{
-			K:       uint32(s.TopK.K),
-			Entries: entries,
-		}
+	// Opt-4: emit candidate key strings from Space-Saving tracker.
+	// No counts forwarded — downstream queries the merged CS matrix.
+	var hhKeys []string
+	if s.SS != nil && s.SS.Len() > 0 {
+		hhKeys = s.SS.Candidates()
 	}
 
 	state := &cspb.CountSketchState{
 		Rows:        uint32(s.Rows),
 		Cols:        uint32(s.Cols),
-		CounterType: commonpb.CounterType_COUNTER_TYPE_FLOAT64,
-		CountsFloat: countsFloat,
+		CounterType: commonpb.CounterType_COUNTER_TYPE_INT64,
+		CountsInt:   countsInt,
 		L2:          l2,
-		Topk:        topk,
+		HhKeys:      hhKeys,
+		// Topk intentionally omitted (stale upstream-local counts replaced by hh_keys).
 	}
 
 	return &envpb.SketchEnvelope{
@@ -66,7 +65,14 @@ func (s *CountSketch) SerializeProtoBytes() ([]byte, error) {
 	return proto.Marshal(env)
 }
 
-// DeserializeCountSketchFromProtoBytes restores a CountSketch from a proto-encoded SketchEnvelope.
+// DeserializeCountSketchFromProtoBytes restores a CountSketch from a proto-encoded
+// SketchEnvelope. Supports:
+//   - sint64 counts_int (new, preferred — Opt-2)
+//   - float64 counts_float (legacy, backward-compatible)
+//
+// Heavy-hitter candidates from hh_keys are used to rebuild the TopK heap by
+// querying the restored CS matrix (globally-merged estimates). Legacy topk
+// entries are used as fallback when hh_keys is absent.
 func DeserializeCountSketchFromProtoBytes(data []byte) (*CountSketch, error) {
 	var env envpb.SketchEnvelope
 	if err := proto.Unmarshal(data, &env); err != nil {
@@ -82,11 +88,17 @@ func DeserializeCountSketchFromProtoBytes(data []byte) (*CountSketch, error) {
 	if rows <= 0 || cols <= 0 {
 		return nil, fmt.Errorf("countsketch: invalid dimensions %d×%d", rows, cols)
 	}
-
-	flat := st.GetCountsFloat()
 	expected := rows * cols
-	if len(flat) != expected {
-		return nil, fmt.Errorf("countsketch: unexpected matrix size")
+
+	// Decode Count: prefer sint64, fall back to float64 for older payloads.
+	var flat []float64
+	if intC := st.GetCountsInt(); len(intC) == expected {
+		flat = csInt64ToFloat64(intC)
+	} else if floatC := st.GetCountsFloat(); len(floatC) == expected {
+		flat = floatC
+	} else {
+		return nil, fmt.Errorf("countsketch: counts size mismatch (int=%d float=%d want=%d)",
+			len(st.GetCountsInt()), len(st.GetCountsFloat()), expected)
 	}
 
 	count := make([][]float64, rows)
@@ -96,32 +108,44 @@ func DeserializeCountSketchFromProtoBytes(data []byte) (*CountSketch, error) {
 
 	l2 := append([]float64(nil), st.GetL2()...)
 
-	var topk *common.TopKHeap
-	if pbTopK := st.GetTopk(); pbTopK != nil && len(pbTopK.GetEntries()) > 0 {
-		k := int(pbTopK.GetK())
-		if k <= 0 {
-			k = TOPK_SIZE
-		}
-		topk = common.NewTopKHeap(k)
-		for _, e := range pbTopK.GetEntries() {
-			topk.Heap = append(topk.Heap, common.Item{
-				Key:   e.GetKey(),
-				Count: int64(e.GetCount()),
-			})
-		}
-	}
-
 	cs := &CountSketch{
 		Rows:  rows,
 		Cols:  cols,
 		Count: count,
 		L2:    l2,
-		TopK:  topk,
 	}
 	if err := cs.rehydrateStorage(); err != nil {
 		return nil, err
 	}
+
+	// Rebuild TopK: prefer hh_keys (Opt-4) over legacy topk entries.
+	if hhKeys := st.GetHhKeys(); len(hhKeys) > 0 {
+		for _, key := range hhKeys {
+			est, _ := cs.QueryWithHash(common.QueryFrequency, common.Hash64([]byte(key)))
+			cs.TopK.Update(key, int64(est))
+		}
+	} else if pbTopK := st.GetTopk(); pbTopK != nil && len(pbTopK.GetEntries()) > 0 {
+		// Legacy path: restore from old-style topk entries (stale upstream counts).
+		k := int(pbTopK.GetK())
+		if k <= 0 {
+			k = TOPK_SIZE
+		}
+		cs.TopK = common.NewTopKHeap(k)
+		for _, e := range pbTopK.GetEntries() {
+			cs.TopK.Update(e.GetKey(), int64(e.GetCount()))
+		}
+	}
+
 	return cs, nil
+}
+
+// csInt64ToFloat64 converts []int64 → []float64.
+func csInt64ToFloat64(src []int64) []float64 {
+	out := make([]float64, len(src))
+	for i, v := range src {
+		out[i] = float64(v)
+	}
+	return out
 }
 
 func portableHashSpec() *commonpb.HashSpec {

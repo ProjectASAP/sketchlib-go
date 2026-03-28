@@ -35,8 +35,13 @@ type CountSketch struct {
 	Count [][]float64
 	L2    []float64
 
-	// TopK Heap from common package
+	// TopK is the downstream query heap, rebuilt from hh_keys + CS estimates
+	// on each ApplyDelta call. Populated only at receiving nodes.
 	TopK *common.TopKHeap
+
+	// SS is the upstream insert tracker (Weighted Space Saving).
+	// Maintained during UpdateString calls; provides Candidates() for delta.
+	SS *common.SpaceSaving
 
 	bitsPerRow uint
 }
@@ -62,6 +67,9 @@ func (s *CountSketch) rehydrateStorage() error {
 
 	if s.TopK == nil {
 		s.TopK = common.NewTopKHeap(TOPK_SIZE)
+	}
+	if s.SS == nil {
+		s.SS = common.NewSpaceSaving(TOPK_SIZE)
 	}
 
 	countStore, err := storage.NewFlatVector2DFrom2D(s.Count)
@@ -120,7 +128,8 @@ func NewCountSketch(dims ...int) (*CountSketch, error) {
 		countStore: countStore,
 		Count:      countStore.As2D(),
 		L2:         make([]float64, rows),
-		TopK:       common.NewTopKHeap(TOPK_SIZE), // Default to standard size
+		TopK:       common.NewTopKHeap(TOPK_SIZE),
+		SS:         common.NewSpaceSaving(TOPK_SIZE),
 		bitsPerRow: bitsPerRow,
 	}, nil
 }
@@ -321,6 +330,9 @@ func (s *CountSketch) Reset() {
 	if s.TopK != nil {
 		s.TopK = common.NewTopKHeap(TOPK_SIZE)
 	}
+	if s.SS != nil {
+		s.SS.Reset()
+	}
 }
 
 func (s *CountSketch) Merge(other common.Sketch) error {
@@ -342,10 +354,12 @@ func (s *CountSketch) Merge(other common.Sketch) error {
 		}
 	}
 
-	// 2. Merge TopK Heap
+	// 2. Merge TopK: update s.TopK with the other node's heap entries,
+	// using the merged CS matrix for accurate counts.
 	if s.TopK != nil && o.TopK != nil {
 		for _, item := range o.TopK.Heap {
-			s.TopK.UpdateCS(item.Key, item.Count)
+			est, _ := s.QueryWithHash(common.QueryFrequency, common.Hash64([]byte(item.Key)))
+			s.TopK.Update(item.Key, int64(est))
 		}
 	}
 
@@ -358,22 +372,15 @@ func (s *CountSketch) TypeName() string {
 
 // ================= EXTENDED FUNCTIONALITY (TopK Support) =================
 
-// UpdateString updates the sketch AND the TopK heap.
-// This preserves the functionality of the original implementation.
+// UpdateString updates the sketch matrix and the Space-Saving candidate tracker.
+// The SS tracker maintains heavy-hitter candidates at O(log k) cost without
+// querying the CS matrix (no CS query on the hot path).
 func (s *CountSketch) UpdateString(key string, count float64) {
-	// 1. Compute Hash internally (or accept it as arg if preferred)
 	hash := common.Hash64([]byte(key))
-
-	// 2. Insert into Sketch
 	s.InsertWithHashAndValue(hash, count)
-
-	// 3. Estimate current count to update Heap
-	est, _ := s.QueryWithHash(common.QueryFrequency, hash)
-
-	// 4. Update TopK Heap
-	// We cast to int64 because common.TopKHeap uses int64
-	s.TopK.UpdateCS(key, int64(est))
-
+	if s.SS != nil {
+		s.SS.Insert(key, count)
+	}
 }
 
 // EstimateStringCount is a helper to query by string directly

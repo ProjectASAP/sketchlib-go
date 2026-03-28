@@ -9,47 +9,79 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// SerializePortable serializes the CountMinSketch into a portable protobuf SketchEnvelope.
-// The counter matrix is stored flat in row-major order using FLOAT64 counters.
+// SerializePortable serializes the CountMinSketch into a portable protobuf
+// SketchEnvelope. Counts are encoded as packed sint64 (zigzag varint) giving
+// 4–8× size reduction over float64 for typical small-integer counter values.
+// All three counter matrices (Count, Sum, Sum2) and both norm vectors are included.
 func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
-	// Flatten the count matrix to row-major float64 slice.
-	countsFloat := make([]float64, 0, s.Rows*s.Cols)
-	sumCounts := make([]float64, 0, s.Rows*s.Cols)
-	sum2Counts := make([]float64, 0, s.Rows*s.Cols)
+	n := s.Rows * s.Cols
+	countsInt := make([]int64, 0, n)
+	sumFlat := make([]float64, 0, n)
+	sum2Flat := make([]float64, 0, n)
 	for r := 0; r < s.Rows; r++ {
-		countsFloat = append(countsFloat, s.Count[r]...)
-		sumCounts = append(sumCounts, s.Sum[r]...)
-		sum2Counts = append(sum2Counts, s.Sum2[r]...)
+		for _, v := range s.Count[r] {
+			countsInt = append(countsInt, int64(v))
+		}
+		sumFlat = append(sumFlat, s.Sum[r]...)
+		sum2Flat = append(sum2Flat, s.Sum2[r]...)
 	}
-
-	l1 := append([]float64(nil), s.L1...)
-	l2 := append([]float64(nil), s.L2...)
 
 	state := &cmpb.CountMinState{
 		Rows:        uint32(s.Rows),
 		Cols:        uint32(s.Cols),
-		CounterType: commonpb.CounterType_COUNTER_TYPE_FLOAT64,
-		CountsFloat: countsFloat,
-		SumCounts:   sumCounts,
-		Sum2Counts:  sum2Counts,
-		L1:          l1,
-		L2:          l2,
+		CounterType: commonpb.CounterType_COUNTER_TYPE_INT64,
+		CountsInt:   countsInt,
+		SumCounts:   sumFlat,
+		Sum2Counts:  sum2Flat,
+		L1:          append([]float64(nil), s.L1...),
+		L2:          append([]float64(nil), s.L2...),
 	}
 
 	return &envpb.SketchEnvelope{
 		FormatVersion: 1,
-		Producer: &commonpb.ProducerInfo{
-			Library: "sketchlib-go",
-			Version: "0.1.0",
-		},
-		HashSpec: portableHashSpec(),
-		SketchState: &envpb.SketchEnvelope_CountMin{
-			CountMin: state,
-		},
+		Producer:      producerInfo(),
+		HashSpec:      portableHashSpec(),
+		SketchState:   &envpb.SketchEnvelope_CountMin{CountMin: state},
 	}, nil
 }
 
-// SerializeProtoBytes serializes the CountMinSketch as a proto-encoded SketchEnvelope.
+// SerializePortableFO (Frequency-Only) is like SerializePortable but omits
+// Sum and Sum2. Use this when all insertions are unweighted (weight = 1) and
+// the downstream only queries frequency. The receiver reconstructs
+// Sum = Sum2 = Count on deserialization at zero cost.
+//
+// Reduces CMS payload by ~3× vs full serialization, compounded with the
+// sint64 savings for a combined ~10–15× reduction over the legacy float64 format.
+func (s *CountMinSketch) SerializePortableFO() (*envpb.SketchEnvelope, error) {
+	n := s.Rows * s.Cols
+	countsInt := make([]int64, 0, n)
+	for r := 0; r < s.Rows; r++ {
+		for _, v := range s.Count[r] {
+			countsInt = append(countsInt, int64(v))
+		}
+	}
+
+	state := &cmpb.CountMinState{
+		Rows:        uint32(s.Rows),
+		Cols:        uint32(s.Cols),
+		CounterType: commonpb.CounterType_COUNTER_TYPE_INT64,
+		CountsInt:   countsInt,
+		// SumCounts and Sum2Counts deliberately omitted.
+		// Receiver sets Sum = Sum2 = Count (valid for unweighted streams).
+		L1: append([]float64(nil), s.L1...),
+		L2: append([]float64(nil), s.L2...),
+	}
+
+	return &envpb.SketchEnvelope{
+		FormatVersion: 1,
+		Producer:      producerInfo(),
+		HashSpec:      portableHashSpec(),
+		SketchState:   &envpb.SketchEnvelope_CountMin{CountMin: state},
+	}, nil
+}
+
+// SerializeProtoBytes serializes the CountMinSketch with all three counter
+// arrays using sint64 encoding (Opt-2: ~4–8× smaller than float64).
 func (s *CountMinSketch) SerializeProtoBytes() ([]byte, error) {
 	env, err := s.SerializePortable()
 	if err != nil {
@@ -58,7 +90,24 @@ func (s *CountMinSketch) SerializeProtoBytes() ([]byte, error) {
 	return proto.Marshal(env)
 }
 
-// DeserializeCountMinSketchFromProtoBytes restores a CountMinSketch from a proto-encoded SketchEnvelope.
+// SerializeProtoBytesFO serializes in Frequency-Only mode: sint64 Count only,
+// no Sum/Sum2. For upstream nodes that do unweighted insertions and whose
+// downstream only queries frequency (Opt-1 + Opt-2 combined).
+func (s *CountMinSketch) SerializeProtoBytesFO() ([]byte, error) {
+	env, err := s.SerializePortableFO()
+	if err != nil {
+		return nil, err
+	}
+	return proto.Marshal(env)
+}
+
+// DeserializeCountMinSketchFromProtoBytes restores a CountMinSketch from a
+// proto-encoded SketchEnvelope. Supports:
+//   - sint64 counts_int (new, preferred)
+//   - float64 counts_float (legacy, backward-compatible)
+//
+// When Sum/Sum2 are absent (Frequency-Only payloads) they are reconstructed
+// as Sum = Sum2 = Count, which is exact for unweighted streams.
 func DeserializeCountMinSketchFromProtoBytes(data []byte) (*CountMinSketch, error) {
 	var env envpb.SketchEnvelope
 	if err := proto.Unmarshal(data, &env); err != nil {
@@ -74,14 +123,22 @@ func DeserializeCountMinSketchFromProtoBytes(data []byte) (*CountMinSketch, erro
 	if rows <= 0 || cols <= 0 {
 		return nil, fmt.Errorf("countminsketch: invalid dimensions %d×%d", rows, cols)
 	}
-
-	flat := st.GetCountsFloat()
-	sumFlat := st.GetSumCounts()
-	sum2Flat := st.GetSum2Counts()
 	expected := rows * cols
-	if len(flat) != expected || len(sumFlat) != expected || len(sum2Flat) != expected {
-		return nil, fmt.Errorf("countminsketch: unexpected matrix size")
+
+	// Decode Count: prefer sint64, fall back to float64 for older payloads.
+	var flat []float64
+	if intC := st.GetCountsInt(); len(intC) == expected {
+		flat = int64ToFloat64(intC)
+	} else if floatC := st.GetCountsFloat(); len(floatC) == expected {
+		flat = floatC
+	} else {
+		return nil, fmt.Errorf("countminsketch: counts size mismatch (int=%d float=%d want=%d)",
+			len(st.GetCountsInt()), len(st.GetCountsFloat()), expected)
 	}
+
+	// Decode Sum and Sum2; reconstruct from Count when absent (FO payload).
+	sumFlat := copyOrFallback(st.GetSumCounts(), flat, expected)
+	sum2Flat := copyOrFallback(st.GetSum2Counts(), flat, expected)
 
 	count := make([][]float64, rows)
 	sumC := make([][]float64, rows)
@@ -92,22 +149,43 @@ func DeserializeCountMinSketchFromProtoBytes(data []byte) (*CountMinSketch, erro
 		sum2C[r] = append([]float64(nil), sum2Flat[r*cols:(r+1)*cols]...)
 	}
 
-	l1 := append([]float64(nil), st.GetL1()...)
-	l2 := append([]float64(nil), st.GetL2()...)
-
 	s := &CountMinSketch{
 		Rows:  rows,
 		Cols:  cols,
 		Count: count,
 		Sum:   sumC,
 		Sum2:  sum2C,
-		L1:    l1,
-		L2:    l2,
+		L1:    append([]float64(nil), st.GetL1()...),
+		L2:    append([]float64(nil), st.GetL2()...),
 	}
 	if err := s.rehydrateStorage(); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// copyOrFallback returns src when len(src) == expected, otherwise returns a
+// copy of fallback. Used to handle absent Sum/Sum2 in Frequency-Only payloads.
+func copyOrFallback(src, fallback []float64, expected int) []float64 {
+	if len(src) == expected {
+		return src
+	}
+	out := make([]float64, expected)
+	copy(out, fallback)
+	return out
+}
+
+// int64ToFloat64 converts []int64 → []float64.
+func int64ToFloat64(src []int64) []float64 {
+	out := make([]float64, len(src))
+	for i, v := range src {
+		out[i] = float64(v)
+	}
+	return out
+}
+
+func producerInfo() *commonpb.ProducerInfo {
+	return &commonpb.ProducerInfo{Library: "sketchlib-go", Version: "0.1.0"}
 }
 
 // portableHashSpec returns the standard HashSpec for sketchlib-go.
@@ -116,26 +194,10 @@ func portableHashSpec() *commonpb.HashSpec {
 		Algorithm:          commonpb.HashAlgorithm_HASH_ALGORITHM_XXH3_64,
 		CanonicalSeedIndex: 5,
 		SeedList: []uint64{
-			0xcafe3553,
-			0xade3415118,
-			0x8cc70208,
-			0x2f024b2b,
-			0x451a3df5,
-			0x6a09e667,
-			0xbb67ae85,
-			0x3c6ef372,
-			0xa54ff53a,
-			0x510e527f,
-			0x9b05688c,
-			0x1f83d9ab,
-			0x5be0cd19,
-			0xcbbb9d5d,
-			0x629a292a,
-			0x9159015a,
-			0x152fecd8,
-			0x67332667,
-			0x8eb44a87,
-			0xdb0c2e0d,
+			0xcafe3553, 0xade3415118, 0x8cc70208, 0x2f024b2b, 0x451a3df5,
+			0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f,
+			0x9b05688c, 0x1f83d9ab, 0x5be0cd19, 0xcbbb9d5d, 0x629a292a,
+			0x9159015a, 0x152fecd8, 0x67332667, 0x8eb44a87, 0xdb0c2e0d,
 		},
 		SeedDerivation: commonpb.SeedDerivation_SEED_DERIVATION_PACKED,
 	}
