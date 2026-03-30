@@ -47,8 +47,8 @@ func TestFoldCountMinMatchesDenseSketch(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		input := common.FromU64(uint64(i))
 		weight := float64((i % 7) + 1)
-		folded.InsertMany(input, weight)
-		dense.InsertMany(input, weight)
+		folded.InsertWeight(input, weight)
+		dense.InsertWeight(input, weight)
 	}
 
 	for i := 0; i < 200; i++ {
@@ -81,13 +81,13 @@ func TestFoldCountMinMergeSameLevelMatchesDense(t *testing.T) {
 
 	for i := 0; i < 50; i++ {
 		input := common.FromU64(uint64(i))
-		left.InsertMany(input, float64(i+1))
-		denseLeft.InsertMany(input, float64(i+1))
+		left.InsertWeight(input, float64(i+1))
+		denseLeft.InsertWeight(input, float64(i+1))
 	}
 	for i := 25; i < 75; i++ {
 		input := common.FromU64(uint64(i))
-		right.InsertMany(input, float64(i+1))
-		denseRight.InsertMany(input, float64(i+1))
+		right.InsertWeight(input, float64(i+1))
+		denseRight.InsertWeight(input, float64(i+1))
 	}
 
 	if err := left.MergeSameLevel(right); err != nil {
@@ -113,13 +113,13 @@ func TestFoldCountMinUnfoldAndHierarchicalMerge(t *testing.T) {
 
 	for i := 0; i < 100; i++ {
 		input := common.FromU64(uint64(i))
-		a.InsertMany(input, 1)
-		dense.InsertMany(input, 1)
+		a.InsertWeight(input, 1)
+		dense.InsertWeight(input, 1)
 	}
 	for i := 50; i < 150; i++ {
 		input := common.FromU64(uint64(i))
-		b.InsertMany(input, 2)
-		dense.InsertMany(input, 2)
+		b.InsertWeight(input, 2)
+		dense.InsertWeight(input, 2)
 	}
 
 	unfolded, err := a.UnfoldTo(0)
@@ -149,7 +149,7 @@ func TestFoldCountMinUnfoldAndHierarchicalMerge(t *testing.T) {
 func TestFoldCountMinSerializationRoundTrip(t *testing.T) {
 	sketch, _ := NewFoldCountMinSketch(3, 256, 3)
 	for i := 0; i < 40; i++ {
-		sketch.InsertMany(common.FromU64(uint64(i)), float64(i+1))
+		sketch.InsertWeight(common.FromU64(uint64(i)), float64(i+1))
 	}
 
 	data, err := sketch.SerializeToBytes()

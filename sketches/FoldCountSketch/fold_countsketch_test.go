@@ -21,8 +21,8 @@ func TestFoldCountSketchMatchesDenseSketch(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		input := common.FromU64(uint64(i))
 		weight := float64((i % 9) + 1)
-		folded.InsertMany(input, weight)
-		dense.InsertMany(input, weight)
+		folded.InsertWeight(input, weight)
+		dense.InsertWeight(input, weight)
 	}
 
 	for i := 0; i < 200; i++ {
@@ -55,18 +55,18 @@ func TestFoldCountSketchMergeAndHierarchicalMerge(t *testing.T) {
 
 	for i := 0; i < 80; i++ {
 		input := common.FromU64(uint64(i))
-		left.InsertMany(input, 1)
-		dense.InsertMany(input, 1)
+		left.InsertWeight(input, 1)
+		dense.InsertWeight(input, 1)
 	}
 	for i := 40; i < 120; i++ {
 		input := common.FromU64(uint64(i))
-		right.InsertMany(input, 2)
-		dense.InsertMany(input, 2)
+		right.InsertWeight(input, 2)
+		dense.InsertWeight(input, 2)
 	}
 	for i := 100; i < 160; i++ {
 		input := common.FromU64(uint64(i))
-		lowFold.InsertMany(input, 3)
-		dense.InsertMany(input, 3)
+		lowFold.InsertWeight(input, 3)
+		dense.InsertWeight(input, 3)
 	}
 
 	if err := left.MergeSameLevel(right); err != nil {
@@ -104,13 +104,13 @@ func TestFoldCountSketchUnfoldMergeMatchesDense(t *testing.T) {
 
 	for i := 0; i < 60; i++ {
 		input := common.FromU64(uint64(i))
-		a.InsertMany(input, float64(i+1))
-		denseA.InsertMany(input, float64(i+1))
+		a.InsertWeight(input, float64(i+1))
+		denseA.InsertWeight(input, float64(i+1))
 	}
 	for i := 30; i < 90; i++ {
 		input := common.FromU64(uint64(i))
-		b.InsertMany(input, float64(i+1))
-		denseB.InsertMany(input, float64(i+1))
+		b.InsertWeight(input, float64(i+1))
+		denseB.InsertWeight(input, float64(i+1))
 	}
 
 	merged, err := UnfoldMergeFoldCountSketch(a, b)
@@ -132,7 +132,7 @@ func TestFoldCountSketchUnfoldMergeMatchesDense(t *testing.T) {
 func TestFoldCountSketchSerializationRoundTrip(t *testing.T) {
 	sketch, _ := NewFoldCountSketch(3, 256, 3)
 	for i := 0; i < 50; i++ {
-		sketch.InsertMany(common.FromU64(uint64(i)), float64(i+1))
+		sketch.InsertWeight(common.FromU64(uint64(i)), float64(i+1))
 	}
 
 	data, err := sketch.SerializeToBytes()

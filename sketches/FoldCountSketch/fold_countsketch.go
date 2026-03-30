@@ -107,11 +107,15 @@ func (s *FoldCountSketch) Insert(input *common.SketchInput) {
 	s.insertHashed(storage.BuildMatrixHashFromInput(input, s.Rows, s.FullCols), 1)
 }
 
-func (s *FoldCountSketch) InsertMany(input *common.SketchInput, many float64) {
+func (s *FoldCountSketch) InsertWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
 	s.insertHashed(storage.BuildMatrixHashFromInput(input, s.Rows, s.FullCols), many)
+}
+
+func (s *FoldCountSketch) InsertMany(input *common.SketchInput, many float64) {
+	s.InsertWeight(input, many)
 }
 
 func (s *FoldCountSketch) insertHashed(hashed storage.MatrixHashType, many float64) {

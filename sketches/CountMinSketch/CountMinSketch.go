@@ -192,11 +192,15 @@ func (s *CountMinSketch) Insert(input *common.SketchInput) {
 	s.insertMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
 }
 
-func (s *CountMinSketch) InsertMany(input *common.SketchInput, many float64) {
+func (s *CountMinSketch) InsertWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
 	s.insertMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), many)
+}
+
+func (s *CountMinSketch) InsertMany(input *common.SketchInput, many float64) {
+	s.InsertWeight(input, many)
 }
 
 func (s *CountMinSketch) BulkInsert(inputs []*common.SketchInput) {
@@ -210,7 +214,7 @@ func (s *CountMinSketch) BulkInsertMany(values []struct {
 	Many  float64
 }) {
 	for _, value := range values {
-		s.InsertMany(value.Input, value.Many)
+		s.InsertWeight(value.Input, value.Many)
 	}
 }
 
