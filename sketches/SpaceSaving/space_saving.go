@@ -1,4 +1,4 @@
-package common
+package spacesaving
 
 // SpaceSaving implements the Weighted Space Saving algorithm
 // (Metwally, Agrawal, Abbadi — "Efficient Computation of Frequent and

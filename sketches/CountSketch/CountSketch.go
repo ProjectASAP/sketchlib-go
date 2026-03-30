@@ -7,6 +7,7 @@ import (
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	"github.com/ProjectASAP/sketchlib-go/common/storage"
+	spacesaving "github.com/ProjectASAP/sketchlib-go/sketches/SpaceSaving"
 )
 
 const CS_ROW_NO_Univ_ELEPHANT int = 5
@@ -41,7 +42,7 @@ type CountSketch struct {
 
 	// SS is the upstream insert tracker (Weighted Space Saving).
 	// Maintained during UpdateString calls; provides Candidates() for delta.
-	SS *common.SpaceSaving
+	SS *spacesaving.SpaceSaving
 
 	bitsPerRow uint
 }
@@ -69,7 +70,7 @@ func (s *CountSketch) rehydrateStorage() error {
 		s.TopK = common.NewTopKHeap(TOPK_SIZE)
 	}
 	if s.SS == nil {
-		s.SS = common.NewSpaceSaving(TOPK_SIZE)
+		s.SS = spacesaving.NewSpaceSaving(TOPK_SIZE)
 	}
 
 	countStore, err := storage.NewFlatVector2DFrom2D(s.Count)
@@ -129,7 +130,7 @@ func NewCountSketch(dims ...int) (*CountSketch, error) {
 		Count:      countStore.As2D(),
 		L2:         make([]float64, rows),
 		TopK:       common.NewTopKHeap(TOPK_SIZE),
-		SS:         common.NewSpaceSaving(TOPK_SIZE),
+		SS:         spacesaving.NewSpaceSaving(TOPK_SIZE),
 		bitsPerRow: bitsPerRow,
 	}, nil
 }
