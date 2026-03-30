@@ -5,7 +5,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// SerializeDelta converts a Delta to proto-encoded bytes in one pass.
+// SerializeDelta converts a Delta to proto-encoded bytes.
+// HHKeys are written to the hh_keys field (Opt-4). The legacy topk field is
+// not populated.
 func SerializeDelta(d *Delta) ([]byte, error) {
 	cells := make([]*pb.CountSketchCell, len(d.Cells))
 	for i := range d.Cells {
@@ -13,22 +15,19 @@ func SerializeDelta(d *Delta) ([]byte, error) {
 		cells[i] = &pb.CountSketchCell{Row: c.Row, Col: c.Col, DCount: c.DCount}
 	}
 	msg := &pb.CountSketchDelta{
-		Rows:  d.Rows,
-		Cols:  d.Cols,
-		Cells: cells,
-		L2:    d.L2,
-	}
-	if len(d.TopK) > 0 {
-		entries := make([]*pb.HeapEntry, len(d.TopK))
-		for i := range d.TopK {
-			entries[i] = &pb.HeapEntry{Key: d.TopK[i].Key, Count: float64(d.TopK[i].Count)}
-		}
-		msg.Topk = &pb.TopKState{K: d.TopKK, Entries: entries}
+		Rows:   d.Rows,
+		Cols:   d.Cols,
+		Cells:  cells,
+		L2:     d.L2,
+		HhKeys: d.HHKeys,
+		// Topk intentionally omitted (replaced by hh_keys).
 	}
 	return proto.Marshal(msg)
 }
 
-// DeserializeDelta converts proto-encoded bytes to a Delta in one pass.
+// DeserializeDelta converts proto-encoded bytes to a Delta.
+// Reads hh_keys (Opt-4) when present; falls back to legacy topk entries
+// (converting them to key-only HHKeys) for backward compatibility.
 func DeserializeDelta(data []byte) (*Delta, error) {
 	var msg pb.CountSketchDelta
 	if err := proto.Unmarshal(data, &msg); err != nil {
@@ -44,11 +43,13 @@ func DeserializeDelta(data []byte) (*Delta, error) {
 		Cells: cells,
 		L2:    msg.L2,
 	}
-	if msg.Topk != nil && len(msg.Topk.Entries) > 0 {
-		d.TopKK = msg.Topk.K
-		d.TopK = make([]TopKEntry, len(msg.Topk.Entries))
-		for i, e := range msg.Topk.Entries {
-			d.TopK[i] = TopKEntry{Key: e.Key, Count: int64(e.Count)}
+	if keys := msg.GetHhKeys(); len(keys) > 0 {
+		d.HHKeys = keys
+	} else if topk := msg.GetTopk(); topk != nil && len(topk.GetEntries()) > 0 {
+		// Legacy fallback: extract keys from old-style TopK entries.
+		d.HHKeys = make([]string, len(topk.GetEntries()))
+		for i, e := range topk.GetEntries() {
+			d.HHKeys[i] = e.GetKey()
 		}
 	}
 	return d, nil

@@ -354,18 +354,18 @@ func TestCS_Reset_SubsequentInserts(t *testing.T) {
 	}
 }
 
-// TestCS_Reset_Allocs confirms that Reset() performs exactly 2 heap allocations:
-// one for the replacement TopKHeap struct and one for its backing slice.
+// TestCS_Reset_Allocs confirms that Reset() performs a bounded number of heap
+// allocations: TopKHeap struct + backing slice (2) + SpaceSaving index map (1).
 func TestCS_Reset_Allocs(t *testing.T) {
 	cs, _ := NewCountSketch(5, 1024)
 	for i := 0; i < 100; i++ {
 		cs.UpdateString("k", 1)
 	}
 
-	const wantAllocs = 2 // TopKHeap struct + make([]Item, 0, TOPK_SIZE)
+	const wantAllocs = 6 // TopKHeap struct + slice, SS map header + buckets (×2 each)
 	allocs := testing.AllocsPerRun(10, func() { cs.Reset() })
 	if allocs != wantAllocs {
-		t.Fatalf("Reset() allocated %.0f times, want %d (1 TopKHeap struct + 1 backing slice)", allocs, wantAllocs)
+		t.Fatalf("Reset() allocated %.0f times, want %d", allocs, wantAllocs)
 	}
 }
 

@@ -12,25 +12,22 @@ type CellDelta struct {
 	DCount   float64 // signed
 }
 
-// TopKEntry is a single heavy-hitter entry retransmitted in full each flush.
-type TopKEntry struct {
-	Key   string
-	Count int64
-}
-
 // Delta is the native Go representation of a sparse CountSketch delta.
 // All fields are plain Go types; no proto dependency.
 type Delta struct {
 	Rows, Cols uint32
 	Cells      []CellDelta // only cells where |ΔCount| ≥ threshold
 	L2         []float64   // full per-row L2 deltas
-	TopK       []TopKEntry // TopK is always retransmitted in full (non-additive)
-	TopKK      uint32      // K parameter of the heap
+	// HHKeys contains heavy-hitter candidate keys from the upstream Space-Saving
+	// tracker. Replaces the old TopK (key+count) entries; downstream queries the
+	// merged CS accumulator for accurate counts. No counts forwarded.
+	HHKeys []string
 }
 
 // ComputeDelta computes a sparse delta between snapshot and current.
 // A cell is included when |ΔCount| ≥ threshold.
-// L2 row deltas and TopK are always included in full.
+// L2 row deltas are always included in full.
+// HHKeys contains the Space-Saving candidates from current.SS.
 // Returns an error if the two sketches have different dimensions.
 func ComputeDelta(snapshot, current *CountSketch, threshold float64) (*Delta, error) {
 	if snapshot.Rows != current.Rows || snapshot.Cols != current.Cols {
@@ -58,22 +55,18 @@ func ComputeDelta(snapshot, current *CountSketch, threshold float64) (*Delta, er
 		d.L2[r] = current.L2[r] - snapshot.L2[r]
 	}
 
-	if current.TopK != nil && len(current.TopK.Heap) > 0 {
-		d.TopKK = uint32(current.TopK.K)
-		d.TopK = make([]TopKEntry, len(current.TopK.Heap))
-		for i, item := range current.TopK.Heap {
-			d.TopK[i] = TopKEntry{Key: item.Key, Count: item.Count}
-		}
+	// Opt-4: emit Space-Saving candidates instead of TopK heap.
+	if current.SS != nil && current.SS.Len() > 0 {
+		d.HHKeys = current.SS.Candidates()
 	}
 
 	return d, nil
 }
 
-// itemFrom converts a TopKEntry back to a common.Item.
-func itemFrom(key string, count int64) common.Item { return common.Item{Key: key, Count: count} }
-
-// ApplyDelta applies d to target using += semantics for cells/L2 and full
-// replacement for TopK (which is non-additive).
+// ApplyDelta applies d to target using += semantics for cells/L2.
+// For heavy-hitter keys, each key in d.HHKeys is queried against the updated
+// target CS matrix and the result is used to rebuild target.TopK with accurate
+// globally-merged estimates.
 // Cells outside target's dimensions are silently skipped.
 func ApplyDelta(target *CountSketch, d *Delta) {
 	for i := range d.Cells {
@@ -89,10 +82,11 @@ func ApplyDelta(target *CountSketch, d *Delta) {
 			target.L2[r] += v
 		}
 	}
-	if len(d.TopK) > 0 && target.TopK != nil {
-		target.TopK.Heap = target.TopK.Heap[:0]
-		for _, e := range d.TopK {
-			target.TopK.Heap = append(target.TopK.Heap, itemFrom(e.Key, e.Count))
+	// Rebuild TopK from hh_keys using the updated (merged) CS matrix.
+	if len(d.HHKeys) > 0 && target.TopK != nil {
+		for _, key := range d.HHKeys {
+			est, _ := target.QueryWithHash(common.QueryFrequency, common.Hash64([]byte(key)))
+			target.TopK.Update(key, int64(est))
 		}
 	}
 }

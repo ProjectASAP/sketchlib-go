@@ -42,9 +42,15 @@ message CountSketchState {
 
   // Optional heavy-hitter (TopK min-heap) state.
   // Absent when TopK tracking is disabled.
+  // Deprecated: use hh_keys (field 16) instead. Populated by old producers only.
   TopKState topk = 7;
 
   reserved 8 to 15;
+
+  // Heavy-hitter candidate keys from the upstream Space-Saving tracker.
+  // Downstream queries the CS matrix for each key to obtain merged estimates.
+  // Replaces the stale upstream-local counts in topk.
+  repeated string hh_keys = 16;
 }
 
 // ============================================================================
@@ -80,11 +86,15 @@ message HeapEntry {
 // CountSketchDelta for the signed Count array. TopK is non-linear (cannot be
 // subtracted), so it is always transmitted in full using the existing TopKState.
 message CountSketchDelta {
-  uint32                   rows  = 1;
-  uint32                   cols  = 2;
-  repeated CountSketchCell cells = 3;
-  repeated double          l2    = 4 [packed = true];
-  TopKState                topk  = 5;
+  uint32                   rows    = 1;
+  uint32                   cols    = 2;
+  repeated CountSketchCell cells   = 3;
+  repeated double          l2      = 4 [packed = true];
+  // Deprecated: use hh_keys (field 6) instead.
+  TopKState                topk    = 5;
+  // Heavy-hitter candidate keys from the upstream Space-Saving tracker.
+  // Downstream queries the merged CS accumulator for each key to build TopK.
+  repeated string          hh_keys = 6;
 }
 
 // CountSketchCell encodes the signed delta for a single (row, col).
