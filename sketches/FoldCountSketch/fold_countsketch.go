@@ -114,10 +114,6 @@ func (s *FoldCountSketch) InsertWeight(input *common.SketchInput, many float64) 
 	s.insertHashed(storage.BuildMatrixHashFromInput(input, s.Rows, s.FullCols), many)
 }
 
-func (s *FoldCountSketch) InsertMany(input *common.SketchInput, many float64) {
-	s.InsertWeight(input, many)
-}
-
 func (s *FoldCountSketch) insertHashed(hashed storage.MatrixHashType, many float64) {
 	for row := 0; row < s.Rows; row++ {
 		fullCol := uint32(hashed.RowHash(row, s.bitsPerRow, s.mask))
