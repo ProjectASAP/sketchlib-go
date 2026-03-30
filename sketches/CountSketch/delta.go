@@ -9,7 +9,7 @@ import (
 // CellDelta holds the signed additive delta for a single (row, col) cell.
 type CellDelta struct {
 	Row, Col uint32
-	DCount   float64 // signed
+	DCount   int64 // signed integer delta
 }
 
 // Delta is the native Go representation of a sparse CountSketch delta.
@@ -47,8 +47,8 @@ func ComputeDelta(snapshot, current *CountSketch, threshold float64) (*Delta, er
 		snapCount := snapshot.Count[r]
 		curCount := current.Count[r]
 		for c := 0; c < cols; c++ {
-			dc := curCount[c] - snapCount[c]
-			if dc != 0 && (dc <= -threshold || dc >= threshold) {
+			dc := int64(curCount[c] - snapCount[c])
+			if dc != 0 && (dc <= -int64(threshold) || dc >= int64(threshold)) {
 				d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
 			}
 		}
@@ -75,7 +75,7 @@ func ApplyDelta(target *CountSketch, d *Delta) {
 		if r >= target.Rows || col >= target.Cols {
 			continue
 		}
-		target.Count[r][col] += c.DCount
+		target.Count[r][col] += float64(c.DCount)
 	}
 	for r, v := range d.L2 {
 		if r < target.Rows {

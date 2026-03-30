@@ -86,20 +86,29 @@ message HeapEntry {
 // CountSketchDelta for the signed Count array. TopK is non-linear (cannot be
 // subtracted), so it is always transmitted in full using the existing TopKState.
 message CountSketchDelta {
-  uint32                   rows    = 1;
-  uint32                   cols    = 2;
-  repeated CountSketchCell cells   = 3;
-  repeated double          l2      = 4 [packed = true];
+  uint32                   rows          = 1;
+  uint32                   cols          = 2;
+  // Deprecated: use cell_rows/cell_cols/d_counts instead.
+  // Kept for backward-compat deserialization from old producers.
+  repeated CountSketchCell cells_legacy  = 3;
+  // Deprecated: use l2 (field 12) instead.
+  repeated double          l2_legacy     = 4 [packed = true];
   // Deprecated: use hh_keys (field 6) instead.
-  TopKState                topk    = 5;
+  TopKState                topk          = 5;
   // Heavy-hitter candidate keys from the upstream Space-Saving tracker.
   // Downstream queries the merged CS accumulator for each key to build TopK.
-  repeated string          hh_keys = 6;
+  repeated string          hh_keys       = 6;
+  // New packed encoding (Opt-2, Stage 2):
+  repeated uint32          cell_rows     = 9  [packed = true];  // row index of each changed cell
+  repeated uint32          cell_cols     = 10 [packed = true];  // col index of each changed cell
+  repeated sint64          d_counts      = 11 [packed = true];  // signed integer count delta
+  repeated double          l2            = 12 [packed = true];  // per-row L2 norm deltas
 }
 
-// CountSketchCell encodes the signed delta for a single (row, col).
+// CountSketchCell is kept for backward-compat deserialization only.
+// New producers must write to CountSketchDelta's packed arrays instead.
 message CountSketchCell {
   uint32 row     = 1;
   uint32 col     = 2;
-  double d_count = 3;
+  double d_count = 3;  // deprecated: use CountSketchDelta.d_counts
 }

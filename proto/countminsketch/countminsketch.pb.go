@@ -154,16 +154,28 @@ func (x *CountMinState) GetL2() []float64 {
 	return nil
 }
 
-// CountMinDelta carries only the cells where at least one of the three counter
-// arrays (Count, Sum, Sum2) changed by at least the configured threshold T.
+// CountMinDelta carries only the cells where at least one counter changed
+// by at least the configured threshold T.
 // L1 and L2 row vectors are always transmitted in full (one float64 per row).
+//
+// Encoding (Opt-1+2, Stage 2):
+//
+//	cell_rows[i], cell_cols[i], d_counts[i] describe the i-th changed cell.
+//	d_sum / d_sum2 are omitted; receiver reconstructs Sum[r][c] += d_count
+//	and Sum2[r][c] += d_count for unweighted (unit-weight) streams.
 type CountMinDelta struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Rows          uint32                 `protobuf:"varint,1,opt,name=rows,proto3" json:"rows,omitempty"`
-	Cols          uint32                 `protobuf:"varint,2,opt,name=cols,proto3" json:"cols,omitempty"`
-	Cells         []*CountMinCell        `protobuf:"bytes,3,rep,name=cells,proto3" json:"cells,omitempty"`
-	L1            []float64              `protobuf:"fixed64,4,rep,packed,name=l1,proto3" json:"l1,omitempty"`
-	L2            []float64              `protobuf:"fixed64,5,rep,packed,name=l2,proto3" json:"l2,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Rows  uint32                 `protobuf:"varint,1,opt,name=rows,proto3" json:"rows,omitempty"`
+	Cols  uint32                 `protobuf:"varint,2,opt,name=cols,proto3" json:"cols,omitempty"`
+	// Deprecated: use cell_rows/cell_cols/d_counts instead.
+	// Kept for backward-compat deserialization from old producers.
+	CellsLegacy []*CountMinCell `protobuf:"bytes,3,rep,name=cells_legacy,json=cellsLegacy,proto3" json:"cells_legacy,omitempty"`
+	L1          []float64       `protobuf:"fixed64,4,rep,packed,name=l1,proto3" json:"l1,omitempty"`
+	L2          []float64       `protobuf:"fixed64,5,rep,packed,name=l2,proto3" json:"l2,omitempty"`
+	// New packed encoding (Opt-1+2, Stage 2):
+	CellRows      []uint32 `protobuf:"varint,9,rep,packed,name=cell_rows,json=cellRows,proto3" json:"cell_rows,omitempty"`  // row index of each changed cell
+	CellCols      []uint32 `protobuf:"varint,10,rep,packed,name=cell_cols,json=cellCols,proto3" json:"cell_cols,omitempty"` // col index of each changed cell
+	DCounts       []int64  `protobuf:"zigzag64,11,rep,packed,name=d_counts,json=dCounts,proto3" json:"d_counts,omitempty"`  // signed integer count delta
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -212,9 +224,9 @@ func (x *CountMinDelta) GetCols() uint32 {
 	return 0
 }
 
-func (x *CountMinDelta) GetCells() []*CountMinCell {
+func (x *CountMinDelta) GetCellsLegacy() []*CountMinCell {
 	if x != nil {
-		return x.Cells
+		return x.CellsLegacy
 	}
 	return nil
 }
@@ -233,14 +245,36 @@ func (x *CountMinDelta) GetL2() []float64 {
 	return nil
 }
 
-// CountMinCell encodes deltas for all three counter arrays at a single (row, col).
+func (x *CountMinDelta) GetCellRows() []uint32 {
+	if x != nil {
+		return x.CellRows
+	}
+	return nil
+}
+
+func (x *CountMinDelta) GetCellCols() []uint32 {
+	if x != nil {
+		return x.CellCols
+	}
+	return nil
+}
+
+func (x *CountMinDelta) GetDCounts() []int64 {
+	if x != nil {
+		return x.DCounts
+	}
+	return nil
+}
+
+// CountMinCell is kept only for backward-compat deserialization.
+// New producers must write to CountMinDelta's packed arrays instead.
 type CountMinCell struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Row           uint32                 `protobuf:"varint,1,opt,name=row,proto3" json:"row,omitempty"`
 	Col           uint32                 `protobuf:"varint,2,opt,name=col,proto3" json:"col,omitempty"`
-	DCount        float64                `protobuf:"fixed64,3,opt,name=d_count,json=dCount,proto3" json:"d_count,omitempty"`
-	DSum          float64                `protobuf:"fixed64,4,opt,name=d_sum,json=dSum,proto3" json:"d_sum,omitempty"`
-	DSum2         float64                `protobuf:"fixed64,5,opt,name=d_sum2,json=dSum2,proto3" json:"d_sum2,omitempty"`
+	DCount        float64                `protobuf:"fixed64,3,opt,name=d_count,json=dCount,proto3" json:"d_count,omitempty"` // deprecated: use CountMinDelta.d_counts
+	DSum          float64                `protobuf:"fixed64,4,opt,name=d_sum,json=dSum,proto3" json:"d_sum,omitempty"`       // deprecated: omitted in new encoding
+	DSum2         float64                `protobuf:"fixed64,5,opt,name=d_sum2,json=dSum2,proto3" json:"d_sum2,omitempty"`    // deprecated: omitted in new encoding
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -328,13 +362,17 @@ const file_countminsketch_countminsketch_proto_rawDesc = "" +
 	"sum2Counts\x12\x12\n" +
 	"\x02l1\x18\b \x03(\x01B\x02\x10\x01R\x02l1\x12\x12\n" +
 	"\x02l2\x18\t \x03(\x01B\x02\x10\x01R\x02l2J\x04\b\n" +
-	"\x10\x10\"\x91\x01\n" +
+	"\x10\x10\"\xff\x01\n" +
 	"\rCountMinDelta\x12\x12\n" +
 	"\x04rows\x18\x01 \x01(\rR\x04rows\x12\x12\n" +
-	"\x04cols\x18\x02 \x01(\rR\x04cols\x120\n" +
-	"\x05cells\x18\x03 \x03(\v2\x1a.sketchlib.v1.CountMinCellR\x05cells\x12\x12\n" +
+	"\x04cols\x18\x02 \x01(\rR\x04cols\x12=\n" +
+	"\fcells_legacy\x18\x03 \x03(\v2\x1a.sketchlib.v1.CountMinCellR\vcellsLegacy\x12\x12\n" +
 	"\x02l1\x18\x04 \x03(\x01B\x02\x10\x01R\x02l1\x12\x12\n" +
-	"\x02l2\x18\x05 \x03(\x01B\x02\x10\x01R\x02l2\"w\n" +
+	"\x02l2\x18\x05 \x03(\x01B\x02\x10\x01R\x02l2\x12\x1f\n" +
+	"\tcell_rows\x18\t \x03(\rB\x02\x10\x01R\bcellRows\x12\x1f\n" +
+	"\tcell_cols\x18\n" +
+	" \x03(\rB\x02\x10\x01R\bcellCols\x12\x1d\n" +
+	"\bd_counts\x18\v \x03(\x12B\x02\x10\x01R\adCounts\"w\n" +
 	"\fCountMinCell\x12\x10\n" +
 	"\x03row\x18\x01 \x01(\rR\x03row\x12\x10\n" +
 	"\x03col\x18\x02 \x01(\rR\x03col\x12\x17\n" +
@@ -363,7 +401,7 @@ var file_countminsketch_countminsketch_proto_goTypes = []any{
 }
 var file_countminsketch_countminsketch_proto_depIdxs = []int32{
 	3, // 0: sketchlib.v1.CountMinState.counter_type:type_name -> sketchlib.v1.CounterType
-	2, // 1: sketchlib.v1.CountMinDelta.cells:type_name -> sketchlib.v1.CountMinCell
+	2, // 1: sketchlib.v1.CountMinDelta.cells_legacy:type_name -> sketchlib.v1.CountMinCell
 	2, // [2:2] is the sub-list for method output_type
 	2, // [2:2] is the sub-list for method input_type
 	2, // [2:2] is the sub-list for extension type_name

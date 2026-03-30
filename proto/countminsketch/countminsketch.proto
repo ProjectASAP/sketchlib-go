@@ -62,22 +62,34 @@ message CountMinState {
 // CountMin Delta
 // ============================================================================
 
-// CountMinDelta carries only the cells where at least one of the three counter
-// arrays (Count, Sum, Sum2) changed by at least the configured threshold T.
+// CountMinDelta carries only the cells where at least one counter changed
+// by at least the configured threshold T.
 // L1 and L2 row vectors are always transmitted in full (one float64 per row).
+//
+// Encoding (Opt-1+2, Stage 2):
+//   cell_rows[i], cell_cols[i], d_counts[i] describe the i-th changed cell.
+//   d_sum / d_sum2 are omitted; receiver reconstructs Sum[r][c] += d_count
+//   and Sum2[r][c] += d_count for unweighted (unit-weight) streams.
 message CountMinDelta {
-  uint32                rows  = 1;
-  uint32                cols  = 2;
-  repeated CountMinCell cells = 3;
-  repeated double       l1    = 4 [packed = true];
-  repeated double       l2    = 5 [packed = true];
+  uint32                    rows          = 1;
+  uint32                    cols          = 2;
+  // Deprecated: use cell_rows/cell_cols/d_counts instead.
+  // Kept for backward-compat deserialization from old producers.
+  repeated CountMinCell     cells_legacy  = 3;
+  repeated double           l1            = 4 [packed = true];
+  repeated double           l2            = 5 [packed = true];
+  // New packed encoding (Opt-1+2, Stage 2):
+  repeated uint32           cell_rows     = 9  [packed = true];  // row index of each changed cell
+  repeated uint32           cell_cols     = 10 [packed = true];  // col index of each changed cell
+  repeated sint64           d_counts      = 11 [packed = true];  // signed integer count delta
 }
 
-// CountMinCell encodes deltas for all three counter arrays at a single (row, col).
+// CountMinCell is kept only for backward-compat deserialization.
+// New producers must write to CountMinDelta's packed arrays instead.
 message CountMinCell {
   uint32 row     = 1;
   uint32 col     = 2;
-  double d_count = 3;
-  double d_sum   = 4;
-  double d_sum2  = 5;
+  double d_count = 3;  // deprecated: use CountMinDelta.d_counts
+  double d_sum   = 4;  // deprecated: omitted in new encoding
+  double d_sum2  = 5;  // deprecated: omitted in new encoding
 }

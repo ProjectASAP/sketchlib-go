@@ -266,13 +266,21 @@ type CountSketchDelta struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Rows  uint32                 `protobuf:"varint,1,opt,name=rows,proto3" json:"rows,omitempty"`
 	Cols  uint32                 `protobuf:"varint,2,opt,name=cols,proto3" json:"cols,omitempty"`
-	Cells []*CountSketchCell     `protobuf:"bytes,3,rep,name=cells,proto3" json:"cells,omitempty"`
-	L2    []float64              `protobuf:"fixed64,4,rep,packed,name=l2,proto3" json:"l2,omitempty"`
+	// Deprecated: use cell_rows/cell_cols/d_counts instead.
+	// Kept for backward-compat deserialization from old producers.
+	CellsLegacy []*CountSketchCell `protobuf:"bytes,3,rep,name=cells_legacy,json=cellsLegacy,proto3" json:"cells_legacy,omitempty"`
+	// Deprecated: use l2 (field 12) instead.
+	L2Legacy []float64 `protobuf:"fixed64,4,rep,packed,name=l2_legacy,json=l2Legacy,proto3" json:"l2_legacy,omitempty"`
 	// Deprecated: use hh_keys (field 6) instead.
 	Topk *TopKState `protobuf:"bytes,5,opt,name=topk,proto3" json:"topk,omitempty"`
 	// Heavy-hitter candidate keys from the upstream Space-Saving tracker.
 	// Downstream queries the merged CS accumulator for each key to build TopK.
-	HhKeys        []string `protobuf:"bytes,6,rep,name=hh_keys,json=hhKeys,proto3" json:"hh_keys,omitempty"`
+	HhKeys []string `protobuf:"bytes,6,rep,name=hh_keys,json=hhKeys,proto3" json:"hh_keys,omitempty"`
+	// New packed encoding (Opt-2, Stage 2):
+	CellRows      []uint32  `protobuf:"varint,9,rep,packed,name=cell_rows,json=cellRows,proto3" json:"cell_rows,omitempty"`  // row index of each changed cell
+	CellCols      []uint32  `protobuf:"varint,10,rep,packed,name=cell_cols,json=cellCols,proto3" json:"cell_cols,omitempty"` // col index of each changed cell
+	DCounts       []int64   `protobuf:"zigzag64,11,rep,packed,name=d_counts,json=dCounts,proto3" json:"d_counts,omitempty"`  // signed integer count delta
+	L2            []float64 `protobuf:"fixed64,12,rep,packed,name=l2,proto3" json:"l2,omitempty"`                            // per-row L2 norm deltas
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -321,16 +329,16 @@ func (x *CountSketchDelta) GetCols() uint32 {
 	return 0
 }
 
-func (x *CountSketchDelta) GetCells() []*CountSketchCell {
+func (x *CountSketchDelta) GetCellsLegacy() []*CountSketchCell {
 	if x != nil {
-		return x.Cells
+		return x.CellsLegacy
 	}
 	return nil
 }
 
-func (x *CountSketchDelta) GetL2() []float64 {
+func (x *CountSketchDelta) GetL2Legacy() []float64 {
 	if x != nil {
-		return x.L2
+		return x.L2Legacy
 	}
 	return nil
 }
@@ -349,12 +357,41 @@ func (x *CountSketchDelta) GetHhKeys() []string {
 	return nil
 }
 
-// CountSketchCell encodes the signed delta for a single (row, col).
+func (x *CountSketchDelta) GetCellRows() []uint32 {
+	if x != nil {
+		return x.CellRows
+	}
+	return nil
+}
+
+func (x *CountSketchDelta) GetCellCols() []uint32 {
+	if x != nil {
+		return x.CellCols
+	}
+	return nil
+}
+
+func (x *CountSketchDelta) GetDCounts() []int64 {
+	if x != nil {
+		return x.DCounts
+	}
+	return nil
+}
+
+func (x *CountSketchDelta) GetL2() []float64 {
+	if x != nil {
+		return x.L2
+	}
+	return nil
+}
+
+// CountSketchCell is kept for backward-compat deserialization only.
+// New producers must write to CountSketchDelta's packed arrays instead.
 type CountSketchCell struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Row           uint32                 `protobuf:"varint,1,opt,name=row,proto3" json:"row,omitempty"`
 	Col           uint32                 `protobuf:"varint,2,opt,name=col,proto3" json:"col,omitempty"`
-	DCount        float64                `protobuf:"fixed64,3,opt,name=d_count,json=dCount,proto3" json:"d_count,omitempty"`
+	DCount        float64                `protobuf:"fixed64,3,opt,name=d_count,json=dCount,proto3" json:"d_count,omitempty"` // deprecated: use CountSketchDelta.d_counts
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -430,14 +467,19 @@ const file_countsketch_countsketch_proto_rawDesc = "" +
 	"\aentries\x18\x02 \x03(\v2\x17.sketchlib.v1.HeapEntryR\aentries\"9\n" +
 	"\tHeapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05count\x18\x02 \x01(\x01R\x05countJ\x04\b\x03\x10\x04\"\xc9\x01\n" +
+	"\x05count\x18\x02 \x01(\x01R\x05countJ\x04\b\x03\x10\x04\"\xd8\x02\n" +
 	"\x10CountSketchDelta\x12\x12\n" +
 	"\x04rows\x18\x01 \x01(\rR\x04rows\x12\x12\n" +
-	"\x04cols\x18\x02 \x01(\rR\x04cols\x123\n" +
-	"\x05cells\x18\x03 \x03(\v2\x1d.sketchlib.v1.CountSketchCellR\x05cells\x12\x12\n" +
-	"\x02l2\x18\x04 \x03(\x01B\x02\x10\x01R\x02l2\x12+\n" +
+	"\x04cols\x18\x02 \x01(\rR\x04cols\x12@\n" +
+	"\fcells_legacy\x18\x03 \x03(\v2\x1d.sketchlib.v1.CountSketchCellR\vcellsLegacy\x12\x1f\n" +
+	"\tl2_legacy\x18\x04 \x03(\x01B\x02\x10\x01R\bl2Legacy\x12+\n" +
 	"\x04topk\x18\x05 \x01(\v2\x17.sketchlib.v1.TopKStateR\x04topk\x12\x17\n" +
-	"\ahh_keys\x18\x06 \x03(\tR\x06hhKeys\"N\n" +
+	"\ahh_keys\x18\x06 \x03(\tR\x06hhKeys\x12\x1f\n" +
+	"\tcell_rows\x18\t \x03(\rB\x02\x10\x01R\bcellRows\x12\x1f\n" +
+	"\tcell_cols\x18\n" +
+	" \x03(\rB\x02\x10\x01R\bcellCols\x12\x1d\n" +
+	"\bd_counts\x18\v \x03(\x12B\x02\x10\x01R\adCounts\x12\x12\n" +
+	"\x02l2\x18\f \x03(\x01B\x02\x10\x01R\x02l2\"N\n" +
 	"\x0fCountSketchCell\x12\x10\n" +
 	"\x03row\x18\x01 \x01(\rR\x03row\x12\x10\n" +
 	"\x03col\x18\x02 \x01(\rR\x03col\x12\x17\n" +
@@ -468,7 +510,7 @@ var file_countsketch_countsketch_proto_depIdxs = []int32{
 	5, // 0: sketchlib.v1.CountSketchState.counter_type:type_name -> sketchlib.v1.CounterType
 	1, // 1: sketchlib.v1.CountSketchState.topk:type_name -> sketchlib.v1.TopKState
 	2, // 2: sketchlib.v1.TopKState.entries:type_name -> sketchlib.v1.HeapEntry
-	4, // 3: sketchlib.v1.CountSketchDelta.cells:type_name -> sketchlib.v1.CountSketchCell
+	4, // 3: sketchlib.v1.CountSketchDelta.cells_legacy:type_name -> sketchlib.v1.CountSketchCell
 	1, // 4: sketchlib.v1.CountSketchDelta.topk:type_name -> sketchlib.v1.TopKState
 	5, // [5:5] is the sub-list for method output_type
 	5, // [5:5] is the sub-list for method input_type
