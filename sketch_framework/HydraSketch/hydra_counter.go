@@ -161,13 +161,13 @@ func (c *countMinCounter) Insert(value *common.SketchInput, count int64) {
 	if value == nil || count == 0 {
 		return
 	}
-	c.s.InsertMany(value, float64(count))
+	c.s.InsertWeight(value, float64(count))
 }
 func (c *countMinCounter) InsertWithHash(_ *common.SketchInput, hash uint64, count int64) {
 	if count == 0 {
 		return
 	}
-	c.s.FastInsertManyWithHashValue(hash, float64(count))
+	c.s.FastInsertWeightWithHashValue(hash, float64(count))
 }
 func (c *countMinCounter) Query(q HydraQuery) (float64, error) {
 	if q.Kind != HydraQueryFrequency || q.Value == nil {
@@ -206,13 +206,13 @@ func (c *countSketchCounter) Insert(value *common.SketchInput, count int64) {
 	if value == nil || count == 0 {
 		return
 	}
-	c.s.InsertMany(value, float64(count))
+	c.s.InsertWeight(value, float64(count))
 }
 func (c *countSketchCounter) InsertWithHash(_ *common.SketchInput, hash uint64, count int64) {
 	if count == 0 {
 		return
 	}
-	c.s.FastInsertManyWithHashValue(hash, float64(count))
+	c.s.FastInsertWeightWithHashValue(hash, float64(count))
 }
 func (c *countSketchCounter) Query(q HydraQuery) (float64, error) {
 	if q.Kind != HydraQueryFrequency || q.Value == nil {

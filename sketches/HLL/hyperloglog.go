@@ -111,13 +111,13 @@ func (h *HyperLogLog) InsertInput(input *common.SketchInput) {
 	h.InsertWithHash(input.CanonicalHash)
 }
 
-func (h *HyperLogLog) InsertMany(inputs []*common.SketchInput) {
+func (h *HyperLogLog) InsertBatch(inputs []*common.SketchInput) {
 	for _, input := range inputs {
 		h.InsertInput(input)
 	}
 }
 
-func (h *HyperLogLog) InsertManyWithHashes(hashes []uint64) {
+func (h *HyperLogLog) InsertHashes(hashes []uint64) {
 	for _, hash := range hashes {
 		h.InsertWithHash(hash)
 	}
@@ -127,13 +127,15 @@ func (h *HyperLogLog) InsertManyWithHashes(hashes []uint64) {
 // It assumes the input has already been hashed.
 //
 // Bit layout (matches Rust DataFusion convention):
-//   bits [63 .. 64-P)  → register index   (upper P = HLLPrecision bits)
-//   bits [64-P-1 .. 0) → leading-zero payload (lower Q = HLLRegisterBits bits)
+//
+//	bits [63 .. 64-P)  → register index   (upper P = HLLPrecision bits)
+//	bits [64-P-1 .. 0) → leading-zero payload (lower Q = HLLRegisterBits bits)
 //
 // The payload is left-aligned by shifting left P bits; the vacated low P
 // bits are filled with 1s (via OR with HLLRegisterMask) so that an all-zero
 // payload maps to exactly Q leading zeros, matching Rust's formula:
-//   (hash << HLL_P) + HLL_P_MASK
+//
+//	(hash << HLL_P) + HLL_P_MASK
 func (h *HyperLogLog) InsertWithHash(hash uint64) {
 	registers := h.Registers.AsMutSlice()
 	// Upper HLLPrecision bits select the register bucket.

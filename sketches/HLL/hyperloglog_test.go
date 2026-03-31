@@ -277,8 +277,8 @@ func TestHyperLogLogRustStyleAPI(t *testing.T) {
 	}
 
 	h.InsertInput(common.FromString("a"))
-	h.InsertMany([]*common.SketchInput{common.FromString("b"), common.FromString("c")})
-	h.InsertManyWithHashes([]uint64{common.FromString("d").Hash})
+	h.InsertBatch([]*common.SketchInput{common.FromString("b"), common.FromString("c")})
+	h.InsertHashes([]uint64{common.FromString("d").Hash})
 
 	if got := h.EstimateCardinality(); got < 4 {
 		t.Fatalf("estimate too small: got %d", got)
@@ -329,9 +329,9 @@ func TestHLL_Quality_MergeAccuracy(t *testing.T) {
 // Both HyperLogLog (DataFusion estimator) and HyperLogLogVariant are checked.
 func TestHLL_CrossLanguageRegressionVectors(t *testing.T) {
 	type step struct {
-		hash     uint64
-		bucket   int
-		wantReg  uint8
+		hash    uint64
+		bucket  int
+		wantReg uint8
 	}
 	// Assertions are cumulative — each step checks the register state after all
 	// prior insertions, exactly as the Rust test does.

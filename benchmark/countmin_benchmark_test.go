@@ -97,7 +97,7 @@ func BenchmarkCountMin_Update_Speed(b *testing.B) {
 	b.SetBytes(8)
 
 	for i := 0; i < b.N; i++ {
-		cms.FastInsertManyWithHashValue(hashes[i%n], 1)
+		cms.FastInsertWeightWithHashValue(hashes[i%n], 1)
 	}
 }
 

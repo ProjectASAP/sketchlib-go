@@ -194,7 +194,7 @@ func (s *CountSketch) Insert(input *common.SketchInput) {
 	s.insertWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
 }
 
-func (s *CountSketch) InsertMany(input *common.SketchInput, many float64) {
+func (s *CountSketch) InsertWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
@@ -205,7 +205,7 @@ func (s *CountSketch) FastInsertWithHashValue(hash uint64) {
 	s.InsertWithHash(hash)
 }
 
-func (s *CountSketch) FastInsertManyWithHashValue(hash uint64, many float64) {
+func (s *CountSketch) FastInsertWeightWithHashValue(hash uint64, many float64) {
 	s.InsertWithHashAndValue(hash, many)
 }
 
