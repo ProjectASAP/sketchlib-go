@@ -6,8 +6,11 @@ import (
 
 // SketchInput normalizes input values for all sketches.
 type SketchInput struct {
-	Bytes []byte
-	Hash  uint64
+	Bytes         []byte
+	Hash          uint64
+	CanonicalHash uint64
+	Float64       float64
+	HasFloat64    bool
 }
 
 // FromString creates SketchInput from string.
@@ -18,8 +21,9 @@ func FromString(s string) *SketchInput {
 	copy(cp, b)
 
 	return &SketchInput{
-		Bytes: cp,
-		Hash:  Hash64(cp),
+		Bytes:         cp,
+		Hash:          Hash64(cp),
+		CanonicalHash: HashIt(CanonicalHashSeed, cp),
 	}
 }
 
@@ -32,8 +36,9 @@ func FromU64(v uint64) *SketchInput {
 	copy(cp, buf[:])
 
 	return &SketchInput{
-		Bytes: cp,
-		Hash:  Hash64(cp),
+		Bytes:         cp,
+		Hash:          Hash64(cp),
+		CanonicalHash: HashIt(CanonicalHashSeed, cp),
 	}
 }
 
@@ -43,11 +48,15 @@ func FromBytes(b []byte) *SketchInput {
 	copy(cp, b)
 
 	return &SketchInput{
-		Bytes: cp,
-		Hash:  Hash64(cp),
+		Bytes:         cp,
+		Hash:          Hash64(cp),
+		CanonicalHash: HashIt(CanonicalHashSeed, cp),
 	}
 }
 
 func FromF64(v float64) *SketchInput {
-	return FromBytes(Float64ToBytes(v))
+	input := FromBytes(Float64ToBytes(v))
+	input.Float64 = v
+	input.HasFloat64 = true
+	return input
 }

@@ -84,7 +84,7 @@ func TestHyperLogLog_CAIDA_Accuracy(t *testing.T) {
 	}
 
 	actualCardinality := len(uniqueIPs)
-	estimatedCardinality := hll.Estimate()
+	estimatedCardinality := hll.EstimateCardinality()
 
 	t.Log("===================================================")
 	t.Logf(" CAIDA CARDINALITY REPORT (HyperLogLog)")
@@ -127,8 +127,8 @@ func TestHyperLogLog_CAIDA_Merge(t *testing.T) {
 	}
 
 	// Verify 1: Estimate Match
-	estMerged := hllPart1.Estimate()
-	estTotal := hllTotal.Estimate()
+	estMerged := hllPart1.EstimateCardinality()
+	estTotal := hllTotal.EstimateCardinality()
 
 	// The estimates should be IDENTICAL because HLL merge is lossless
 	// (register max operation is deterministic regardless of order).
@@ -155,13 +155,13 @@ func TestHyperLogLog_CAIDA_Idempotency(t *testing.T) {
 	for _, s := range samples {
 		hll.InsertWithHash(common.Hash64(floatIpToBytes(s.F)))
 	}
-	est1 := hll.Estimate()
+	est1 := hll.EstimateCardinality()
 
 	// Pass 2 (Duplicate Data)
 	for _, s := range samples {
 		hll.InsertWithHash(common.Hash64(floatIpToBytes(s.F)))
 	}
-	est2 := hll.Estimate()
+	est2 := hll.EstimateCardinality()
 
 	if est1 != est2 {
 		t.Fatalf("Idempotency violation! Pass 1: %d, Pass 2: %d", est1, est2)
@@ -213,7 +213,7 @@ func TestHyperLogLog_Reset_ClearsState(t *testing.T) {
 	for i := uint64(0); i < 1000; i++ {
 		h.InsertWithHash(common.FromU64(i).Hash)
 	}
-	if h.Estimate() == 0 {
+	if h.EstimateCardinality() == 0 {
 		t.Fatal("sketch should be non-empty before Reset")
 	}
 
@@ -222,7 +222,7 @@ func TestHyperLogLog_Reset_ClearsState(t *testing.T) {
 	if !slices.Equal(h.RegisterSlice(), fresh.RegisterSlice()) {
 		t.Fatal("registers not fully zeroed after Reset")
 	}
-	if got := h.Estimate(); got != 0 {
+	if got := h.EstimateCardinality(); got != 0 {
 		t.Fatalf("Estimate() = %d after Reset, want 0", got)
 	}
 }
@@ -249,8 +249,8 @@ func TestHyperLogLog_Reset_SubsequentInserts(t *testing.T) {
 	if !slices.Equal(h.RegisterSlice(), ref.RegisterSlice()) {
 		t.Fatal("register state diverged after Reset + re-insert")
 	}
-	if h.Estimate() != ref.Estimate() {
-		t.Fatalf("Estimate mismatch after Reset: got %d, want %d", h.Estimate(), ref.Estimate())
+	if h.EstimateCardinality() != ref.EstimateCardinality() {
+		t.Fatalf("Estimate mismatch after Reset: got %d, want %d", h.EstimateCardinality(), ref.EstimateCardinality())
 	}
 }
 
@@ -280,7 +280,7 @@ func TestHyperLogLogRustStyleAPI(t *testing.T) {
 	h.InsertMany([]*common.SketchInput{common.FromString("b"), common.FromString("c")})
 	h.InsertManyWithHashes([]uint64{common.FromString("d").Hash})
 
-	if got := h.Estimate(); got < 4 {
+	if got := h.EstimateCardinality(); got < 4 {
 		t.Fatalf("estimate too small: got %d", got)
 	}
 }
@@ -291,7 +291,7 @@ func TestHLL_Quality_CardinalityAndErrorBound(t *testing.T) {
 	for i := 0; i < n; i++ {
 		h.InsertWithHash(common.FromString("hll:q:" + strconv.Itoa(i)).Hash)
 	}
-	est := h.Estimate()
+	est := h.EstimateCardinality()
 	relErr := math.Abs(float64(est-n)) / float64(n)
 	if relErr > 0.05 {
 		t.Fatalf("relative error too high: est=%d real=%d rel=%.4f", est, n, relErr)
@@ -317,8 +317,8 @@ func TestHLL_Quality_MergeAccuracy(t *testing.T) {
 		t.Fatalf("merge: %v", err)
 	}
 
-	if left.Estimate() != total.Estimate() {
-		t.Fatalf("merged estimate mismatch: got=%d want=%d", left.Estimate(), total.Estimate())
+	if left.EstimateCardinality() != total.EstimateCardinality() {
+		t.Fatalf("merged estimate mismatch: got=%d want=%d", left.EstimateCardinality(), total.EstimateCardinality())
 	}
 }
 

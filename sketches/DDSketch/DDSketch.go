@@ -1,6 +1,7 @@
 package ddsketch
 
 import (
+	"encoding/binary"
 	"errors"
 	"math"
 
@@ -347,6 +348,297 @@ func (d *DDSketch) Clone() *DDSketch {
 		max:     d.max,
 	}
 }
+
+// ---------------- OctoSketch bucket-level accessors ----------------
+//
+// These methods expose the internal log-mapping and per-bucket mutation so
+// that the DDSketchOcto adapter (sketch_framework/OctoSketch) can delegate
+// all mapping and estimation logic here instead of duplicating it.
+
+// BucketIndex maps a positive float64 value to its DDSketch bucket index k.
+// Equivalent to floor(log(v) * invLogGamma). Pure function, no state change.
+func (d *DDSketch) BucketIndex(v float64) int32 {
+	return d.mapping.Index(v)
+}
+
+// BucketValue returns the representative float64 for bucket index k: γ^(k+0.5).
+// Pure function, no state change.
+func (d *DDSketch) BucketValue(k int32) float64 {
+	return d.mapping.Value(k)
+}
+
+// BucketCount returns the current count in bucket k, or 0 if k is outside range.
+func (d *DDSketch) BucketCount(k int32) uint64 {
+	if d.store.IsEmpty() {
+		return 0
+	}
+	idx := int(k - d.store.offset)
+	counts := d.store.counts.AsSlice()
+	if idx < 0 || idx >= len(counts) {
+		return 0
+	}
+	return counts[idx]
+}
+
+// AddToBucket increments bucket k's count by delta, adjusts d.count, updates
+// d.min/d.max, and returns the new bucket count. Grows the bucket store if k is
+// outside the current range.
+func (d *DDSketch) AddToBucket(k int32, delta uint64) uint64 {
+	if delta == 0 {
+		return d.BucketCount(k)
+	}
+	d.store.ensure(k)
+	idx := int(k - d.store.offset)
+	counts := d.store.counts.AsMutSlice()
+	counts[idx] += delta
+	d.count += delta
+	rep := d.mapping.Value(k)
+	if rep < d.min {
+		d.min = rep
+	}
+	if rep > d.max {
+		d.max = rep
+	}
+	return counts[idx]
+}
+
+// addOneFast is the hot-path variant of AddToBucket(k, 1).
+// It avoids the ensure() call when bucket k is already within the store's range,
+// saving a function call and two bounds checks on every insert of a hot bucket.
+// It falls back to AddToBucket for new or out-of-range buckets.
+func (d *DDSketch) addOneFast(k int32) uint64 {
+	if !d.store.IsEmpty() {
+		idx := int(k - d.store.offset)
+		counts := d.store.counts.AsMutSlice()
+		if uint(idx) < uint(len(counts)) {
+			prev := counts[idx]
+			counts[idx]++
+			d.count++
+			if prev == 0 {
+				// First write to this bucket: initialise min/max from representative.
+				rep := d.mapping.Value(k)
+				if rep < d.min {
+					d.min = rep
+				}
+				if rep > d.max {
+					d.max = rep
+				}
+			}
+			return counts[idx]
+		}
+	}
+	return d.AddToBucket(k, 1)
+}
+
+// ResetBucket zeroes bucket k and decrements d.count by the bucket's current count.
+// Used by DDSketchOcto.ResetCell to drain a worker-local bucket after emitting a delta.
+func (d *DDSketch) ResetBucket(k int32) {
+	if d.store.IsEmpty() {
+		return
+	}
+	idx := int(k - d.store.offset)
+	counts := d.store.counts.AsMutSlice()
+	if idx < 0 || idx >= len(counts) {
+		return
+	}
+	n := counts[idx]
+	if n == 0 {
+		return
+	}
+	counts[idx] = 0
+	if d.count >= n {
+		d.count -= n
+	} else {
+		d.count = 0
+	}
+}
+
+// DrainBuckets calls f(k, count) for every non-zero bucket and then zeroes the
+// entire store (setting d.count = 0). Used by DDSketchOcto.Flush to ship all
+// worker-local sub-τ residuals to the aggregator at end-of-window.
+func (d *DDSketch) DrainBuckets(f func(k int32, count uint64)) {
+	if d.store.IsEmpty() {
+		return
+	}
+	counts := d.store.counts.AsMutSlice()
+	for i, c := range counts {
+		if c > 0 {
+			f(d.store.offset+int32(i), c)
+			counts[i] = 0
+		}
+	}
+	d.count = 0
+}
+
+// EachBucket calls f(k, count) for every non-zero bucket without modifying
+// the sketch. Used by DDSketchOcto.LocalBuckets for test inspection.
+func (d *DDSketch) EachBucket(f func(k int32, count uint64)) {
+	if d.store.IsEmpty() {
+		return
+	}
+	for i, c := range d.store.counts.AsSlice() {
+		if c > 0 {
+			f(d.store.offset+int32(i), c)
+		}
+	}
+}
+
+// ── Input helpers ──────────────────────────────────────────────────────────────
+
+// valueFromInput recovers the float64 inserted via common.FromF64(v).
+// Returns (0, false) for non-positive, NaN, Inf, or too-short Bytes.
+func (d *DDSketch) valueFromInput(input *common.SketchInput) (float64, bool) {
+	if input == nil {
+		return 0, false
+	}
+	if input.HasFloat64 {
+		v := input.Float64
+		return v, v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)
+	}
+	if len(input.Bytes) < 8 {
+		return 0, false
+	}
+	v := math.Float64frombits(binary.NativeEndian.Uint64(input.Bytes[:8]))
+	return v, v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+// phiFromInput recovers a quantile phi ∈ [0,1] from input.Bytes.
+func (d *DDSketch) phiFromInput(input *common.SketchInput) (float64, bool) {
+	if input == nil {
+		return 0, false
+	}
+	if input.HasFloat64 {
+		phi := input.Float64
+		return phi, phi >= 0 && phi <= 1 && !math.IsNaN(phi)
+	}
+	if len(input.Bytes) < 8 {
+		return 0, false
+	}
+	phi := math.Float64frombits(binary.NativeEndian.Uint64(input.Bytes[:8]))
+	return phi, phi >= 0 && phi <= 1 && !math.IsNaN(phi)
+}
+
+// ── CellSketch interface ───────────────────────────────────────────────────────
+
+// NumRows returns 1. DDSketch is 1-dimensional.
+func (d *DDSketch) NumRows() int { return 1 }
+
+// ColForRow returns the DDSketch bucket index for the value encoded in input.
+// Non-positive, NaN, or Inf values return math.MinInt32 (sentinel).
+func (d *DDSketch) ColForRow(input *common.SketchInput, _ int) int {
+	if input == nil {
+		return math.MinInt32
+	}
+	v, ok := d.valueFromInput(input)
+	if !ok {
+		return math.MinInt32
+	}
+	return int(d.BucketIndex(v))
+}
+
+// UpdateCell increments the local count for bucket col by 1.
+// Returns (0, false) for the sentinel bucket; (newVal, true) otherwise.
+// Uses the AddToBucket return value directly to avoid a separate BucketCount read.
+func (d *DDSketch) UpdateCell(_, col int, _ *common.SketchInput) (float64, bool) {
+	if col == math.MinInt32 {
+		return 0, false
+	}
+	count := d.AddToBucket(int32(col), 1)
+	return float64(count), true
+}
+
+// ProcessInput is the optimized OctoSketch worker fast path.
+// It decodes the float payload once, derives the bucket index once, and uses
+// addOneFast to update the bucket while returning the new count in one pass —
+// avoiding the separate BucketCount read that the generic UpdateCell path would
+// require. For hot (already-allocated) buckets this also skips the ensure() call.
+func (d *DDSketch) ProcessInput(input *common.SketchInput, tau float64, emit func(common.DeltaUpdate)) {
+	if input == nil {
+		return
+	}
+	v, ok := d.valueFromInput(input)
+	if !ok {
+		return
+	}
+	col := int32(d.BucketIndex(v))
+	count := d.addOneFast(col)
+	if float64(count) >= tau {
+		emit(common.DeltaUpdate{Row: 0, Col: int(col), Value: float64(count)})
+		d.ResetBucket(col)
+	}
+}
+
+// ShouldEmit returns true when the local bucket count newVal reaches threshold τ.
+func (d *DDSketch) ShouldEmit(newVal, tau float64) bool { return newVal >= tau }
+
+// BuildDelta constructs the DeltaUpdate for bucket col.
+func (d *DDSketch) BuildDelta(_, col int, _ *common.SketchInput) common.DeltaUpdate {
+	return common.DeltaUpdate{
+		Row:   0,
+		Col:   col,
+		Value: float64(d.BucketCount(int32(col))),
+	}
+}
+
+// ResetCell zeroes the local count for bucket col.
+func (d *DDSketch) ResetCell(_, col int) { d.ResetBucket(int32(col)) }
+
+// MergeDelta adds delta.Value counts to the aggregator's bucket delta.Col.
+func (d *DDSketch) MergeDelta(delta common.DeltaUpdate) {
+	if delta.Col == math.MinInt32 || delta.Value <= 0 {
+		return
+	}
+	d.AddToBucket(int32(delta.Col), uint64(delta.Value))
+}
+
+// Estimate returns the quantile estimate for the phi encoded in input.
+// Returns 0 when the sketch is empty or input is nil.
+func (d *DDSketch) Estimate(input *common.SketchInput) float64 {
+	if input == nil || d.count == 0 {
+		return 0
+	}
+	phi, ok := d.phiFromInput(input)
+	if !ok {
+		return 0
+	}
+	val, ok := d.GetValueAtQuantile(phi)
+	if !ok {
+		return 0
+	}
+	return val
+}
+
+// Flush drains all non-zero local buckets to the delta channel.
+func (d *DDSketch) Flush(emit func(common.DeltaUpdate)) {
+	d.DrainBuckets(func(k int32, count uint64) {
+		emit(common.DeltaUpdate{Row: 0, Col: int(k), Value: float64(count)})
+	})
+}
+
+// Insert populates the underlying sketch from a SketchInput.
+func (d *DDSketch) Insert(input *common.SketchInput) {
+	if input == nil {
+		return
+	}
+	v, ok := d.valueFromInput(input)
+	if !ok {
+		return
+	}
+	d.Add(v)
+}
+
+// LocalBuckets returns a snapshot of all non-zero bucket counts.
+// Used by tests to verify the per-bucket delay bound.
+func (d *DDSketch) LocalBuckets() map[int]float64 {
+	snap := make(map[int]float64)
+	d.EachBucket(func(k int32, count uint64) {
+		snap[int(k)] = float64(count)
+	})
+	return snap
+}
+
+// TotalCount returns the total number of insertions reflected in this instance.
+func (d *DDSketch) TotalCount() float64 { return float64(d.count) }
 
 // ---------------- Utils ----------------
 

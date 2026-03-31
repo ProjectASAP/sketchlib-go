@@ -2,6 +2,15 @@ package common
 
 import "errors"
 
+// DeltaUpdate encodes a single cell-level change emitted by a Worker when its
+// local counter reaches threshold τ.
+type DeltaUpdate struct {
+	Row   int
+	Col   int
+	Value float64
+	Key   []byte // optional: original key bytes for key-based sketches
+}
+
 // QueryType enumerates query varieties a sketch may support.
 type QueryType int
 

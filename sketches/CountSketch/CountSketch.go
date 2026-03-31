@@ -391,6 +391,143 @@ func (s *CountSketch) EstimateStringCount(key string) int64 {
 	return int64(est)
 }
 
+// ── OctoSketch cell-level accessors ──────────────────────────────────────────
+//
+// These thin methods expose per-cell operations on the internal countStore so
+// that the CountSketchOcto adapter (sketch_framework/OctoSketch) can delegate
+// all storage and hash logic here instead of duplicating it.
+//
+// They operate only on countStore; L2 norms are whole-stream statistics that
+// are irrelevant to the per-cell OctoSketch loop.
+
+// ColForRow derives the column index for row r from input, using the same hash
+// mode dispatch (Packed64 fast path or fallback) as insertWithMatrixHash.
+// Pure: same input → same col, no state change.
+func (s *CountSketch) ColForRow(input *common.SketchInput, row int) int {
+	col, _ := s.derivePosAndSign(input.Hash, row)
+	return col
+}
+
+// SignForRow returns +1.0 or -1.0 for (input, row) using the same bit
+// extraction as insertWithMatrixHash.
+func (s *CountSketch) SignForRow(input *common.SketchInput, row int) float64 {
+	_, sign := s.derivePosAndSign(input.Hash, row)
+	return sign
+}
+
+// GetCell returns the current signed value of countStore[row][col].
+func (s *CountSketch) GetCell(row, col int) float64 {
+	return s.Count[row][col]
+}
+
+// IncrCell adds delta to countStore[row][col] and returns the new value.
+// L2 norms are NOT updated; use Insert for whole-stream accounting.
+func (s *CountSketch) IncrCell(row, col int, delta float64) float64 {
+	s.Count[row][col] += delta
+	return s.Count[row][col]
+}
+
+// SetCell writes countStore[row][col] = val directly.
+func (s *CountSketch) SetCell(row, col int, val float64) {
+	s.Count[row][col] = val
+}
+
+// ForEachNonZeroCell calls fn(row, col, val) for every cell where val != 0.
+// Iteration order is unspecified. Used by CountSketchOcto.Flush.
+func (s *CountSketch) ForEachNonZeroCell(fn func(row, col int, val float64)) {
+	for r := range s.Rows {
+		rowSlice := s.Count[r]
+		for c := range s.Cols {
+			if v := rowSlice[c]; v != 0 {
+				fn(r, c, v)
+			}
+		}
+	}
+}
+
+// ── CellSketch interface ───────────────────────────────────────────────────────
+
+// NumRows returns the depth of the sketch matrix.
+func (s *CountSketch) NumRows() int { return s.Rows }
+
+// UpdateCell applies count[row][col] += sign(row, input). Always returns changed=true.
+func (s *CountSketch) UpdateCell(row, col int, input *common.SketchInput) (float64, bool) {
+	sign := s.SignForRow(input, row)
+	return s.IncrCell(row, col, sign), true
+}
+
+// ProcessInput is an optimized OctoSketch worker fast path that derives the
+// packed row hashes once and updates/emits without repeated sign extraction.
+func (s *CountSketch) ProcessInput(input *common.SketchInput, tau float64, emit func(common.DeltaUpdate)) {
+	if input == nil {
+		return
+	}
+	hashed := storage.BuildMatrixHash(input.Hash, s.Rows, s.Cols)
+	count := s.Count
+	if hashed.Mode() == storage.MatrixHashPacked64 {
+		packed := hashed.Lower64()
+		for row := 0; row < s.Rows; row++ {
+			col, sign := s.fastPacked64PosAndSign(packed, row)
+			newVal := count[row][col] + sign
+			count[row][col] = newVal
+			if (newVal >= tau) || (newVal <= -tau) {
+				emit(common.DeltaUpdate{Row: row, Col: col, Value: newVal})
+				count[row][col] = 0
+			}
+		}
+		return
+	}
+
+	for row := 0; row < s.Rows; row++ {
+		col, sign := s.derivePosAndSignFromHashed(hashed, row)
+		newVal := count[row][col] + sign
+		count[row][col] = newVal
+		if (newVal >= tau) || (newVal <= -tau) {
+			emit(common.DeltaUpdate{Row: row, Col: col, Value: newVal})
+			count[row][col] = 0
+		}
+	}
+}
+
+// ShouldEmit returns true when |newVal| >= τ.
+func (s *CountSketch) ShouldEmit(newVal, tau float64) bool {
+	if newVal < 0 {
+		return -newVal >= tau
+	}
+	return newVal >= tau
+}
+
+// BuildDelta constructs the signed DeltaUpdate for (row, col).
+func (s *CountSketch) BuildDelta(row, col int, input *common.SketchInput) common.DeltaUpdate {
+	return common.DeltaUpdate{
+		Row:   row,
+		Col:   col,
+		Value: s.GetCell(row, col),
+		Key:   input.Bytes,
+	}
+}
+
+// ResetCell zeros count[row][col] after a delta is emitted.
+func (s *CountSketch) ResetCell(row, col int) { s.SetCell(row, col, 0) }
+
+// MergeDelta adds the signed delta.Value to the global counter.
+// Out-of-bounds indices are silently dropped.
+func (s *CountSketch) MergeDelta(delta common.DeltaUpdate) {
+	if delta.Row < 0 || delta.Row >= s.Rows ||
+		delta.Col < 0 || delta.Col >= s.Cols {
+		return
+	}
+	s.IncrCell(delta.Row, delta.Col, delta.Value)
+}
+
+// Flush emits every non-zero cell (signed value preserved) and resets it to zero.
+func (s *CountSketch) Flush(emit func(common.DeltaUpdate)) {
+	s.ForEachNonZeroCell(func(row, col int, val float64) {
+		emit(common.DeltaUpdate{Row: row, Col: col, Value: val})
+		s.SetCell(row, col, 0)
+	})
+}
+
 // SerializeToBytes serializes CountSketch into bytes.
 func (s *CountSketch) SerializeToBytes() ([]byte, error) {
 	return common.EncodeToBytes(s)

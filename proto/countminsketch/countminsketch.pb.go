@@ -9,12 +9,13 @@
 package countminsketchpb
 
 import (
-	common "github.com/ProjectASAP/sketchlib-go/proto/common"
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
-	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
+
+	common "github.com/ProjectASAP/sketchlib-go/proto/common"
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 )
 
 const (
