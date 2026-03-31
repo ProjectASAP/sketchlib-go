@@ -19,4 +19,6 @@ out/
 xtest_producer
 benchmark.test
 benchmark_results/
+benchmark/benchmark_results/octosketch_pipeline_eval.jsonl
+benchmark/benchmark_results/performance_metrics.csv
 tests/cross_language/xtest_producer_test_*.go
