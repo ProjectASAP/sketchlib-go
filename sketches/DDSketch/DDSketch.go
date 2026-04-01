@@ -615,8 +615,8 @@ func (d *DDSketch) Flush(emit func(common.DeltaUpdate)) {
 	})
 }
 
-// Insert populates the underlying sketch from a SketchInput.
-func (d *DDSketch) Insert(input *common.SketchInput) {
+// OctoInsert populates the underlying sketch from a SketchInput.
+func (d *DDSketch) OctoInsert(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
@@ -626,6 +626,9 @@ func (d *DDSketch) Insert(input *common.SketchInput) {
 	}
 	d.Add(v)
 }
+
+// Insert is a backward-compatible alias for OctoInsert.
+func (d *DDSketch) Insert(input *common.SketchInput) { d.OctoInsert(input) }
 
 // LocalBuckets returns a snapshot of all non-zero bucket counts.
 // Used by tests to verify the per-bucket delay bound.

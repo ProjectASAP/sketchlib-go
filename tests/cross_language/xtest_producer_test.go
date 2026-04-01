@@ -114,7 +114,7 @@ func TestXtestProducer(t *testing.T) {
 	for i := 0; i < 50_000; i++ {
 		h.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("hll:%d", i))))
 	}
-	t.Logf("[HLL] Step 3/3 — cardinality≈%d (expect ~50000)", h.Estimate())
+	t.Logf("[HLL] Step 3/3 — cardinality≈%.0f (expect ~50000)", h.Estimate(nil))
 	writeEnvelope(t, outDir, "hll.pb", tmust(h.SerializePortable()))
 
 	// -----------------------------------------------------------------------

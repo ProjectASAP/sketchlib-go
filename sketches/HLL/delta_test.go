@@ -162,8 +162,8 @@ func TestHLLDelta_CardinalityConvergence(t *testing.T) {
 	// Registers must be identical — cardinality follows automatically.
 	hllRegistersEqual(t, "CardinalityConvergence", current, recv)
 
-	got := recv.Estimate()
-	t.Logf("true=%d estimated=%d", n, got)
+	got := recv.Estimate(nil)
+	t.Logf("true=%d estimated=%.0f", n, got)
 }
 
 // TestHLLDelta_MultipleWindows simulates consecutive delta transmissions.

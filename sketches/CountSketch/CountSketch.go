@@ -187,12 +187,15 @@ func (s *CountSketch) InsertWithHash(hash uint64) {
 	s.InsertWithHashAndValue(hash, 1.0)
 }
 
-func (s *CountSketch) Insert(input *common.SketchInput) {
+func (s *CountSketch) OctoInsert(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
 	s.insertWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
 }
+
+// Insert is a backward-compatible alias for OctoInsert.
+func (s *CountSketch) Insert(input *common.SketchInput) { s.OctoInsert(input) }
 
 func (s *CountSketch) InsertWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
