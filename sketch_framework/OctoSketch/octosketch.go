@@ -14,12 +14,12 @@ import "github.com/ProjectASAP/sketchlib-go/common"
 type DeltaUpdate = common.DeltaUpdate
 
 // OctoSketch is the core interface for sketches participating in the framework.
-// A Worker-side implementation handles Insert and emits DeltaUpdates internally.
+// A Worker-side implementation handles OctoInsert and emits DeltaUpdates internally.
 // An Aggregator-side implementation handles MergeDelta and answers Estimate queries.
 type OctoSketch interface {
-	// Insert processes one stream item, updating local counters.
+	// OctoInsert processes one stream item, updating local counters.
 	// On the Worker side this may emit DeltaUpdates when τ is reached.
-	Insert(input *common.SketchInput)
+	OctoInsert(input *common.SketchInput)
 
 	// MergeDelta applies a cell-level delta to the sketch.
 	// On the Aggregator side this accumulates worker deltas into the global sketch.

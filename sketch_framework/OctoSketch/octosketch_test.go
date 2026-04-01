@@ -61,7 +61,7 @@ func TestCountMinCellSketchCompliance(t *testing.T) {
 	sketch, err := octosketch.NewCountMinOcto(testRows, testCols)
 	require.NoError(t, err)
 	var _ octosketch.CellSketch = sketch
-	var _ octosketch.OctoSketch = sketch // Insert, MergeDelta, Estimate
+	var _ octosketch.OctoSketch = sketch // OctoInsert, MergeDelta, Estimate
 }
 
 func TestCountMinNoUnderestimate(t *testing.T) {

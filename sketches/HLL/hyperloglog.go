@@ -95,13 +95,16 @@ func (h *HyperLogLog) InsertValue(x float64) {
 	h.InsertWithHash(hash)
 }
 
-// Insert implements OctoSketch.Insert — processes a SketchInput.
-func (h *HyperLogLog) Insert(input *common.SketchInput) {
+// OctoInsert implements OctoSketch.OctoInsert — processes a SketchInput.
+func (h *HyperLogLog) OctoInsert(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
 	h.InsertInput(input)
 }
+
+// Insert is a backward-compatible alias for OctoInsert.
+func (h *HyperLogLog) Insert(input *common.SketchInput) { h.OctoInsert(input) }
 
 // InsertInput mirrors the Rust API while preserving the legacy float64 Insert.
 func (h *HyperLogLog) InsertInput(input *common.SketchInput) {
