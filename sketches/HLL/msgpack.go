@@ -1,6 +1,10 @@
 package hll
 
 import (
+	"errors"
+	"fmt"
+
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
 	"github.com/ProjectASAP/sketchlib-go/wire/asapmsgpack"
 )
 
@@ -33,4 +37,24 @@ func (h *HyperLogLog) SerializeMsgpack() ([]byte, error) {
 		Precision: uint32(HLLPrecision),
 		Registers: registers,
 	})
+}
+
+// DeserializeMsgpack rebuilds a HyperLogLog from the cross-language
+// MessagePack wire format produced by SerializeMsgpack (and by Rust's
+// `sketch_core::hll_sketch::HllSketch::serialize_msgpack`). Mirrors
+// Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
+func DeserializeMsgpack(buf []byte) (*HyperLogLog, error) {
+	state, err := asapmsgpack.UnmarshalHLLSketch(buf)
+	if err != nil {
+		return nil, fmt.Errorf("hll: msgpack decode: %w", err)
+	}
+	if state.Precision != uint32(HLLPrecision) {
+		return nil, fmt.Errorf("hll: precision mismatch: got %d, want %d", state.Precision, HLLPrecision)
+	}
+	if len(state.Registers) != HLLRegisterCount {
+		return nil, errors.New("hll: invalid register length")
+	}
+	regs := make([]uint8, HLLRegisterCount)
+	copy(regs, state.Registers)
+	return &HyperLogLog{Registers: storage.Vector1DFromSlice(regs)}, nil
 }

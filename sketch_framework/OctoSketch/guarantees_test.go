@@ -58,13 +58,13 @@ func TestCMSErrorBoundPreserved(t *testing.T) {
 	hotKey := common.FromString("hot-key")
 	for range hotKeyCount {
 		worker.Process(hotKey)
-		ref.Insert(hotKey)
+		ref.Update(hotKey)
 	}
 	for k := range numColdKeys {
 		cold := common.FromString(fmt.Sprintf("cold-%d", k))
 		for range coldKeyCount {
 			worker.Process(cold)
-			ref.Insert(cold)
+			ref.Update(cold)
 		}
 	}
 	worker.Flush()
@@ -199,7 +199,7 @@ func TestConvergenceAfterFlush(t *testing.T) {
 		for workerID := range numWorkers {
 			for i := range insertionsPerWorker {
 				_ = workerID
-				ref.Insert(keys[i%len(keys)])
+				ref.Update(keys[i%len(keys)])
 			}
 		}
 	}()
@@ -313,7 +313,7 @@ func TestAdaptiveTauPreservesGuarantees(t *testing.T) {
 	key := common.FromString("adaptive-guarantee-key")
 	for i := range insertions {
 		worker.Process(key)
-		ref.Insert(key)
+		ref.Update(key)
 		// Simulate τ adjustment mid-stream at half-way point.
 		if i == insertions/2 {
 			adaptiveTau.Adjust(999) // force increase
@@ -373,7 +373,7 @@ func TestDDSketchRelativeErrorPreserved(t *testing.T) {
 		v := math.Pow(1.001, float64(i))
 		input := common.FromF64(v)
 		worker.Process(input)
-		ref.Insert(input)
+		ref.OctoUpdate(input)
 	}
 	worker.Flush()
 	close(deltaCh)
@@ -508,7 +508,7 @@ func TestDDSketchCombinedErrorBound(t *testing.T) {
 		inp := common.FromF64(v0)
 		for range N {
 			worker.Process(inp)
-			ref.Insert(inp)
+			ref.OctoUpdate(inp)
 		}
 		worker.Flush()
 		close(deltaCh)

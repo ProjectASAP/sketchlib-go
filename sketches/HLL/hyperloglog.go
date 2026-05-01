@@ -87,40 +87,33 @@ func (h *HyperLogLog) TypeName() string {
 	return "hll"
 }
 
-// InsertValue is the SLOW PATH for raw float64 values.
+// UpdateValue is the SLOW PATH for raw float64 values.
 // It hashes the value and delegates to the fast path.
-func (h *HyperLogLog) InsertValue(x float64) {
+func (h *HyperLogLog) UpdateValue(x float64) {
 	buf := common.Float64ToBytes(x)
 	hash := common.HashIt(common.CanonicalHashSeed, buf)
 	h.InsertWithHash(hash)
 }
 
-// OctoInsert implements OctoSketch.OctoInsert — processes a SketchInput.
-func (h *HyperLogLog) OctoInsert(input *common.SketchInput) {
-	if input == nil {
-		return
-	}
-	h.InsertInput(input)
-}
-
-// Insert is a backward-compatible alias for OctoInsert.
-func (h *HyperLogLog) Insert(input *common.SketchInput) { h.OctoInsert(input) }
-
-// InsertInput mirrors the Rust API while preserving the legacy float64 Insert.
-func (h *HyperLogLog) InsertInput(input *common.SketchInput) {
+// Update is the canonical high-level update method, mirroring Rust's
+// unified API (`update`). It processes one SketchInput.
+func (h *HyperLogLog) Update(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
 	h.InsertWithHash(input.CanonicalHash)
 }
 
-func (h *HyperLogLog) InsertBatch(inputs []*common.SketchInput) {
+// OctoUpdate is an alias for Update kept for the OctoSketch framework.
+func (h *HyperLogLog) OctoUpdate(input *common.SketchInput) { h.Update(input) }
+
+func (h *HyperLogLog) UpdateBatch(inputs []*common.SketchInput) {
 	for _, input := range inputs {
-		h.InsertInput(input)
+		h.Update(input)
 	}
 }
 
-func (h *HyperLogLog) InsertHashes(hashes []uint64) {
+func (h *HyperLogLog) UpdateHashes(hashes []uint64) {
 	for _, hash := range hashes {
 		h.InsertWithHash(hash)
 	}
@@ -212,8 +205,9 @@ func (h *HyperLogLog) getHistogram() [HLLRegisterBits + 2]uint32 {
 	return histogram
 }
 
-// EstimateCardinality returns the estimated cardinality.
-func (h *HyperLogLog) EstimateCardinality() int {
+// Estimate returns the estimated cardinality. Mirrors Rust's HLL
+// `estimate(&self) -> usize` (sketches/hll.rs) — no key argument.
+func (h *HyperLogLog) Estimate() int {
 	histogram := h.getHistogram()
 	m := float64(HLLRegisterCount)
 
@@ -229,7 +223,7 @@ func (h *HyperLogLog) EstimateCardinality() int {
 
 func (h *HyperLogLog) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
 	if q == common.QueryCardinality {
-		return float64(h.EstimateCardinality()), nil
+		return float64(h.Estimate()), nil
 	}
 	return 0, common.ErrUnsupportedQuery
 }
@@ -399,17 +393,18 @@ func (h *HyperLogLog) BuildDelta(_ int, col int, _ *common.SketchInput) common.D
 // ResetCell is a no-op for HLL — registers are monotone and must not decrease.
 func (h *HyperLogLog) ResetCell(_ int, _ int) {}
 
+// OctoEstimate satisfies the octosketch.OctoSketch interface. The input
+// argument is ignored — HLL's canonical estimator (`Estimate()`) takes no key.
+func (h *HyperLogLog) OctoEstimate(_ *common.SketchInput) float64 {
+	return float64(h.Estimate())
+}
+
 // MergeDelta applies max(global[col], delta.Value) via SetRegisterIfGreater.
 func (h *HyperLogLog) MergeDelta(delta common.DeltaUpdate) {
 	if delta.Col < 0 || delta.Col >= HLLRegisterCount {
 		return
 	}
 	h.SetRegisterIfGreater(delta.Col, uint8(delta.Value))
-}
-
-// Estimate returns the cardinality estimate. The input argument is ignored.
-func (h *HyperLogLog) Estimate(_ *common.SketchInput) float64 {
-	return float64(h.EstimateCardinality())
 }
 
 // Flush emits all non-zero registers as DeltaUpdates and clears the pending dirty

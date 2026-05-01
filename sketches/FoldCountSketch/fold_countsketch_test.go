@@ -21,8 +21,8 @@ func TestFoldCountSketchMatchesDenseSketch(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		input := common.FromU64(uint64(i))
 		weight := float64((i % 9) + 1)
-		folded.InsertWeight(input, weight)
-		dense.InsertWeight(input, weight)
+		folded.UpdateWeight(input, weight)
+		dense.UpdateWeight(input, weight)
 	}
 
 	for i := 0; i < 200; i++ {
@@ -55,18 +55,18 @@ func TestFoldCountSketchMergeAndHierarchicalMerge(t *testing.T) {
 
 	for i := 0; i < 80; i++ {
 		input := common.FromU64(uint64(i))
-		left.InsertWeight(input, 1)
-		dense.InsertWeight(input, 1)
+		left.UpdateWeight(input, 1)
+		dense.UpdateWeight(input, 1)
 	}
 	for i := 40; i < 120; i++ {
 		input := common.FromU64(uint64(i))
-		right.InsertWeight(input, 2)
-		dense.InsertWeight(input, 2)
+		right.UpdateWeight(input, 2)
+		dense.UpdateWeight(input, 2)
 	}
 	for i := 100; i < 160; i++ {
 		input := common.FromU64(uint64(i))
-		lowFold.InsertWeight(input, 3)
-		dense.InsertWeight(input, 3)
+		lowFold.UpdateWeight(input, 3)
+		dense.UpdateWeight(input, 3)
 	}
 
 	if err := left.MergeSameLevel(right); err != nil {
@@ -104,13 +104,13 @@ func TestFoldCountSketchUnfoldMergeMatchesDense(t *testing.T) {
 
 	for i := 0; i < 60; i++ {
 		input := common.FromU64(uint64(i))
-		a.InsertWeight(input, float64(i+1))
-		denseA.InsertWeight(input, float64(i+1))
+		a.UpdateWeight(input, float64(i+1))
+		denseA.UpdateWeight(input, float64(i+1))
 	}
 	for i := 30; i < 90; i++ {
 		input := common.FromU64(uint64(i))
-		b.InsertWeight(input, float64(i+1))
-		denseB.InsertWeight(input, float64(i+1))
+		b.UpdateWeight(input, float64(i+1))
+		denseB.UpdateWeight(input, float64(i+1))
 	}
 
 	merged, err := UnfoldMergeFoldCountSketch(a, b)
@@ -132,7 +132,7 @@ func TestFoldCountSketchUnfoldMergeMatchesDense(t *testing.T) {
 func TestFoldCountSketchSerializationRoundTrip(t *testing.T) {
 	sketch, _ := NewFoldCountSketch(3, 256, 3)
 	for i := 0; i < 50; i++ {
-		sketch.InsertWeight(common.FromU64(uint64(i)), float64(i+1))
+		sketch.UpdateWeight(common.FromU64(uint64(i)), float64(i+1))
 	}
 
 	data, err := sketch.SerializeToBytes()
@@ -157,7 +157,7 @@ func TestFoldCountSketchSparseCollisionProfile(t *testing.T) {
 	hasPos := false
 	hasNeg := false
 	for i := 0; i < 60; i++ {
-		sketch.Insert(common.FromU64(uint64(i)))
+		sketch.Update(common.FromU64(uint64(i)))
 	}
 	for i := range sketch.Cells {
 		sketch.Cells[i].Visit(func(_ uint32, count float64) {

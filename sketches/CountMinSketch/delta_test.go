@@ -21,7 +21,7 @@ func newCMS(t *testing.T) *CountMinSketch {
 func insert(s *CountMinSketch, key string, n int) {
 	in := common.FromString(key)
 	for i := 0; i < n; i++ {
-		s.Insert(in)
+		s.Update(in)
 	}
 }
 

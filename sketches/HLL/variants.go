@@ -40,7 +40,7 @@ func NewDataFusion() *HyperLogLogVariant {
 
 func (h *HyperLogLogVariant) TypeName() string { return "hll_variant" }
 
-func (h *HyperLogLogVariant) InsertInput(input *common.SketchInput) {
+func (h *HyperLogLogVariant) Update(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
@@ -67,7 +67,7 @@ func (h *HyperLogLogVariant) Estimate() int {
 		return h.estimateRegular()
 	}
 	base := &HyperLogLog{Registers: h.Registers}
-	return base.EstimateCardinality()
+	return base.Estimate()
 }
 
 func (h *HyperLogLogVariant) estimateRegular() int {
@@ -158,7 +158,7 @@ func NewHIP() *HyperLogLogHIP {
 
 func (h *HyperLogLogHIP) TypeName() string { return "hll_hip" }
 
-func (h *HyperLogLogHIP) InsertInput(input *common.SketchInput) {
+func (h *HyperLogLogHIP) Update(input *common.SketchInput) {
 	if input == nil {
 		return
 	}

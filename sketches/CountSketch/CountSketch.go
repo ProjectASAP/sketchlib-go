@@ -187,17 +187,19 @@ func (s *CountSketch) InsertWithHash(hash uint64) {
 	s.InsertWithHashAndValue(hash, 1.0)
 }
 
-func (s *CountSketch) OctoInsert(input *common.SketchInput) {
+// Update is the canonical high-level update method, mirroring Rust's
+// unified API (`update`). It populates the sketch from a SketchInput.
+func (s *CountSketch) Update(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
 	s.insertWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
 }
 
-// Insert is a backward-compatible alias for OctoInsert.
-func (s *CountSketch) Insert(input *common.SketchInput) { s.OctoInsert(input) }
+// OctoUpdate is an alias for Update kept for the OctoSketch framework.
+func (s *CountSketch) OctoUpdate(input *common.SketchInput) { s.Update(input) }
 
-func (s *CountSketch) InsertWeight(input *common.SketchInput, many float64) {
+func (s *CountSketch) UpdateWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
@@ -296,6 +298,9 @@ func (s *CountSketch) Estimate(input *common.SketchInput) float64 {
 	return s.estimateWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols))
 }
 
+// OctoEstimate satisfies the octosketch.OctoSketch interface.
+func (s *CountSketch) OctoEstimate(input *common.SketchInput) float64 { return s.Estimate(input) }
+
 func (s *CountSketch) FastEstimateWithHash(hash uint64) float64 {
 	est, _ := s.QueryWithHash(common.QueryFrequency, hash)
 	return est
@@ -383,7 +388,7 @@ func (s *CountSketch) UpdateString(key string, count float64) {
 	hash := common.Hash64([]byte(key))
 	s.InsertWithHashAndValue(hash, count)
 	if s.SS != nil {
-		s.SS.Insert(key, count)
+		s.SS.Update(key, count)
 	}
 }
 

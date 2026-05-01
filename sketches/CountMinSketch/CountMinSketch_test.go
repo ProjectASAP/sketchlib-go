@@ -162,8 +162,8 @@ func TestCMS_RustStyleAPI(t *testing.T) {
 	}
 
 	input := common.FromString("rust-api")
-	s.Insert(input)
-	s.InsertWeight(input, 4)
+	s.Update(input)
+	s.UpdateWeight(input, 4)
 
 	if got := s.Estimate(input); got < 5 {
 		t.Fatalf("estimate too small: got %v", got)

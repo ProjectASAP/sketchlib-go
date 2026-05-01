@@ -138,7 +138,7 @@ func (s *KLLSketch) TypeName() string {
 }
 
 func (s *KLLSketch) InsertWithHash(hash uint64) {
-	s.Insert(float64(hash))
+	s.Update(float64(hash))
 }
 
 func (s *KLLSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
@@ -161,14 +161,9 @@ func (s *KLLSketch) Merge(other common.Sketch) error {
 	return nil
 }
 
-// Insert adds a value to the sketch.
-func (s *KLLSketch) Insert(x float64) {
-	s.pushValue(x)
-}
-
-// Update mirrors the Rust naming.
+// Update adds a value to the sketch. Mirrors Rust's `update` (sketches/kll.rs).
 func (s *KLLSketch) Update(x float64) {
-	s.Insert(x)
+	s.pushValue(x)
 }
 
 // Reset clears the sketch, returning it to its empty state.

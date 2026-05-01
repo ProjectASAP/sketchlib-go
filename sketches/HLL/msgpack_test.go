@@ -11,7 +11,7 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	// Insert a few distinct values so at least a handful of registers
 	// end up non-zero.
 	for i := 0; i < 1000; i++ {
-		sketch.InsertValue(float64(i))
+		sketch.UpdateValue(float64(i))
 	}
 
 	bytes, err := sketch.SerializeMsgpack()

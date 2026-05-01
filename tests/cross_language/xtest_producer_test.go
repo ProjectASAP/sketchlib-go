@@ -82,7 +82,7 @@ func TestXtestProducer(t *testing.T) {
 
 	t.Log("[KLL] Step 2/3 — Insert values 1.0 … 10 000.0")
 	for i := 1; i <= 10_000; i++ {
-		sk.Insert(float64(i))
+		sk.Update(float64(i))
 	}
 	t.Logf("[KLL] Step 3/3 — p50≈%.1f  p99≈%.1f", sk.Quantile(0.50), sk.Quantile(0.99))
 	writeEnvelope(t, outDir, "kll.pb", tmust(sk.SerializePortable()))
@@ -96,10 +96,10 @@ func TestXtestProducer(t *testing.T) {
 
 	t.Log("[DDSketch] Step 2/3 — Insert values 1.0 … 10 000.0")
 	for i := 1; i <= 10_000; i++ {
-		ds.Add(float64(i))
+		ds.Update(float64(i))
 	}
-	p50dd, _ := ds.GetValueAtQuantile(0.50)
-	p99dd, _ := ds.GetValueAtQuantile(0.99)
+	p50dd, _ := ds.Quantile(0.50)
+	p99dd, _ := ds.Quantile(0.99)
 	t.Logf("[DDSketch] Step 3/3 — p50≈%.2f  p99≈%.2f", p50dd, p99dd)
 	writeEnvelope(t, outDir, "ddsketch.pb", tmust(ds.SerializePortable()))
 
@@ -114,7 +114,7 @@ func TestXtestProducer(t *testing.T) {
 	for i := 0; i < 50_000; i++ {
 		h.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("hll:%d", i))))
 	}
-	t.Logf("[HLL] Step 3/3 — cardinality≈%.0f (expect ~50000)", h.Estimate(nil))
+	t.Logf("[HLL] Step 3/3 — cardinality≈%d (expect ~50000)", h.Estimate())
 	writeEnvelope(t, outDir, "hll.pb", tmust(h.SerializePortable()))
 
 	// -----------------------------------------------------------------------

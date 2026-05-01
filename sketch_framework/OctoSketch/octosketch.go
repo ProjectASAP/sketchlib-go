@@ -14,17 +14,25 @@ import "github.com/ProjectASAP/sketchlib-go/common"
 type DeltaUpdate = common.DeltaUpdate
 
 // OctoSketch is the core interface for sketches participating in the framework.
-// A Worker-side implementation handles OctoInsert and emits DeltaUpdates internally.
-// An Aggregator-side implementation handles MergeDelta and answers Estimate queries.
+// A Worker-side implementation handles OctoUpdate and emits DeltaUpdates internally.
+// An Aggregator-side implementation handles MergeDelta and answers OctoEstimate
+// queries.
+//
+// The framework uses `OctoEstimate(input)` (rather than the canonical per-sketch
+// `Estimate(...)`) so that sketches whose canonical `Estimate` does not take an
+// input argument (e.g., HLL.Estimate() per Rust's unified API) can still
+// satisfy this interface via a thin shim.
 type OctoSketch interface {
-	// OctoInsert processes one stream item, updating local counters.
+	// OctoUpdate processes one stream item, updating local counters.
 	// On the Worker side this may emit DeltaUpdates when τ is reached.
-	OctoInsert(input *common.SketchInput)
+	OctoUpdate(input *common.SketchInput)
 
 	// MergeDelta applies a cell-level delta to the sketch.
 	// On the Aggregator side this accumulates worker deltas into the global sketch.
 	MergeDelta(delta DeltaUpdate)
 
-	// Estimate returns the estimated frequency (or other statistic) for input.
-	Estimate(input *common.SketchInput) float64
+	// OctoEstimate returns the estimated frequency (or other statistic) for
+	// input. For sketches whose canonical estimator takes no input (HLL),
+	// the input argument is ignored.
+	OctoEstimate(input *common.SketchInput) float64
 }

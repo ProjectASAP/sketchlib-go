@@ -120,7 +120,7 @@ func BenchmarkHLL_Query_Estimate(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = h.EstimateCardinality()
+		_ = h.Estimate()
 	}
 }
 
@@ -138,7 +138,7 @@ func TestHLL_Estimate_Latency_P99(t *testing.T) {
 
 	for i := 0; i < sampleSize; i++ {
 		start := time.Now()
-		_ = h.EstimateCardinality()
+		_ = h.Estimate()
 		latencies[i] = time.Since(start).Nanoseconds()
 	}
 
@@ -280,9 +280,9 @@ func TestHLL_Merge_Accuracy(t *testing.T) {
 
 	// 3. Pre-Merge Check
 	t.Log("=== Pre-Merge Statistics ===")
-	est1 := part1.EstimateCardinality()
-	est2 := part2.EstimateCardinality()
-	estTot := totalH.EstimateCardinality()
+	est1 := part1.Estimate()
+	est2 := part2.Estimate()
+	estTot := totalH.Estimate()
 
 	t.Logf(" Est Part 1: %d", est1)
 	t.Logf(" Est Part 2: %d", est2)
@@ -299,7 +299,7 @@ func TestHLL_Merge_Accuracy(t *testing.T) {
 	// 5. Post-Merge Accuracy (Exact Match Check)
 	t.Log("=== Post-Merge Accuracy ===")
 
-	estMerged := part1.EstimateCardinality()
+	estMerged := part1.Estimate()
 
 	t.Logf(" Merged Estimate: %d", estMerged)
 	t.Logf(" Total Estimate:  %d", estTot)
@@ -338,7 +338,7 @@ func TestHLL_CAIDA_AccuracyReport(t *testing.T) {
 	for _, hVal := range hashes {
 		h.InsertWithHash(hVal)
 	}
-	estimate := h.EstimateCardinality()
+	estimate := h.Estimate()
 
 	t.Log("===================================================")
 	t.Logf(" HLL ACCURACY REPORT (Precision=14)")

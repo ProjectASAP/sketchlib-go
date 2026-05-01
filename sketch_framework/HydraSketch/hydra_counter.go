@@ -161,7 +161,7 @@ func (c *countMinCounter) Insert(value *common.SketchInput, count int64) {
 	if value == nil || count == 0 {
 		return
 	}
-	c.s.InsertWeight(value, float64(count))
+	c.s.UpdateWeight(value, float64(count))
 }
 func (c *countMinCounter) InsertWithHash(_ *common.SketchInput, hash uint64, count int64) {
 	if count == 0 {
@@ -206,7 +206,7 @@ func (c *countSketchCounter) Insert(value *common.SketchInput, count int64) {
 	if value == nil || count == 0 {
 		return
 	}
-	c.s.InsertWeight(value, float64(count))
+	c.s.UpdateWeight(value, float64(count))
 }
 func (c *countSketchCounter) InsertWithHash(_ *common.SketchInput, hash uint64, count int64) {
 	if count == 0 {
@@ -247,7 +247,7 @@ func (c *hllCounter) Insert(value *common.SketchInput, count int64) {
 	if value == nil {
 		return
 	}
-	c.s.InsertInput(value)
+	c.s.Update(value)
 }
 func (c *hllCounter) InsertWithHash(_ *common.SketchInput, hash uint64, count int64) {
 	if count == 0 {
@@ -259,7 +259,7 @@ func (c *hllCounter) Query(q HydraQuery) (float64, error) {
 	if q.Kind != HydraQueryCardinality {
 		return 0, errors.New("hll only supports cardinality query")
 	}
-	return float64(c.s.EstimateCardinality()), nil
+	return float64(c.s.Estimate()), nil
 }
 func (c *hllCounter) Merge(other HydraCounter) error {
 	o, ok := other.(*hllCounter)
@@ -294,7 +294,7 @@ func (c *kllCounter) Insert(value *common.SketchInput, count int64) {
 	}
 	v := inputToFloat64(value)
 	for i := int64(0); i < count; i++ {
-		c.s.Insert(v)
+		c.s.Update(v)
 	}
 }
 func (c *kllCounter) InsertWithHash(value *common.SketchInput, _ uint64, count int64) {

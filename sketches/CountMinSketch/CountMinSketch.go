@@ -185,35 +185,38 @@ func (s *CountMinSketch) InsertWithHash(hash uint64) {
 	}
 }
 
-func (s *CountMinSketch) OctoInsert(input *common.SketchInput) {
+// Update is the canonical high-level update method, mirroring Rust's
+// unified API (`update`). It populates the sketch from a SketchInput.
+func (s *CountMinSketch) Update(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
 	s.insertMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
 }
 
-// Insert is a backward-compatible alias for OctoInsert.
-func (s *CountMinSketch) Insert(input *common.SketchInput) { s.OctoInsert(input) }
+// OctoUpdate is an alias for Update kept for the OctoSketch framework
+// (which wires sketches through a uniform "Octo" naming convention).
+func (s *CountMinSketch) OctoUpdate(input *common.SketchInput) { s.Update(input) }
 
-func (s *CountMinSketch) InsertWeight(input *common.SketchInput, many float64) {
+func (s *CountMinSketch) UpdateWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
 	s.insertMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), many)
 }
 
-func (s *CountMinSketch) BulkInsert(inputs []*common.SketchInput) {
+func (s *CountMinSketch) BulkUpdate(inputs []*common.SketchInput) {
 	for _, input := range inputs {
-		s.OctoInsert(input)
+		s.Update(input)
 	}
 }
 
-func (s *CountMinSketch) BulkInsertWeight(values []struct {
+func (s *CountMinSketch) BulkUpdateWeight(values []struct {
 	Input *common.SketchInput
 	Many  float64
 }) {
 	for _, value := range values {
-		s.InsertWeight(value.Input, value.Many)
+		s.UpdateWeight(value.Input, value.Many)
 	}
 }
 
@@ -295,6 +298,9 @@ func (s *CountMinSketch) Estimate(input *common.SketchInput) float64 {
 	}
 	return s.estimateMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols))
 }
+
+// OctoEstimate satisfies the octosketch.OctoSketch interface.
+func (s *CountMinSketch) OctoEstimate(input *common.SketchInput) float64 { return s.Estimate(input) }
 
 func (s *CountMinSketch) FastEstimateWithHash(hash uint64) float64 {
 	return s.queryFrequencyFast(hash)

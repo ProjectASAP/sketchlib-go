@@ -37,8 +37,9 @@ func NewSpaceSaving(k int) *SpaceSaving {
 	}
 }
 
-// Insert adds item key with weight w into the tracker.
-func (ss *SpaceSaving) Insert(key string, w float64) {
+// Update adds item key with weight w into the tracker, mirroring Rust's
+// unified update naming.
+func (ss *SpaceSaving) Update(key string, w float64) {
 	if w <= 0 {
 		return
 	}

@@ -102,14 +102,19 @@ func (s *FoldCountMinSketch) InsertWithHash(hash uint64) {
 	s.insertHashed(storage.BuildMatrixHash(hash, s.Rows, s.FullCols), 1)
 }
 
-func (s *FoldCountMinSketch) Insert(input *common.SketchInput) {
+// Update is the canonical high-level update method, mirroring Rust's
+// unified API (`update`). It populates the sketch from a SketchInput.
+func (s *FoldCountMinSketch) Update(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
 	s.insertHashed(storage.BuildMatrixHashFromInput(input, s.Rows, s.FullCols), 1)
 }
 
-func (s *FoldCountMinSketch) InsertWeight(input *common.SketchInput, many float64) {
+// OctoUpdate is an alias for Update kept for the OctoSketch framework.
+func (s *FoldCountMinSketch) OctoUpdate(input *common.SketchInput) { s.Update(input) }
+
+func (s *FoldCountMinSketch) UpdateWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
@@ -140,6 +145,11 @@ func (s *FoldCountMinSketch) Estimate(input *common.SketchInput) float64 {
 		return 0
 	}
 	return s.queryHashed(storage.BuildMatrixHashFromInput(input, s.Rows, s.FullCols))
+}
+
+// OctoEstimate satisfies the octosketch.OctoSketch interface.
+func (s *FoldCountMinSketch) OctoEstimate(input *common.SketchInput) float64 {
+	return s.Estimate(input)
 }
 
 func (s *FoldCountMinSketch) queryHashed(hashed storage.MatrixHashType) float64 {

@@ -61,7 +61,7 @@ func TestCountMinCellSketchCompliance(t *testing.T) {
 	sketch, err := octosketch.NewCountMinOcto(testRows, testCols)
 	require.NoError(t, err)
 	var _ octosketch.CellSketch = sketch
-	var _ octosketch.OctoSketch = sketch // OctoInsert, MergeDelta, Estimate
+	var _ octosketch.OctoSketch = sketch // OctoUpdate, MergeDelta, Estimate
 }
 
 func TestCountMinNoUnderestimate(t *testing.T) {
@@ -380,7 +380,7 @@ func TestHLLRegisterMaxMerge(t *testing.T) {
 	agg.MergeDelta(octosketch.DeltaUpdate{Row: 0, Col: 42, Value: 3.0})
 	agg.MergeDelta(octosketch.DeltaUpdate{Row: 0, Col: 42, Value: 7.0})
 	agg.MergeDelta(octosketch.DeltaUpdate{Row: 0, Col: 42, Value: 5.0}) // ignored: lower
-	est := agg.Estimate(nil)
+	est := float64(agg.Estimate())
 	assert.Greater(t, est, float64(0))
 }
 
@@ -412,7 +412,7 @@ func TestHLLCardinalityEstimate(t *testing.T) {
 	close(deltaCh)
 	drainDeltas(deltaCh, agg)
 
-	est := agg.Estimate(nil)
+	est := float64(agg.Estimate())
 	assert.InDelta(t, float64(cardinality), est, float64(cardinality)*0.05)
 }
 
@@ -436,7 +436,7 @@ func TestHLLFlushSyncsAggregator(t *testing.T) {
 	lateAgg := octosketch.NewHLLOcto()
 	drainDeltas(deltaCh, lateAgg)
 
-	assert.InDelta(t, float64(cardinality), lateAgg.Estimate(nil), float64(cardinality)*0.05)
+	assert.InDelta(t, float64(cardinality), float64(lateAgg.Estimate()), float64(cardinality)*0.05)
 }
 
 func TestHLLMultiWorkerCardinality(t *testing.T) {
@@ -463,7 +463,7 @@ func TestHLLMultiWorkerCardinality(t *testing.T) {
 	drainDeltas(deltaCh, agg)
 
 	total := float64(numWorkers * perWorker)
-	assert.InDelta(t, total, agg.Estimate(nil), total*0.05)
+	assert.InDelta(t, total, float64(agg.Estimate()), total*0.05)
 }
 
 func TestHLLSystemWiring(t *testing.T) {
@@ -567,7 +567,7 @@ func TestNilInputSafety(t *testing.T) {
 	csAgg, _ := octosketch.NewCountSketchOcto(testRows, testCols)
 	assert.Equal(t, float64(0), cmAgg.Estimate(nil))
 	assert.Equal(t, float64(0), csAgg.Estimate(nil))
-	_ = octosketch.NewHLLOcto().Estimate(nil)
+	_ = octosketch.NewHLLOcto().Estimate()
 }
 
 func TestBoundsCheckAllSketches(t *testing.T) {
