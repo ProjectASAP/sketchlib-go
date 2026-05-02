@@ -1,11 +1,14 @@
 package kll
 
 import (
+	"bytes"
 	"math"
 	"math/rand"
 	"sort"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
@@ -422,4 +425,126 @@ func TestKLL_Quality_SpecificClear(t *testing.T) {
 	if s.Count() != 0 {
 		t.Fatalf("expected count=0 after clear, got=%d", s.Count())
 	}
+}
+
+// ======================
+// Determinism (seedable RNG)
+// ======================
+//
+// Without a seed, KLL's compaction RNG is seeded from time.Now() so the
+// sketch state — and therefore the SerializePortable / SerializeProtoBytes
+// wire bytes — is non-reproducible across two sketches fed identical
+// inputs. Production code that restarts an aggregator processor would
+// emit different envelopes for the same input stream. The seedable
+// constructor restores byte-determinism end-to-end.
+
+func TestKLL_Deterministic_SeededByteParity(t *testing.T) {
+	const k = 200
+	const seed int64 = 42
+
+	// Use enough samples to force several compactions (k=200 starts
+	// compacting once level-0 fills past its capacity).
+	values := make([]float64, 5000)
+	rng := rand.New(rand.NewSource(7))
+	for i := range values {
+		values[i] = rng.Float64() * 1_000_000
+	}
+
+	a, err := NewKLLSketchWithSeed(k, seed)
+	if err != nil {
+		t.Fatalf("NewKLLSketchWithSeed(a): %v", err)
+	}
+	b, err := NewKLLSketchWithSeed(k, seed)
+	if err != nil {
+		t.Fatalf("NewKLLSketchWithSeed(b): %v", err)
+	}
+	for _, v := range values {
+		a.Update(v)
+		b.Update(v)
+	}
+
+	envA, err := a.SerializePortable()
+	if err != nil {
+		t.Fatalf("SerializePortable(a): %v", err)
+	}
+	envB, err := b.SerializePortable()
+	if err != nil {
+		t.Fatalf("SerializePortable(b): %v", err)
+	}
+	bytesA, err := proto.Marshal(envA)
+	if err != nil {
+		t.Fatalf("Marshal(a): %v", err)
+	}
+	bytesB, err := proto.Marshal(envB)
+	if err != nil {
+		t.Fatalf("Marshal(b): %v", err)
+	}
+	if !bytes.Equal(bytesA, bytesB) {
+		t.Fatalf("seeded KLL sketches with identical inputs produced "+
+			"different SerializePortable bytes:\n a (%d bytes) head=%x\n b (%d bytes) head=%x",
+			len(bytesA), firstNBytes(bytesA, 16),
+			len(bytesB), firstNBytes(bytesB, 16))
+	}
+}
+
+// TestKLL_Deterministic_DifferentSeedsDiffer ensures the seed actually
+// propagates into compaction — two sketches with different seeds and the
+// same input must (with high probability) produce different bytes.
+func TestKLL_Deterministic_DifferentSeedsDiffer(t *testing.T) {
+	const k = 200
+	values := make([]float64, 5000)
+	rng := rand.New(rand.NewSource(11))
+	for i := range values {
+		values[i] = rng.Float64() * 1_000_000
+	}
+	a, _ := NewKLLSketchWithSeed(k, 1)
+	b, _ := NewKLLSketchWithSeed(k, 2)
+	for _, v := range values {
+		a.Update(v)
+		b.Update(v)
+	}
+	bytesA, _ := a.SerializeProtoBytes()
+	bytesB, _ := b.SerializeProtoBytes()
+	if bytes.Equal(bytesA, bytesB) {
+		t.Fatalf("expected different seeds to produce different bytes; got identical %d-byte payloads", len(bytesA))
+	}
+}
+
+// TestKLL_Deterministic_ClearPreservesSeed ensures Clear() re-seeds from the
+// stored seed, not from time.Now() — otherwise determinism evaporates after
+// the first window rotation.
+func TestKLL_Deterministic_ClearPreservesSeed(t *testing.T) {
+	const k = 200
+	const seed int64 = 1234
+	values := make([]float64, 3000)
+	rng := rand.New(rand.NewSource(13))
+	for i := range values {
+		values[i] = rng.Float64() * 1_000_000
+	}
+
+	a, _ := NewKLLSketchWithSeed(k, seed)
+	// Pre-fill with noise then Clear, simulating window rotation.
+	for i := 0; i < 1500; i++ {
+		a.Update(rng.Float64() * 1_000_000)
+	}
+	a.Clear()
+
+	b, _ := NewKLLSketchWithSeed(k, seed)
+	for _, v := range values {
+		a.Update(v)
+		b.Update(v)
+	}
+	bytesA, _ := a.SerializeProtoBytes()
+	bytesB, _ := b.SerializeProtoBytes()
+	if !bytes.Equal(bytesA, bytesB) {
+		t.Fatalf("Clear() lost determinism: post-Clear sketch (%d bytes) "+
+			"diverges from fresh seeded sketch (%d bytes)", len(bytesA), len(bytesB))
+	}
+}
+
+func firstNBytes(b []byte, n int) []byte {
+	if len(b) <= n {
+		return b
+	}
+	return b[:n]
 }

@@ -20,14 +20,23 @@ const (
 )
 
 type KLLSketch struct {
-	items         []float64
-	levels        []int
-	itemStore     *storage.Vector1D[float64]
-	levelStore    *storage.Vector1D[int]
-	k             int
-	m             int
-	numLevels     int
-	co            coin
+	items      []float64
+	levels     []int
+	itemStore  *storage.Vector1D[float64]
+	levelStore *storage.Vector1D[int]
+	k          int
+	m          int
+	numLevels  int
+	co         coin
+	// seed is the explicit RNG seed (when seedSet is true). Stored so
+	// Clear() / Reset() can recreate a deterministic coin instead of
+	// silently re-randomizing from time.Now() and breaking the
+	// "same seed + same input = same bytes" contract over a sketch's
+	// lifetime. Zero-valued (seedSet=false) means the time-based
+	// constructor was used and Reset() should keep behaving like
+	// before (re-seed from wall clock).
+	seed          int64
+	seedSet       bool
 	capacityCache [capacityCacheLen]uint32
 	topHeight     int
 	level0Cap     int
@@ -86,11 +95,28 @@ func (c *coin) toss() bool {
 }
 
 // NewKLLSketch creates a new KLL sketch using the Rust default minimum buffer.
+// The compaction RNG is seeded from the wall clock (time.Now().UnixNano()) — for
+// reproducible sketch state across runs use NewKLLSketchWithSeed.
 func NewKLLSketch(k int) (*KLLSketch, error) {
 	if k <= 0 {
 		return nil, errors.New("k must be positive")
 	}
 	return Init(k, defaultM), nil
+}
+
+// NewKLLSketchWithSeed creates a new KLL sketch with an explicit seed for the
+// compaction-RNG ("coin"). Two sketches built with the same seed and fed the
+// same sequence of values produce byte-identical SerializePortable output.
+//
+// This is the deterministic-construction path: prefer it for tests, parity
+// harnesses, and any production caller that needs reproducible sketch state
+// across processor restarts. Callers that don't care about determinism can
+// keep using NewKLLSketch (time-seeded).
+func NewKLLSketchWithSeed(k int, seed int64) (*KLLSketch, error) {
+	if k <= 0 {
+		return nil, errors.New("k must be positive")
+	}
+	return InitWithSeed(k, defaultM, seed), nil
 }
 
 // New returns a sketch using the Rust default K.
@@ -100,6 +126,21 @@ func New() *KLLSketch {
 
 // Init mirrors the Rust constructor naming.
 func Init(k, m int) *KLLSketch {
+	return initInternal(k, m, newCoin(), 0, false)
+}
+
+// InitWithSeed mirrors Init but uses an explicit seed for the compaction RNG.
+// See NewKLLSketchWithSeed for the determinism contract.
+func InitWithSeed(k, m int, seed int64) *KLLSketch {
+	return initInternal(k, m, coinFromSeed(uint64(seed)), seed, true)
+}
+
+// initInternal is the shared constructor that injects a pre-built coin so the
+// seedable and time-seeded paths share the same allocation / capacity-cache
+// rebuild logic. The coin's seed propagates through to every toss() (used in
+// compact()) — i.e. the new seed actually drives compaction outcomes, not just
+// the struct field.
+func initInternal(k, m int, co coin, seed int64, seedSet bool) *KLLSketch {
 	normM := m
 	if normM < 2 {
 		normM = 2
@@ -121,7 +162,9 @@ func Init(k, m int) *KLLSketch {
 		k:         normK,
 		m:         normM,
 		numLevels: 1,
-		co:        newCoin(),
+		co:        co,
+		seed:      seed,
+		seedSet:   seedSet,
 	}
 	s.bindStoresFromSlices()
 	s.rebuildCapacityCache()
@@ -131,6 +174,11 @@ func Init(k, m int) *KLLSketch {
 // InitKLL mirrors the Rust helper naming.
 func InitKLL(k int) *KLLSketch {
 	return Init(k, defaultM)
+}
+
+// InitKLLWithSeed mirrors InitKLL but with an explicit RNG seed.
+func InitKLLWithSeed(k int, seed int64) *KLLSketch {
+	return InitWithSeed(k, defaultM, seed)
 }
 
 func (s *KLLSketch) TypeName() string {
@@ -171,13 +219,21 @@ func (s *KLLSketch) Reset() {
 	s.Clear()
 }
 
-// Clear resets the sketch while preserving allocation.
+// Clear resets the sketch while preserving allocation. If the sketch was
+// constructed with an explicit seed (NewKLLSketchWithSeed / InitWithSeed),
+// Clear re-seeds the coin from that seed so determinism is preserved across
+// Reset/Clear cycles. Otherwise the coin is re-seeded from time.Now() (the
+// pre-determinism behavior).
 func (s *KLLSketch) Clear() {
 	s.items = s.items[:0]
 	s.levels = []int{0, 0}
 	s.bindStoresFromSlices()
 	s.numLevels = 1
-	s.co = newCoin()
+	if s.seedSet {
+		s.co = coinFromSeed(uint64(s.seed))
+	} else {
+		s.co = newCoin()
+	}
 	s.rebuildCapacityCache()
 }
 
