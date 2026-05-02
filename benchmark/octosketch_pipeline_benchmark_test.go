@@ -375,15 +375,15 @@ func insertPacket(kind octoSketchKind, sketch any, p octoPacket) {
 	switch kind {
 	case octoKindCountMin:
 		in := keyInputFromPacket(p)
-		sketch.(*countminsketch.CountMinSketch).Insert(&in)
+		sketch.(*countminsketch.CountMinSketch).Update(&in)
 	case octoKindCountSketch:
 		in := keyInputFromPacket(p)
-		sketch.(*countsketch.CountSketch).Insert(&in)
+		sketch.(*countsketch.CountSketch).Update(&in)
 	case octoKindHLL:
 		in := keyInputFromPacket(p)
-		sketch.(*hll.HyperLogLog).Insert(&in)
+		sketch.(*hll.HyperLogLog).Update(&in)
 	case octoKindDDSketch:
-		sketch.(*ddsketch.DDSketch).Add(p.value)
+		sketch.(*ddsketch.DDSketch).Update(p.value)
 	}
 }
 
@@ -399,7 +399,7 @@ func estimateKey(kind octoSketchKind, sketch any, key uint32) float64 {
 }
 
 func estimateHLL(sketch any) float64 {
-	return sketch.(*hll.HyperLogLog).Estimate(nil)
+	return float64(sketch.(*hll.HyperLogLog).Estimate())
 }
 
 func estimateDDS(sketch any, q float64) float64 {
@@ -782,8 +782,8 @@ func measureThroughputAndResource(t testing.TB, ds octoDataset, kind octoSketchK
 		case octoKindDDSketch:
 			if ds.ddMinValue > 0 && ds.ddMaxValue > ds.ddMinValue {
 				for _, s := range local {
-					s.(*ddsketch.DDSketch).Add(ds.ddMinValue)
-					s.(*ddsketch.DDSketch).Add(ds.ddMaxValue)
+					s.(*ddsketch.DDSketch).Update(ds.ddMinValue)
+					s.(*ddsketch.DDSketch).Update(ds.ddMaxValue)
 				}
 			}
 		case octoKindHLL:

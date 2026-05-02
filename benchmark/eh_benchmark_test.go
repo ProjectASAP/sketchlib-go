@@ -370,11 +370,11 @@ func fillSketchValue(s interface{}, count int) {
 		// Fallback
 		if k, ok := s.(*kll.KLLSketch); ok {
 			for i := 0; i < count; i++ {
-				k.Insert(float64(i))
+				k.Update(float64(i))
 			}
 		} else if d, ok := s.(*ddsketch.DDSketch); ok {
 			for i := 0; i < count; i++ {
-				d.Add(float64(i))
+				d.Update(float64(i))
 			}
 		}
 		return
@@ -387,11 +387,11 @@ func fillSketchValue(s interface{}, count int) {
 
 	if k, ok := s.(*kll.KLLSketch); ok {
 		for i := 0; i < limit; i++ {
-			k.Insert(stream[i].F)
+			k.Update(stream[i].F)
 		}
 	} else if d, ok := s.(*ddsketch.DDSketch); ok {
 		for i := 0; i < limit; i++ {
-			d.Add(stream[i].F)
+			d.Update(stream[i].F)
 		}
 	}
 }

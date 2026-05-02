@@ -12,7 +12,7 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	// Feed in a few values spanning several buckets; ddsketch only
 	// accepts strictly-positive values so any positive set works.
 	for _, v := range []float64{1.0, 2.0, 5.0, 10.0, 20.0, 50.0} {
-		sketch.Add(v)
+		sketch.Update(v)
 	}
 
 	bytes, err := sketch.SerializeMsgpack()

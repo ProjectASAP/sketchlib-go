@@ -58,7 +58,7 @@ func BenchmarkKLL_Insert_Single(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		s.Insert(data[i%n])
+		s.Update(data[i%n])
 	}
 }
 
@@ -81,7 +81,7 @@ func BenchmarkKLL_Insert_Batch(b *testing.B) {
 		}
 
 		for k := start; k < end; k++ {
-			s.Insert(data[k])
+			s.Update(data[k])
 		}
 	}
 }
@@ -94,7 +94,7 @@ func TestKLL_Insert_Latency_P50P99(t *testing.T) {
 	latencies := make([]int64, sampleSize)
 	for i := 0; i < sampleSize; i++ {
 		start := time.Now()
-		s.Insert(data[i])
+		s.Update(data[i])
 		latencies[i] = time.Since(start).Nanoseconds()
 	}
 
@@ -117,7 +117,7 @@ func BenchmarkKLL_Query_Quantile(b *testing.B) {
 
 	// Pre-fill
 	for _, v := range data {
-		s.Insert(v)
+		s.Update(v)
 	}
 
 	// Queries to cycle through
@@ -137,7 +137,7 @@ func BenchmarkKLL_Query_Rank(b *testing.B) {
 	s, _ := kll.NewKLLSketch(kllBenchK)
 
 	for _, v := range data {
-		s.Insert(v)
+		s.Update(v)
 	}
 
 	b.ResetTimer()
@@ -152,7 +152,7 @@ func TestKLL_Query_Latency_P99(t *testing.T) {
 	s, _ := kll.NewKLLSketch(kllBenchK)
 
 	for _, v := range data {
-		s.Insert(v)
+		s.Update(v)
 	}
 
 	sampleSize := 100_000
@@ -196,7 +196,7 @@ func TestKLL_Memory_Usage(t *testing.T) {
 	// Allocate & Fill
 	s, _ := kll.NewKLLSketch(kllBenchK)
 	for _, v := range data {
-		s.Insert(v)
+		s.Update(v)
 	}
 
 	// Snapshot after
@@ -239,8 +239,8 @@ func BenchmarkKLL_Merge_2(b *testing.B) {
 
 	// Pre-fill slightly to ensure compaction logic runs
 	for i := 0; i < 1000; i++ {
-		s1.Insert(float64(i))
-		s2.Insert(float64(i * 2))
+		s1.Update(float64(i))
+		s2.Update(float64(i * 2))
 	}
 
 	b.ResetTimer()
@@ -255,7 +255,7 @@ func benchmarkKLLMergeN(b *testing.B, count int) {
 	// Fill with distinct data ranges
 	for i, sk := range list {
 		for j := 0; j < 100; j++ {
-			sk.Insert(float64(i*100 + j))
+			sk.Update(float64(i*100 + j))
 		}
 	}
 
@@ -283,7 +283,7 @@ func TestKLL_Merge_Accuracy(t *testing.T) {
 	// 1. Ground Truth (Total Sketch)
 	totalS, _ := kll.NewKLLSketch(kllBenchK)
 	for _, v := range data {
-		totalS.Insert(v)
+		totalS.Update(v)
 	}
 
 	// 2. Split Sketches
@@ -292,9 +292,9 @@ func TestKLL_Merge_Accuracy(t *testing.T) {
 
 	for i, v := range data {
 		if i < mid {
-			part1.Insert(v)
+			part1.Update(v)
 		} else {
-			part2.Insert(v)
+			part2.Update(v)
 		}
 	}
 
@@ -362,7 +362,7 @@ func TestKLL_CAIDA_AccuracyReport(t *testing.T) {
 
 	s, _ := kll.NewKLLSketch(kllBenchK)
 	for _, v := range data {
-		s.Insert(v)
+		s.Update(v)
 	}
 
 	// Sort Ground Truth
@@ -413,9 +413,9 @@ func TestKLL_Merge_Latency_Distribution(t *testing.T) {
 	rightSrc, _ := kll.NewKLLSketch(kllBenchK)
 	for i, v := range data {
 		if i < mid {
-			leftSrc.Insert(v)
+			leftSrc.Update(v)
 		} else {
-			rightSrc.Insert(v)
+			rightSrc.Update(v)
 		}
 	}
 

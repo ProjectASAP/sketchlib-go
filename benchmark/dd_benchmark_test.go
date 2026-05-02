@@ -65,7 +65,7 @@ func BenchmarkDDSketch_Add_Single(b *testing.B) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		s.Add(data[i%n])
+		s.Update(data[i%n])
 	}
 }
 
@@ -88,7 +88,7 @@ func BenchmarkDDSketch_Add_Batch(b *testing.B) {
 		}
 
 		for k := start; k < end; k++ {
-			s.Add(data[k])
+			s.Update(data[k])
 		}
 	}
 }
@@ -104,7 +104,7 @@ func BenchmarkDDSketch_Update_Speed(b *testing.B) {
 	b.SetBytes(8)
 
 	for i := 0; i < b.N; i++ {
-		s.Add(data[i%n])
+		s.Update(data[i%n])
 	}
 }
 
@@ -118,7 +118,7 @@ func TestDDSketch_Add_Latency_P50P99(t *testing.T) {
 
 	for i := 0; i < sampleSize; i++ {
 		start := time.Now()
-		s.Add(data[i])
+		s.Update(data[i])
 		latencies[i] = time.Since(start).Nanoseconds()
 	}
 
@@ -147,7 +147,7 @@ func BenchmarkDDSketch_Add_Parallel(b *testing.B) {
 		s := ddsketch.NewDDSketch(ddBenchAlpha)
 		for pb.Next() {
 			idx := atomic.AddUint64(&counter, 1) - 1
-			s.Add(data[idx%uint64(n)])
+			s.Update(data[idx%uint64(n)])
 		}
 		runtime.KeepAlive(s)
 	})
@@ -165,7 +165,7 @@ func BenchmarkDDSketch_Query_Quantile(b *testing.B) {
 
 	// Pre-fill
 	for _, v := range data {
-		s.Add(v)
+		s.Update(v)
 	}
 
 	// Queries to cycle through
@@ -173,7 +173,7 @@ func BenchmarkDDSketch_Query_Quantile(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = s.GetValueAtQuantile(qs[i%len(qs)])
+		_, _ = s.Quantile(qs[i%len(qs)])
 	}
 }
 
@@ -183,14 +183,14 @@ func BenchmarkDDSketch_Query_MixedQuantiles(b *testing.B) {
 	s := ddsketch.NewDDSketch(ddBenchAlpha)
 
 	for _, v := range data {
-		s.Add(v)
+		s.Update(v)
 	}
 
 	qs := []float64{0.01, 0.1, 0.5, 0.9, 0.95, 0.99, 0.999}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = s.GetValueAtQuantile(qs[i%len(qs)])
+		_, _ = s.Quantile(qs[i%len(qs)])
 	}
 }
 
@@ -200,7 +200,7 @@ func TestDDSketch_Query_Latency_P99(t *testing.T) {
 	s := ddsketch.NewDDSketch(ddBenchAlpha)
 
 	for _, v := range data {
-		s.Add(v)
+		s.Update(v)
 	}
 
 	sampleSize := 100_000
@@ -210,7 +210,7 @@ func TestDDSketch_Query_Latency_P99(t *testing.T) {
 	for i := 0; i < sampleSize; i++ {
 		q := rng.Float64() // Random quantile 0..1
 		start := time.Now()
-		_, _ = s.GetValueAtQuantile(q)
+		_, _ = s.Quantile(q)
 		latencies[i] = time.Since(start).Nanoseconds()
 	}
 
@@ -244,7 +244,7 @@ func TestDDSketch_Memory_Usage(t *testing.T) {
 	// Allocate & Fill
 	s := ddsketch.NewDDSketch(ddBenchAlpha)
 	for _, v := range data {
-		s.Add(v)
+		s.Update(v)
 	}
 
 	// Snapshot after
@@ -275,7 +275,7 @@ func TestDDSketch_Memory_Usage(t *testing.T) {
 	t.Log("Checking post-build dynamic growth...")
 	runtime.ReadMemStats(&m1)
 	for i := 0; i < minInt(1_000_000, N); i++ {
-		s.Add(data[i])
+		s.Update(data[i])
 	}
 	runtime.ReadMemStats(&m2)
 	dynamicGrowth := int64(m2.HeapAlloc) - int64(m1.HeapAlloc)
@@ -283,7 +283,7 @@ func TestDDSketch_Memory_Usage(t *testing.T) {
 
 	s2 := ddsketch.NewDDSketch(ddBenchAlpha)
 	for i := 0; i < minInt(100_000, N); i++ {
-		s2.Add(data[N-1-i])
+		s2.Update(data[N-1-i])
 	}
 	runtime.ReadMemStats(&m1)
 	_ = s.Merge(s2)
@@ -310,8 +310,8 @@ func BenchmarkDDSketch_Merge_2(b *testing.B) {
 	s2 := ddsketch.NewDDSketch(ddBenchAlpha)
 
 	// Pre-fill with disjoint ranges to force bucket merging logic
-	s1.Add(100)
-	s2.Add(200)
+	s1.Update(100)
+	s2.Update(200)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -328,9 +328,9 @@ func BenchmarkDDSketch_Merge_PreFilled_CAIDA(b *testing.B) {
 	right := ddsketch.NewDDSketch(ddBenchAlpha)
 	for i, v := range data {
 		if i < mid {
-			left.Add(v)
+			left.Update(v)
 		} else {
-			right.Add(v)
+			right.Update(v)
 		}
 	}
 
@@ -348,7 +348,7 @@ func benchmarkDDSketchMergeN(b *testing.B, count int) {
 	// Fill with distinct data ranges
 	for i, sk := range list {
 		for j := 0; j < 100; j++ {
-			sk.Add(float64(i*1000 + j + 1))
+			sk.Update(float64(i*1000 + j + 1))
 		}
 	}
 
@@ -376,7 +376,7 @@ func TestDDSketch_Merge_Accuracy(t *testing.T) {
 	// 1. Ground Truth (Total Sketch)
 	totalS := ddsketch.NewDDSketch(ddBenchAlpha)
 	for _, v := range data {
-		totalS.Add(v)
+		totalS.Update(v)
 	}
 
 	// 2. Split Sketches
@@ -385,18 +385,18 @@ func TestDDSketch_Merge_Accuracy(t *testing.T) {
 
 	for i, v := range data {
 		if i < mid {
-			part1.Add(v)
+			part1.Update(v)
 		} else {
-			part2.Add(v)
+			part2.Update(v)
 		}
 	}
 
 	// 3. Pre-Merge Check
 	t.Log("=== Pre-Merge Statistics ===")
 	q := 0.99
-	v1, _ := part1.GetValueAtQuantile(q)
-	v2, _ := part2.GetValueAtQuantile(q)
-	vt, _ := totalS.GetValueAtQuantile(q)
+	v1, _ := part1.Quantile(q)
+	v2, _ := part2.Quantile(q)
+	vt, _ := totalS.Quantile(q)
 
 	t.Logf(" P99 Part 1: %.0f", v1)
 	t.Logf(" P99 Part 2: %.0f", v2)
@@ -419,8 +419,8 @@ func TestDDSketch_Merge_Accuracy(t *testing.T) {
 	points := []float64{0.5, 0.9, 0.99, 1.0}
 
 	for _, p := range points {
-		estMerged, _ := part1.GetValueAtQuantile(p)
-		estTotal, _ := totalS.GetValueAtQuantile(p)
+		estMerged, _ := part1.Quantile(p)
+		estTotal, _ := totalS.Quantile(p)
 
 		if estMerged != estTotal {
 			t.Errorf("Mismatch at q=%.2f! Merged=%.2f, Total=%.2f", p, estMerged, estTotal)
@@ -439,7 +439,7 @@ func TestDDSketch_CAIDA_AccuracyReport(t *testing.T) {
 
 	s := ddsketch.NewDDSketch(ddBenchAlpha)
 	for _, v := range data {
-		s.Add(v)
+		s.Update(v)
 	}
 
 	// Sort Ground Truth
@@ -465,7 +465,7 @@ func TestDDSketch_CAIDA_AccuracyReport(t *testing.T) {
 		trueVal := sorted[idx]
 
 		// Estimated Value
-		estVal, _ := s.GetValueAtQuantile(p)
+		estVal, _ := s.Quantile(p)
 
 		// Relative Error
 		err := math.Abs(estVal - trueVal)
@@ -497,7 +497,7 @@ func TestDDSketch_CAIDA_Accuracy_Detailed(t *testing.T) {
 
 	s := ddsketch.NewDDSketch(ddBenchAlpha)
 	for _, v := range data {
-		s.Add(v)
+		s.Update(v)
 	}
 
 	sorted := make([]float64, len(data))
@@ -522,7 +522,7 @@ func TestDDSketch_CAIDA_Accuracy_Detailed(t *testing.T) {
 		}
 
 		trueVal := sorted[idx]
-		estVal, ok := s.GetValueAtQuantile(q)
+		estVal, ok := s.Quantile(q)
 		if !ok {
 			t.Fatalf("quantile query failed at %.3f", q)
 		}
@@ -559,9 +559,9 @@ func TestDDSketch_Merge_Latency_Distribution(t *testing.T) {
 	rightSrc := ddsketch.NewDDSketch(ddBenchAlpha)
 	for i, v := range data {
 		if i < mid {
-			leftSrc.Add(v)
+			leftSrc.Update(v)
 		} else {
-			rightSrc.Add(v)
+			rightSrc.Update(v)
 		}
 	}
 

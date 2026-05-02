@@ -17,7 +17,7 @@ import (
 func TestSerializeStateProtoBytes_RoundTrip(t *testing.T) {
 	orig := NewDDSketch(0.01)
 	for _, v := range []float64{1.0, 2.0, 5.0, 10.0, 20.0, 50.0} {
-		orig.Add(v)
+		orig.Update(v)
 	}
 
 	bytes, err := orig.SerializeStateProtoBytes()
@@ -53,8 +53,8 @@ func TestSerializeStateProtoBytes_RoundTrip(t *testing.T) {
 		t.Errorf("count: got %d, want %d", reconstructed.Count(), orig.Count())
 	}
 	// Quantile estimate should match within alpha tolerance.
-	origP50, _ := orig.GetValueAtQuantile(0.5)
-	recP50, _ := reconstructed.GetValueAtQuantile(0.5)
+	origP50, _ := orig.Quantile(0.5)
+	recP50, _ := reconstructed.Quantile(0.5)
 	if math.Abs(origP50-recP50) > origP50*0.01 {
 		t.Errorf("p50: got %v, want ~%v", recP50, origP50)
 	}
@@ -91,18 +91,18 @@ func TestNewFromState_EmptySketchRoundTrip(t *testing.T) {
 	if reconstructed.Count() != 0 {
 		t.Errorf("empty count: got %d, want 0", reconstructed.Count())
 	}
-	// Adding to the reconstructed sketch should work — the
+	// Updating the reconstructed sketch should work — the
 	// constructor must seed min/max with +Inf/-Inf sentinels.
-	reconstructed.Add(42.0)
+	reconstructed.Update(42.0)
 	if reconstructed.Count() != 1 {
-		t.Errorf("after Add: count=%d, want 1", reconstructed.Count())
+		t.Errorf("after Update: count=%d, want 1", reconstructed.Count())
 	}
 }
 
 func TestNewFromState_NonEmptyBucketsRoundTrip(t *testing.T) {
 	orig := NewDDSketch(0.01)
 	for _, v := range []float64{1.0, 2.0, 3.0, 5.0, 10.0} {
-		orig.Add(v)
+		orig.Update(v)
 	}
 	bytes, err := orig.SerializeStateProtoBytes()
 	if err != nil {
@@ -115,11 +115,11 @@ func TestNewFromState_NonEmptyBucketsRoundTrip(t *testing.T) {
 	if reconstructed.Count() != orig.Count() {
 		t.Errorf("count: got %d, want %d", reconstructed.Count(), orig.Count())
 	}
-	// Further Adds should keep working — bucket store must be
+	// Further Updates should keep working — bucket store must be
 	// reattached to a live storage.Vector1D.
-	reconstructed.Add(100.0)
+	reconstructed.Update(100.0)
 	if reconstructed.Count() != orig.Count()+1 {
-		t.Errorf("after Add: count=%d, want %d",
+		t.Errorf("after Update: count=%d, want %d",
 			reconstructed.Count(), orig.Count()+1)
 	}
 }

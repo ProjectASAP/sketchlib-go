@@ -57,9 +57,14 @@ type CellSketch interface {
 	//   HLL:                  max
 	MergeDelta(delta DeltaUpdate)
 
-	// Estimate returns the current frequency / cardinality estimate.
+	// OctoEstimate returns the current frequency / cardinality estimate.
 	// For HLL the input argument is ignored (global cardinality).
-	Estimate(input *common.SketchInput) float64
+	//
+	// This is named `OctoEstimate` rather than `Estimate` so that sketches
+	// whose canonical estimator does not take an input argument (HLL) can
+	// satisfy this interface via a thin shim, while keeping their canonical
+	// `Estimate(...)` API aligned with the Rust unified-API naming.
+	OctoEstimate(input *common.SketchInput) float64
 
 	// ── Lifecycle ─────────────────────────────────────────────────────────────
 

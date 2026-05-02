@@ -79,7 +79,7 @@ func TestDDSketch_CAIDA_Insertion(t *testing.T) {
 		val := sample.F
 		// DDSketch only accepts strictly positive values
 		if val > 0 {
-			s.Add(val)
+			s.Update(val)
 			validCount++
 		}
 	}
@@ -112,12 +112,12 @@ func TestDDSketch_CAIDA_Merge(t *testing.T) {
 			continue
 		}
 
-		sTotal.Add(val)
+		sTotal.Update(val)
 
 		if i < mid {
-			sPart1.Add(val)
+			sPart1.Update(val)
 		} else {
-			sPart2.Add(val)
+			sPart2.Update(val)
 		}
 	}
 
@@ -168,8 +168,8 @@ func TestDDSketch_CAIDA_Merge(t *testing.T) {
 	}
 
 	// 3. Verify Quantile Query Result
-	qMerged, _ := sPart1.GetValueAtQuantile(0.95)
-	qTotal, _ := sTotal.GetValueAtQuantile(0.95)
+	qMerged, _ := sPart1.Quantile(0.95)
+	qTotal, _ := sTotal.Quantile(0.95)
 
 	if qMerged != qTotal {
 		t.Errorf("Quantile query mismatch after merge. Merged=%.2f, Total=%.2f", qMerged, qTotal)
@@ -191,7 +191,7 @@ func TestDDSketch_CAIDA_Accuracy(t *testing.T) {
 	for _, sample := range samples {
 		val := sample.F
 		if val > 0 {
-			s.Add(val)
+			s.Update(val)
 			truth = append(truth, val)
 		}
 	}
@@ -209,7 +209,7 @@ func TestDDSketch_CAIDA_Accuracy(t *testing.T) {
 
 	for _, q := range quantiles {
 		// 1. Get Estimate
-		est, ok := s.GetValueAtQuantile(q)
+		est, ok := s.Quantile(q)
 		if !ok {
 			t.Fatalf("Failed to get quantile for q=%.2f", q)
 		}
@@ -239,7 +239,7 @@ func TestDDSketch_CAIDA_Monotonicity(t *testing.T) {
 
 	for _, sample := range samples {
 		if sample.F > 0 {
-			s.Add(sample.F)
+			s.Update(sample.F)
 		}
 	}
 
@@ -248,7 +248,7 @@ func TestDDSketch_CAIDA_Monotonicity(t *testing.T) {
 
 	for i := 0; i <= steps; i++ {
 		q := float64(i) / float64(steps)
-		val, _ := s.GetValueAtQuantile(q)
+		val, _ := s.Quantile(q)
 
 		if val < prevVal {
 			t.Fatalf("Monotonicity violation at q=%.2f. Prev=%.2f, Curr=%.2f", q, prevVal, val)
@@ -260,9 +260,9 @@ func TestDDSketch_CAIDA_Monotonicity(t *testing.T) {
 
 func TestDDSketchRustStyleAPI(t *testing.T) {
 	s := New(0.01)
-	s.Add(1)
-	s.Add(10)
-	s.Add(100)
+	s.Update(1)
+	s.Update(10)
+	s.Update(100)
 
 	if got := s.Count(); got != 3 {
 		t.Fatalf("unexpected count: got %d", got)
@@ -300,11 +300,11 @@ func TestDDSketch_Quality_OperationsAndErrorBound(t *testing.T) {
 	for i := 0; i < 30000; i++ {
 		v := math.Exp(rng.Float64()*8 - 2)
 		vals = append(vals, v)
-		s.Add(v)
+		s.Update(v)
 	}
-	s.Add(0)
-	s.Add(-3)
-	s.Add(math.NaN())
+	s.Update(0)
+	s.Update(-3)
+	s.Update(math.NaN())
 
 	if int(s.Count()) != len(vals) {
 		t.Fatalf("count mismatch: got=%d want=%d", s.Count(), len(vals))
@@ -313,7 +313,7 @@ func TestDDSketch_Quality_OperationsAndErrorBound(t *testing.T) {
 	sort.Float64s(sorted)
 
 	for _, q := range []float64{0.5, 0.9, 0.99} {
-		est, ok := s.GetValueAtQuantile(q)
+		est, ok := s.Quantile(q)
 		if !ok {
 			t.Fatalf("missing quantile q=%.2f", q)
 		}
@@ -334,11 +334,11 @@ func TestDDSketch_Quality_MergeAccuracy(t *testing.T) {
 	vals := make([]float64, 20000)
 	for i := range vals {
 		vals[i] = 1 + rng.Float64()*100000
-		total.Add(vals[i])
+		total.Update(vals[i])
 		if i < len(vals)/2 {
-			a.Add(vals[i])
+			a.Update(vals[i])
 		} else {
-			b.Add(vals[i])
+			b.Update(vals[i])
 		}
 	}
 	if err := a.Merge(b); err != nil {
@@ -348,8 +348,8 @@ func TestDDSketch_Quality_MergeAccuracy(t *testing.T) {
 		t.Fatalf("merged count mismatch: got=%d want=%d", a.Count(), total.Count())
 	}
 	for _, q := range []float64{0.5, 0.95} {
-		ga, _ := a.GetValueAtQuantile(q)
-		gt, _ := total.GetValueAtQuantile(q)
+		ga, _ := a.Quantile(q)
+		gt, _ := total.Quantile(q)
 		if ga != gt {
 			t.Fatalf("merged quantile mismatch q=%.2f got=%v want=%v", q, ga, gt)
 		}

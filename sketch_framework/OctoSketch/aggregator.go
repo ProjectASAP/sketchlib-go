@@ -111,7 +111,7 @@ func (a *Aggregator) Done() <-chan struct{} { return a.doneCh }
 // For HLL: global cardinality (input is ignored).
 // Call only after Done() is closed, or with external synchronization.
 func (a *Aggregator) Query(input *common.SketchInput) float64 {
-	return a.sketch.Estimate(input)
+	return a.sketch.OctoEstimate(input)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

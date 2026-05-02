@@ -11,8 +11,8 @@ func TestHLLVariantRegularAndDataFusion(t *testing.T) {
 	df := NewDataFusion()
 	for i := 0; i < 1000; i++ {
 		in := common.FromU64(uint64(i))
-		reg.InsertInput(in)
-		df.InsertInput(in)
+		reg.Update(in)
+		df.Update(in)
 	}
 	if reg.Estimate() <= 0 || df.Estimate() <= 0 {
 		t.Fatalf("invalid estimates regular=%d df=%d", reg.Estimate(), df.Estimate())
@@ -22,7 +22,7 @@ func TestHLLVariantRegularAndDataFusion(t *testing.T) {
 func TestHLLHIPBasic(t *testing.T) {
 	hip := NewHIP()
 	for i := 0; i < 1000; i++ {
-		hip.InsertInput(common.FromU64(uint64(i)))
+		hip.Update(common.FromU64(uint64(i)))
 	}
 	if hip.Estimate() <= 0 {
 		t.Fatalf("invalid hip estimate: %d", hip.Estimate())

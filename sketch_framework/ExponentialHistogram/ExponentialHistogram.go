@@ -517,7 +517,7 @@ func NewExpoHistogramKLL(ehK int, windowSize int64, kllK int) *ExpoHistogramKLL 
 
 func (eh *ExpoHistogramKLL) UpdateValue(val float64, timestamp int64) error {
 	s, _ := kll.NewKLLSketch(eh.kllK)
-	s.Insert(val)
+	s.Update(val)
 	return eh.Update(&KLLAdapter{KLLSketch: s}, timestamp)
 }
 
@@ -635,7 +635,7 @@ func (d *DDAdapter) InsertWithHash(hash uint64) { /* No-op */ }
 func (d *DDAdapter) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
 	if q == common.QueryQuantile {
 		qt := math.Float64frombits(hash)
-		val, ok := d.DDSketch.GetValueAtQuantile(qt)
+		val, ok := d.DDSketch.Quantile(qt)
 		if !ok {
 			return 0, errors.New("ddsketch empty or invalid quantile")
 		}
@@ -664,7 +664,7 @@ func NewExpoHistogramDDS(ehK int, windowSize int64, alpha float64) *ExpoHistogra
 
 func (eh *ExpoHistogramDDS) UpdateValue(val float64, timestamp int64) error {
 	adapter := &DDAdapter{DDSketch: ddsketch.NewDDSketch(eh.alpha)}
-	adapter.Add(val)
+	adapter.DDSketch.Update(val)
 	return eh.Update(adapter, timestamp)
 }
 

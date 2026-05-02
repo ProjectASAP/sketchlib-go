@@ -1,8 +1,11 @@
 package ddsketch
 
 import (
+	"errors"
+	"fmt"
 	"math"
 
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
 	"github.com/ProjectASAP/sketchlib-go/wire/asapmsgpack"
 )
 
@@ -65,4 +68,43 @@ func (d *DDSketch) SerializeMsgpack() ([]byte, error) {
 		Min:         min,
 		Max:         max,
 	})
+}
+
+// DeserializeMsgpack rebuilds a DDSketch from the cross-language
+// MessagePack wire format produced by SerializeMsgpack (and by Rust's
+// `sketch_core::dd_sketch::DdSketch::serialize_msgpack`). Mirrors
+// Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
+func DeserializeMsgpack(buf []byte) (*DDSketch, error) {
+	state, err := asapmsgpack.UnmarshalDDSketch(buf)
+	if err != nil {
+		return nil, fmt.Errorf("ddsketch: msgpack decode: %w", err)
+	}
+	if !(state.Alpha > 0 && state.Alpha < 1) {
+		return nil, errors.New("ddsketch: alpha must be in (0, 1)")
+	}
+	mapping := NewIndexMapping(state.Alpha)
+	var buckets Buckets
+	if len(state.StoreCounts) > 0 {
+		cp := append([]uint64(nil), state.StoreCounts...)
+		buckets = Buckets{
+			counts: storage.Vector1DFromVec(cp),
+			offset: state.StoreOffset,
+		}
+	}
+	minVal := state.Min
+	maxVal := state.Max
+	if state.Count == 0 && !math.IsInf(minVal, 1) {
+		minVal = math.Inf(1)
+	}
+	if state.Count == 0 && !math.IsInf(maxVal, -1) {
+		maxVal = math.Inf(-1)
+	}
+	return &DDSketch{
+		mapping: mapping,
+		store:   buckets,
+		count:   state.Count,
+		sum:     state.Sum,
+		min:     minVal,
+		max:     maxVal,
+	}, nil
 }

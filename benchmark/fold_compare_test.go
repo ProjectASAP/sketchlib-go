@@ -141,10 +141,10 @@ func TestFoldedVsFullAccuracy(t *testing.T) {
 	}
 
 	for _, input := range inputs {
-		fullCMS.Insert(input)
-		foldCMS.Insert(input)
-		fullCS.Insert(input)
-		foldCS.Insert(input)
+		fullCMS.Update(input)
+		foldCMS.Update(input)
+		fullCS.Update(input)
+		foldCS.Update(input)
 	}
 
 	fullCMSMetrics := computeAccuracyMetrics(truth, fullCMS.Estimate)
@@ -202,28 +202,28 @@ func TestFoldedVsFullMemoryUsage(t *testing.T) {
 	cmsFullPop := measureHeapBytes(func() {
 		sketch, _ := countminsketch.NewCountMinSketch(foldCompareRows, foldCompareCols)
 		for _, input := range inputs {
-			sketch.Insert(input)
+			sketch.Update(input)
 		}
 		runtime.KeepAlive(sketch)
 	})
 	cmsFoldPop := measureHeapBytes(func() {
 		sketch, _ := foldcountminsketch.NewFoldCountMinSketch(foldCompareRows, foldCompareCols, foldCompareFoldLevel)
 		for _, input := range inputs {
-			sketch.Insert(input)
+			sketch.Update(input)
 		}
 		runtime.KeepAlive(sketch)
 	})
 	csFullPop := measureHeapBytes(func() {
 		sketch, _ := countsketch.NewCountSketch(foldCompareRows, foldCompareCols)
 		for _, input := range inputs {
-			sketch.Insert(input)
+			sketch.Update(input)
 		}
 		runtime.KeepAlive(sketch)
 	})
 	csFoldPop := measureHeapBytes(func() {
 		sketch, _ := foldcountsketch.NewFoldCountSketch(foldCompareRows, foldCompareCols, foldCompareFoldLevel)
 		for _, input := range inputs {
-			sketch.Insert(input)
+			sketch.Update(input)
 		}
 		runtime.KeepAlive(sketch)
 	})
@@ -242,7 +242,7 @@ func BenchmarkFoldedVsFullCountMinInsert(b *testing.B) {
 		b.SetBytes(8)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			sketch.Insert(inputs[i%len(inputs)])
+			sketch.Update(inputs[i%len(inputs)])
 		}
 	})
 	b.Run("folded", func(b *testing.B) {
@@ -251,7 +251,7 @@ func BenchmarkFoldedVsFullCountMinInsert(b *testing.B) {
 		b.SetBytes(8)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			sketch.Insert(inputs[i%len(inputs)])
+			sketch.Update(inputs[i%len(inputs)])
 		}
 		b.ReportMetric(float64(sketch.TotalEntries()), "entries")
 		b.ReportMetric(float64(sketch.CollidedCells()), "collided_cells")
@@ -264,8 +264,8 @@ func BenchmarkFoldedVsFullCountMinQuery(b *testing.B) {
 	full, _ := countminsketch.NewCountMinSketch(foldCompareRows, foldCompareCols)
 	folded, _ := foldcountminsketch.NewFoldCountMinSketch(foldCompareRows, foldCompareCols, foldCompareFoldLevel)
 	for _, input := range inputs {
-		full.Insert(input)
-		folded.Insert(input)
+		full.Update(input)
+		folded.Update(input)
 	}
 
 	b.Run("full", func(b *testing.B) {
@@ -292,7 +292,7 @@ func BenchmarkFoldedVsFullCountSketchInsert(b *testing.B) {
 		b.SetBytes(8)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			sketch.Insert(inputs[i%len(inputs)])
+			sketch.Update(inputs[i%len(inputs)])
 		}
 	})
 	b.Run("folded", func(b *testing.B) {
@@ -301,7 +301,7 @@ func BenchmarkFoldedVsFullCountSketchInsert(b *testing.B) {
 		b.SetBytes(8)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			sketch.Insert(inputs[i%len(inputs)])
+			sketch.Update(inputs[i%len(inputs)])
 		}
 		b.ReportMetric(float64(sketch.TotalEntries()), "entries")
 		b.ReportMetric(float64(sketch.CollidedCells()), "collided_cells")
@@ -314,8 +314,8 @@ func BenchmarkFoldedVsFullCountSketchQuery(b *testing.B) {
 	full, _ := countsketch.NewCountSketch(foldCompareRows, foldCompareCols)
 	folded, _ := foldcountsketch.NewFoldCountSketch(foldCompareRows, foldCompareCols, foldCompareFoldLevel)
 	for _, input := range inputs {
-		full.Insert(input)
-		folded.Insert(input)
+		full.Update(input)
+		folded.Update(input)
 	}
 
 	b.Run("full", func(b *testing.B) {
@@ -348,10 +348,10 @@ func TestFoldedVsFullSummary(t *testing.T) {
 	fullCS, _ := countsketch.NewCountSketch(foldCompareRows, foldCompareCols)
 	foldCS, _ := foldcountsketch.NewFoldCountSketch(foldCompareRows, foldCompareCols, foldCompareFoldLevel)
 	for _, input := range inputs {
-		fullCMS.Insert(input)
-		foldCMS.Insert(input)
-		fullCS.Insert(input)
-		foldCS.Insert(input)
+		fullCMS.Update(input)
+		foldCMS.Update(input)
+		fullCS.Update(input)
+		foldCS.Update(input)
 	}
 	t.Logf("summary cms: full_cells=%d folded_cells=%d folded_entries=%d folded_collisions=%d",
 		foldCompareRows*foldCompareCols, len(foldCMS.Cells), foldCMS.TotalEntries(), foldCMS.CollidedCells())
@@ -373,14 +373,14 @@ func BenchmarkFoldedVsFullSummary(b *testing.B) {
 			name: "cms_full",
 			make: func() (func(*common.SketchInput), string) {
 				sketch, _ := countminsketch.NewCountMinSketch(foldCompareRows, foldCompareCols)
-				return sketch.Insert, fmt.Sprintf("%d", foldCompareRows*foldCompareCols)
+				return sketch.Update, fmt.Sprintf("%d", foldCompareRows*foldCompareCols)
 			},
 		},
 		{
 			name: "cms_folded",
 			make: func() (func(*common.SketchInput), string) {
 				sketch, _ := foldcountminsketch.NewFoldCountMinSketch(foldCompareRows, foldCompareCols, foldCompareFoldLevel)
-				return sketch.Insert, fmt.Sprintf("%d", len(sketch.Cells))
+				return sketch.Update, fmt.Sprintf("%d", len(sketch.Cells))
 			},
 		},
 	} {

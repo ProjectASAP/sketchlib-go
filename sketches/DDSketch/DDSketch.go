@@ -147,9 +147,10 @@ func (d *DDSketch) TypeName() string {
 	return "DDSketch"
 }
 
-// Add inserts a float64 value directly.
+// Update inserts a float64 value directly. Mirrors Rust's `update`
+// (sketches/ddsketch.rs) in the unified API.
 // Strictly positive values only.
-func (d *DDSketch) Add(v float64) {
+func (d *DDSketch) Update(v float64) {
 	if !(v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)) {
 		return // ignore invalid or non-positive
 	}
@@ -172,7 +173,7 @@ func (d *DDSketch) Add(v float64) {
 // It interprets the hash as a numerical value (casting uint64 to float64).
 // This allows tracking distributions of integer-like values (e.g., latencies in ns).
 func (d *DDSketch) InsertWithHash(hash uint64) {
-	d.Add(float64(hash))
+	d.Update(float64(hash))
 }
 
 func (d *DDSketch) GetCount() uint64 {
@@ -273,8 +274,9 @@ func (d *DDSketch) mergeBuckets(a *Buckets, b *Buckets) {
 
 // ---------------- Quantile ----------------
 
-// GetValueAtQuantile returns the value at quantile q (0 <= q <= 1).
-func (d *DDSketch) GetValueAtQuantile(q float64) (float64, bool) {
+// Quantile returns the value at quantile q (0 <= q <= 1). Mirrors Rust's
+// `quantile` (sketches/ddsketch.rs) in the unified API.
+func (d *DDSketch) Quantile(q float64) (float64, bool) {
 	if d.count == 0 || q < 0 || q > 1 {
 		return 0, false
 	}
@@ -324,7 +326,7 @@ func (d *DDSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, erro
 	case common.QueryQuantile:
 		// Reinterpret bits as float64
 		qVal := math.Float64frombits(hash)
-		val, ok := d.GetValueAtQuantile(qVal)
+		val, ok := d.Quantile(qVal)
 		if !ok {
 			return 0, errors.New("invalid quantile or empty sketch")
 		}
@@ -591,6 +593,9 @@ func (d *DDSketch) MergeDelta(delta common.DeltaUpdate) {
 	d.AddToBucket(int32(delta.Col), uint64(delta.Value))
 }
 
+// OctoEstimate satisfies the octosketch.OctoSketch interface.
+func (d *DDSketch) OctoEstimate(input *common.SketchInput) float64 { return d.Estimate(input) }
+
 // Estimate returns the quantile estimate for the phi encoded in input.
 // Returns 0 when the sketch is empty or input is nil.
 func (d *DDSketch) Estimate(input *common.SketchInput) float64 {
@@ -601,7 +606,7 @@ func (d *DDSketch) Estimate(input *common.SketchInput) float64 {
 	if !ok {
 		return 0
 	}
-	val, ok := d.GetValueAtQuantile(phi)
+	val, ok := d.Quantile(phi)
 	if !ok {
 		return 0
 	}
@@ -615,8 +620,9 @@ func (d *DDSketch) Flush(emit func(common.DeltaUpdate)) {
 	})
 }
 
-// OctoInsert populates the underlying sketch from a SketchInput.
-func (d *DDSketch) OctoInsert(input *common.SketchInput) {
+// OctoUpdate populates the underlying sketch from a SketchInput. The
+// per-value canonical update is `Update(v float64)`.
+func (d *DDSketch) OctoUpdate(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
@@ -624,11 +630,8 @@ func (d *DDSketch) OctoInsert(input *common.SketchInput) {
 	if !ok {
 		return
 	}
-	d.Add(v)
+	d.Update(v)
 }
-
-// Insert is a backward-compatible alias for OctoInsert.
-func (d *DDSketch) Insert(input *common.SketchInput) { d.OctoInsert(input) }
 
 // LocalBuckets returns a snapshot of all non-zero bucket counts.
 // Used by tests to verify the per-bucket delay bound.

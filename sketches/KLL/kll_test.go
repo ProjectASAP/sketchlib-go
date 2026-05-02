@@ -70,7 +70,7 @@ func TestKLL_CAIDA_BasicFlow(t *testing.T) {
 
 	// Ingest
 	for _, v := range data {
-		s.Insert(v)
+		s.Update(v)
 	}
 	assertVectorWrapperSynced(t, s)
 
@@ -108,7 +108,7 @@ func TestKLL_CAIDA_Accuracy(t *testing.T) {
 
 	s := newTestKLL(t, k)
 	for _, v := range data {
-		s.Insert(v)
+		s.Update(v)
 	}
 	assertVectorWrapperSynced(t, s)
 
@@ -176,11 +176,11 @@ func TestKLL_CAIDA_Merge(t *testing.T) {
 	sTotal := newTestKLL(t, k)
 
 	for i, v := range data {
-		sTotal.Insert(v)
+		sTotal.Update(v)
 		if i < mid {
-			sPart1.Insert(v)
+			sPart1.Update(v)
 		} else {
-			sPart2.Insert(v)
+			sPart2.Update(v)
 		}
 	}
 
@@ -231,7 +231,7 @@ func TestKLL_CAIDA_QuantileMonotonicity(t *testing.T) {
 	s := newTestKLL(t, 200)
 
 	for _, v := range data {
-		s.Insert(v)
+		s.Update(v)
 	}
 	assertVectorWrapperSynced(t, s)
 
@@ -263,7 +263,7 @@ func TestKLL_CAIDA_MemoryBound(t *testing.T) {
 
 	start := time.Now()
 	for _, v := range data {
-		s.Insert(v)
+		s.Update(v)
 	}
 	assertVectorWrapperSynced(t, s)
 	duration := time.Since(start)
@@ -290,7 +290,7 @@ func TestKLL_CAIDA_MemoryBound(t *testing.T) {
 func TestKLL_Reset_ClearsState(t *testing.T) {
 	s := InitKLL(200)
 	for i := 0; i < 1000; i++ {
-		s.Insert(float64(i))
+		s.Update(float64(i))
 	}
 	if s.Count() == 0 {
 		t.Fatal("sketch should be non-empty before Reset")
@@ -315,14 +315,14 @@ func TestKLL_Reset_SubsequentInserts(t *testing.T) {
 
 	// Noise pass
 	for i := 0; i < 500; i++ {
-		s.Insert(float64(i))
+		s.Update(float64(i))
 	}
 	s.Reset()
 
 	// Signal pass — identical data to both
 	for i := 0; i < 1000; i++ {
-		s.Insert(float64(i))
-		ref.Insert(float64(i))
+		s.Update(float64(i))
+		ref.Update(float64(i))
 	}
 
 	assertVectorWrapperSynced(t, s)
@@ -365,7 +365,7 @@ func TestKLL_Quality_OperationsAndErrorBound(t *testing.T) {
 	vals := make([]float64, 20000)
 	for i := range vals {
 		vals[i] = rng.Float64() * 1_000_000
-		s.Insert(vals[i])
+		s.Update(vals[i])
 	}
 	drift := math.Abs(float64(s.Count()-len(vals))) / float64(len(vals))
 	if drift > 0.01 {
@@ -392,11 +392,11 @@ func TestKLL_Quality_MergeAccuracy(t *testing.T) {
 	vals := make([]float64, 15000)
 	for i := range vals {
 		vals[i] = rng.ExpFloat64() * 1000
-		total.Insert(vals[i])
+		total.Update(vals[i])
 		if i < len(vals)/2 {
-			left.Insert(vals[i])
+			left.Update(vals[i])
 		} else {
-			right.Insert(vals[i])
+			right.Update(vals[i])
 		}
 	}
 	if err := left.Merge(right); err != nil {
@@ -416,7 +416,7 @@ func TestKLL_Quality_MergeAccuracy(t *testing.T) {
 func TestKLL_Quality_SpecificClear(t *testing.T) {
 	s, _ := NewKLLSketch(200)
 	for i := 0; i < 100; i++ {
-		s.Insert(float64(i))
+		s.Update(float64(i))
 	}
 	s.Clear()
 	if s.Count() != 0 {

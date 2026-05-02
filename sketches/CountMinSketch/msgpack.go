@@ -1,6 +1,8 @@
 package countminsketch
 
 import (
+	"fmt"
+
 	"github.com/ProjectASAP/sketchlib-go/wire/asapmsgpack"
 )
 
@@ -25,4 +27,31 @@ func (s *CountMinSketch) SerializeMsgpack() ([]byte, error) {
 		uint64(s.Cols),
 		s.Count,
 	)
+}
+
+// DeserializeMsgpack rebuilds a CountMinSketch from the cross-language
+// MessagePack wire format produced by SerializeMsgpack (and by Rust's
+// `sketch_core::count_min::CountMinSketch::serialize_msgpack`). Mirrors
+// Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
+//
+// Only the count matrix round-trips through this format (Sum / Sum2 are
+// not part of the msgpack wire shape; use SerializeProtoBytes if those
+// must be preserved).
+func DeserializeMsgpack(buf []byte) (*CountMinSketch, error) {
+	matrix, rowNum, colNum, err := asapmsgpack.UnmarshalCountMinSketch(buf)
+	if err != nil {
+		return nil, fmt.Errorf("countminsketch: msgpack decode: %w", err)
+	}
+	s, err := NewCountMinSketch(int(rowNum), int(colNum))
+	if err != nil {
+		return nil, err
+	}
+	for r := 0; r < int(rowNum) && r < len(matrix); r++ {
+		row := s.Count[r]
+		src := matrix[r]
+		for c := 0; c < int(colNum) && c < len(src); c++ {
+			row[c] = src[c]
+		}
+	}
+	return s, nil
 }
