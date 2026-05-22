@@ -66,8 +66,14 @@ func (b *Buckets) Range() (int32, int32, bool) {
 
 func (b *Buckets) ensure(k int32) {
 	if b.IsEmpty() {
-		filled, _ := storage.FilledVector1D[uint64](GrowChunk, 0)
-		b.counts = filled
+		// Reuse a retained-but-emptied backing array (the pooled /
+		// Clear()'d path) instead of allocating a fresh one.
+		if b.counts != nil {
+			b.counts.GrowZeroed(GrowChunk)
+		} else {
+			filled, _ := storage.FilledVector1D[uint64](GrowChunk, 0)
+			b.counts = filled
+		}
 		b.offset = k - int32(GrowChunk/2)
 		return
 	}
@@ -87,7 +93,9 @@ func (b *Buckets) ensure(k int32) {
 	} else if k > right {
 		needed := int(k - right)
 		grow := maxInt(needed, GrowChunk)
-		b.counts.ExtendFromSlice(make([]uint64, grow))
+		// GrowZeroed reuses spare capacity and avoids the throwaway
+		// make([]uint64, grow) the previous ExtendFromSlice allocated.
+		b.counts.GrowZeroed(len(counts) + grow)
 	}
 }
 
@@ -140,6 +148,25 @@ func NewDDSketch(alpha float64) *DDSketch {
 // New mirrors the Rust constructor naming.
 func New(alpha float64) *DDSketch {
 	return NewDDSketch(alpha)
+}
+
+// Clear resets the sketch to empty IN PLACE, preserving the bucket
+// store's backing-array capacity so a sketch reused across windows
+// (e.g. via an object pool) avoids re-allocating + re-growing its
+// store. The store length is dropped to 0 — so a subsequent
+// SerializePortable emits only the buckets populated in the NEW window
+// rather than stale zeros left by a prior series (which would bloat the
+// wire payload) — while the capacity is retained for the addOne/ensure
+// fast path. The index mapping (alpha) is unchanged.
+func (d *DDSketch) Clear() {
+	if d.store.counts != nil {
+		d.store.counts.Clear() // len -> 0, capacity retained
+	}
+	d.store.offset = 0
+	d.count = 0
+	d.sum = 0
+	d.min = math.Inf(1)
+	d.max = math.Inf(-1)
 }
 
 // TypeName returns the name of the sketch.
