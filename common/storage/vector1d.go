@@ -49,6 +49,29 @@ func (v *Vector1D[T]) Fill(value T) {
 }
 
 func (v *Vector1D[T]) Len() int { return len(v.data) }
+func (v *Vector1D[T]) Cap() int { return cap(v.data) }
+
+// GrowZeroed extends the vector to length n, zeroing the newly
+// exposed elements and reusing the backing array's capacity when it
+// is large enough. Used by sketch stores that are reset+reused across
+// windows (object pools): after Clear() drops len to 0 while keeping
+// capacity, GrowZeroed re-exposes a zeroed run without allocating.
+// A no-op when n <= current length.
+func (v *Vector1D[T]) GrowZeroed(n int) {
+	if n <= len(v.data) {
+		return
+	}
+	if n <= cap(v.data) {
+		old := len(v.data)
+		v.data = v.data[:n]
+		var zero T
+		for i := old; i < n; i++ {
+			v.data[i] = zero
+		}
+		return
+	}
+	v.data = append(v.data, make([]T, n-len(v.data))...)
+}
 func (v *Vector1D[T]) IsEmpty() bool {
 	return len(v.data) == 0
 }

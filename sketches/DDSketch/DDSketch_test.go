@@ -363,3 +363,62 @@ func TestDDSketch_Quality_SpecificMappingMismatchMerge(t *testing.T) {
 		t.Fatal("expected merge error for different alpha/index mapping")
 	}
 }
+
+// TestClearReusesCapacityAndStaysCorrect verifies the in-place Clear()
+// added for cross-window object pooling: (1) the bucket backing array's
+// capacity survives Clear() so a same-range refill does not reallocate,
+// (2) quantiles after Clear()+refill match a fresh sketch, and (3)
+// SerializePortable after Clear()+refill does not carry stale zero
+// buckets from the pre-Clear contents (no wire bloat).
+func TestClearReusesCapacityAndStaysCorrect(t *testing.T) {
+	s := NewDDSketch(0.01)
+	// Populate a WIDE range so the store grows large.
+	for v := 1.0; v <= 5000.0; v += 1.0 {
+		s.Update(v)
+	}
+	capAfterWide := s.store.counts.Cap()
+	if capAfterWide == 0 {
+		t.Fatal("expected non-zero store capacity after wide fill")
+	}
+
+	s.Clear()
+	if s.count != 0 || s.store.counts.Len() != 0 {
+		t.Fatalf("after Clear: count=%d len=%d, want 0/0", s.count, s.store.counts.Len())
+	}
+	if got := s.store.counts.Cap(); got != capAfterWide {
+		t.Fatalf("Clear dropped capacity: got %d want %d (must retain for reuse)", got, capAfterWide)
+	}
+
+	// Refill with a NARROW range; the store should reuse the retained
+	// array (no realloc) and SerializePortable must emit only the
+	// narrow range, not the wide pre-Clear span.
+	for i := 0; i < 1000; i++ {
+		s.Update(10.0 + float64(i%5)) // values in [10,14]
+	}
+	if got := s.store.counts.Cap(); got != capAfterWide {
+		t.Fatalf("refill reallocated store: cap %d != retained %d", got, capAfterWide)
+	}
+
+	// Quantile correctness vs a fresh sketch fed the same narrow data.
+	fresh := NewDDSketch(0.01)
+	for i := 0; i < 1000; i++ {
+		fresh.Update(10.0 + float64(i%5))
+	}
+	for _, q := range []float64{0.5, 0.9, 0.99} {
+		gotV, _ := s.Quantile(q)
+		wantV, _ := fresh.Quantile(q)
+		if math.Abs(gotV-wantV) > 1e-9 {
+			t.Fatalf("q=%.2f after Clear+refill: got %v want %v", q, gotV, wantV)
+		}
+	}
+
+	// No stale-zero wire bloat: the reused sketch's serialized bucket
+	// count must match the fresh sketch's (same populated range).
+	envReused, _ := s.SerializePortable()
+	envFresh, _ := fresh.SerializePortable()
+	nReused := len(envReused.GetDdsketch().GetStoreCounts())
+	nFresh := len(envFresh.GetDdsketch().GetStoreCounts())
+	if nReused != nFresh {
+		t.Fatalf("stale-zero bloat: reused emits %d store counts, fresh emits %d", nReused, nFresh)
+	}
+}
