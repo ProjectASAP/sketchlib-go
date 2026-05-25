@@ -88,7 +88,25 @@ type SketchEnvelope struct {
 	//	*SketchEnvelope_Hydra
 	//	*SketchEnvelope_Coco
 	//	*SketchEnvelope_Elastic
-	SketchState   isSketchEnvelope_SketchState `protobuf_oneof:"sketch_state"`
+	SketchState isSketchEnvelope_SketchState `protobuf_oneof:"sketch_state"`
+	// Geometric / NitroSketch sampling probability for the producing sketch.
+	//
+	// The producer admits each stream update with probability `sample_p` (using
+	// geometric skip-sampling, statistically identical to per-update Bernoulli(p))
+	// and stores the RAW SAMPLED sketch state — never the rescaled state. The
+	// consumer applies the `× 1/sample_p` rescale at QUERY time on the count-like
+	// estimators (HLL cardinality, CountMin / CountSketch frequency, SUM / COUNT);
+	// quantile estimators (KLL, DDSketch) are scale-invariant under uniform
+	// sampling so they carry `sample_p` but need no rescale.
+	//
+	// Lives on the envelope (not per-sketch state) so downstream consumers that
+	// construct per-sketch state structs by literal are unaffected.
+	//
+	// Dual-read default: a value of 0.0 (the proto3 default for an unset field)
+	// is interpreted as 1.0 (exact, no sampling) for backward compatibility with
+	// producers that predate this field. With sample_p = 1.0 a 0.0/unset envelope
+	// is byte-identical to the pre-sampling format.
+	SampleP       float64 `protobuf:"fixed64,4,opt,name=sample_p,json=sampleP,proto3" json:"sample_p,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -230,6 +248,13 @@ func (x *SketchEnvelope) GetElastic() *elasticsketch.ElasticState {
 		}
 	}
 	return nil
+}
+
+func (x *SketchEnvelope) GetSampleP() float64 {
+	if x != nil {
+		return x.SampleP
+	}
+	return 0
 }
 
 type isSketchEnvelope_SketchState interface {
@@ -437,7 +462,7 @@ var File_sketchlib_proto protoreflect.FileDescriptor
 
 const file_sketchlib_proto_rawDesc = "" +
 	"\n" +
-	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a#countminsketch/countminsketch.proto\x1a\x1dcountsketch/countsketch.proto\x1a\rhll/hll.proto\x1a\rkll/kll.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\xad\x05\n" +
+	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a#countminsketch/countminsketch.proto\x1a\x1dcountsketch/countsketch.proto\x1a\rhll/hll.proto\x1a\rkll/kll.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\xc8\x05\n" +
 	"\x0eSketchEnvelope\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x126\n" +
 	"\bproducer\x18\x02 \x01(\v2\x1a.sketchlib.v1.ProducerInfoR\bproducer\x123\n" +
@@ -451,7 +476,8 @@ const file_sketchlib_proto_rawDesc = "" +
 	"\aunivmon\x18\x0f \x01(\v2\x1a.sketchlib.v1.UnivMonStateH\x00R\aunivmon\x120\n" +
 	"\x05hydra\x18\x10 \x01(\v2\x18.sketchlib.v1.HydraStateH\x00R\x05hydra\x123\n" +
 	"\x04coco\x18\x11 \x01(\v2\x1d.sketchlib.v1.CocoSketchStateH\x00R\x04coco\x126\n" +
-	"\aelastic\x18\x12 \x01(\v2\x1a.sketchlib.v1.ElasticStateH\x00R\aelasticB\x0e\n" +
+	"\aelastic\x18\x12 \x01(\v2\x1a.sketchlib.v1.ElasticStateH\x00R\aelastic\x12\x19\n" +
+	"\bsample_p\x18\x04 \x01(\x01R\asamplePB\x0e\n" +
 	"\fsketch_stateJ\x04\b\x13\x10 \"\xfb\x02\n" +
 	"\x13SketchDeltaEnvelope\x12#\n" +
 	"\rpartition_key\x18\x01 \x01(\tR\fpartitionKey\x12&\n" +

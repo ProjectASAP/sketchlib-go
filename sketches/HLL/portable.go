@@ -34,7 +34,7 @@ func (h *HyperLogLog) SerializePortable() (*envpb.SketchEnvelope, error) {
 		Precision: HLLPrecision,
 	}
 	setStateRegisters(state, h.Registers.AsSlice())
-	return hllEnvelope(state), nil
+	return hllEnvelope(state, h.wireSampleP()), nil
 }
 
 // SerializePortable serializes a HyperLogLogVariant (Regular or DataFusion) as a SketchEnvelope.
@@ -48,7 +48,7 @@ func (h *HyperLogLogVariant) SerializePortable() (*envpb.SketchEnvelope, error) 
 		Precision: HLLPrecision,
 	}
 	setStateRegisters(state, h.Registers.AsSlice())
-	return hllEnvelope(state), nil
+	return hllEnvelope(state, 0.0), nil
 }
 
 // SerializePortable serializes a HyperLogLogHIP as a SketchEnvelope.
@@ -61,10 +61,13 @@ func (h *HyperLogLogHIP) SerializePortable() (*envpb.SketchEnvelope, error) {
 		HipEst:    h.est,
 	}
 	setStateRegisters(state, h.Registers.AsSlice())
-	return hllEnvelope(state), nil
+	return hllEnvelope(state, 0.0), nil
 }
 
-func hllEnvelope(state *hllpb.HyperLogLogState) *envpb.SketchEnvelope {
+// hllEnvelope wraps an HLL state in a SketchEnvelope. sampleP is stamped on the
+// envelope's sample_p field (0.0 = unset = exact, byte-identical to the
+// pre-sampling format).
+func hllEnvelope(state *hllpb.HyperLogLogState, sampleP float64) *envpb.SketchEnvelope {
 	return &envpb.SketchEnvelope{
 		FormatVersion: 1,
 		Producer: &commonpb.ProducerInfo{
@@ -72,6 +75,7 @@ func hllEnvelope(state *hllpb.HyperLogLogState) *envpb.SketchEnvelope {
 			Version: "0.1.0",
 		},
 		HashSpec: portableHashSpec(),
+		SampleP:  sampleP,
 		SketchState: &envpb.SketchEnvelope_Hll{
 			Hll: state,
 		},

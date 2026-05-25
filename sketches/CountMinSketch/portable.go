@@ -41,6 +41,7 @@ func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 		FormatVersion: 1,
 		Producer:      producerInfo(),
 		HashSpec:      portableHashSpec(),
+		SampleP:       s.wireSampleP(),
 		SketchState:   &envpb.SketchEnvelope_CountMin{CountMin: state},
 	}, nil
 }
@@ -76,6 +77,7 @@ func (s *CountMinSketch) SerializePortableFO() (*envpb.SketchEnvelope, error) {
 		FormatVersion: 1,
 		Producer:      producerInfo(),
 		HashSpec:      portableHashSpec(),
+		SampleP:       s.wireSampleP(),
 		SketchState:   &envpb.SketchEnvelope_CountMin{CountMin: state},
 	}, nil
 }
