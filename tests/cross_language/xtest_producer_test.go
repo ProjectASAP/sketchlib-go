@@ -29,6 +29,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
+	hydrasketch "github.com/ProjectASAP/sketchlib-go/sketch_framework/HydraSketch"
+	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
 	cocosketch "github.com/ProjectASAP/sketchlib-go/sketches/CocoSketch"
 	countminsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
 	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
@@ -36,8 +38,6 @@ import (
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/sketches/ElasticSKetch"
 	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
 	kll "github.com/ProjectASAP/sketchlib-go/sketches/KLL"
-	hydrasketch "github.com/ProjectASAP/sketchlib-go/sketch_framework/HydraSketch"
-	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
 )
 
 func TestXtestProducer(t *testing.T) {
@@ -219,11 +219,50 @@ func TestXtestProducer(t *testing.T) {
 	writeEnvelope(t, outDir, "hydra.pb", tmust(hydra.SerializePortable()))
 
 	// -----------------------------------------------------------------------
+	// Sampled CountMin (NitroSketch geometric skip-sampling, p=0.1)
+	// -----------------------------------------------------------------------
+	t.Log()
+	t.Log("[CountMin/sampled] Step 1/3 — Create sketch (5×8192), p=0.1 geometric")
+	cmS, err := countminsketch.NewCountMinSketch(5, 8192)
+	tcheck(t, "new countmin sampled", err)
+	cmS.WithSampleP(0.1, 20260525)
+
+	t.Log("[CountMin/sampled] Step 2/3 — Insert 'item:hot' 100 000× + 200 000 cold")
+	hotSampledHash := common.Hash64([]byte("item:hot"))
+	for i := 0; i < 100_000; i++ {
+		cmS.InsertWithHash(hotSampledHash)
+	}
+	for i := 0; i < 200_000; i++ {
+		cmS.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("cold:%d", i))))
+	}
+	rawHot := cmS.FastEstimateWithHash(hotSampledHash)
+	t.Logf("[CountMin/sampled] Step 3/3 — raw 'item:hot' = %.0f (≈ p·100000), p=%.2f", rawHot, cmS.SampleP())
+	writeEnvelope(t, outDir, "countmin_sampled.pb", tmust(cmS.SerializePortable()))
+
+	// -----------------------------------------------------------------------
+	// Sampled HLL (hash-threshold element sampling, p=0.1)
+	// -----------------------------------------------------------------------
+	t.Log()
+	t.Log("[HLL/sampled] Step 1/3 — Create HLL, p=0.1 hash-threshold")
+	hS := hll.NewHyperLogLog()
+	hS.WithSampleP(0.1)
+
+	t.Log("[HLL/sampled] Step 2/3 — Insert 200 000 distinct keys (each 3×)")
+	for i := 0; i < 200_000; i++ {
+		hash := common.Hash64([]byte(fmt.Sprintf("hlls:%d", i)))
+		hS.InsertWithHash(hash)
+		hS.InsertWithHash(hash)
+		hS.InsertWithHash(hash)
+	}
+	t.Logf("[HLL/sampled] Step 3/3 — raw card≈%d (≈ p·200000), p=%.2f", hS.Estimate(), hS.SampleP())
+	writeEnvelope(t, outDir, "hll_sampled.pb", tmust(hS.SerializePortable()))
+
+	// -----------------------------------------------------------------------
 	// Summary
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 9 sketches written to " + outDir)
+	t.Log("  Producer complete — 9 sketches + 2 sampled written to " + outDir)
 	t.Log("=======================================================")
 }
 

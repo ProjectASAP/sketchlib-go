@@ -137,7 +137,7 @@ func denseProtoSize(t *testing.T, h *HyperLogLog) int {
 		Precision: HLLPrecision,
 		Registers: append([]byte(nil), h.RegisterSlice()...),
 	}
-	env := hllEnvelope(state)
+	env := hllEnvelope(state, 0.0)
 	b, err := proto.Marshal(env)
 	if err != nil {
 		t.Fatalf("dense marshal: %v", err)

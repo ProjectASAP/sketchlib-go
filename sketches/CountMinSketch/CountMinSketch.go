@@ -28,6 +28,14 @@ type CountMinSketch struct {
 
 	bitsPerRow uint
 	mask       uint64
+
+	// sampler implements optional NitroSketch geometric skip-sampling. When nil
+	// (the default) every update is admitted and the sketch is byte-identical to
+	// an unsampled one. When set with p<1, updates are admitted with probability
+	// p and the RAW sampled counts are stored; the consumer rescales ×1/p at
+	// query. The probability rides on the SketchEnvelope (see SerializePortable),
+	// never inside CountMinState, so downstream literal constructors are unaffected.
+	sampler *common.GeometricSampler
 }
 
 func hashLayoutForCols(cols int) (uint, uint64) {
@@ -138,6 +146,56 @@ func WithDimensions(rows, cols int) (*CountMinSketch, error) {
 	return NewCountMinSketch(rows, cols)
 }
 
+// WithSampleP enables NitroSketch geometric skip-sampling at probability p in
+// (0,1]. With p>=1 sampling is disabled (exact, the default) and the sketch is
+// byte-identical to an unsampled one. The seed makes the admitted subset
+// reproducible. Counter writes are cut to ~p× per item; the RAW sampled counts
+// are stored and the probability is stamped on the SketchEnvelope so the
+// consumer rescales frequency estimates ×1/p at query time.
+//
+// Returns the receiver for fluent construction:
+//
+//	cm, _ := NewCountMinSketch(3, 512)
+//	cm.WithSampleP(0.1, seed)
+func (s *CountMinSketch) WithSampleP(p float64, seed int64) *CountMinSketch {
+	if p >= 1.0 {
+		s.sampler = nil
+		return s
+	}
+	s.sampler = common.NewGeometricSampler(p, seed)
+	return s
+}
+
+// SampleP returns the configured sampling probability (1.0 when sampling is
+// disabled).
+func (s *CountMinSketch) SampleP() float64 {
+	if s.sampler == nil {
+		return 1.0
+	}
+	return s.sampler.P()
+}
+
+// wireSampleP returns the value to stamp on the SketchEnvelope.sample_p field.
+// When sampling is disabled it returns 0.0 (the proto3 default) so the encoded
+// envelope is BYTE-IDENTICAL to the pre-sampling format — proto3 omits
+// default-valued scalars, and the consumer's dual-read treats an unset/0.0
+// sample_p as 1.0. A sampled sketch (p<1) emits its actual probability.
+func (s *CountMinSketch) wireSampleP() float64 {
+	if s.sampler == nil {
+		return 0.0
+	}
+	return s.sampler.P()
+}
+
+// admit reports whether the next update should be applied. Always true when no
+// sampler is configured (exact, no RNG cost).
+func (s *CountMinSketch) admit() bool {
+	if s.sampler == nil {
+		return true
+	}
+	return s.sampler.Admit()
+}
+
 func (s *CountMinSketch) RowCount() int { return s.Rows }
 func (s *CountMinSketch) ColCount() int { return s.Cols }
 
@@ -162,6 +220,9 @@ func (s *CountMinSketch) deriveIndex(hash uint64, row int) int {
 // ================= INSERT =================
 
 func (s *CountMinSketch) InsertWithHash(hash uint64) {
+	if !s.admit() {
+		return
+	}
 	shift := uint(0)
 	for r := 0; r < s.Rows; r++ {
 		c := int((hash >> shift) & s.mask)
@@ -191,6 +252,9 @@ func (s *CountMinSketch) Update(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
+	if !s.admit() {
+		return
+	}
 	s.insertMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
 }
 
@@ -200,6 +264,9 @@ func (s *CountMinSketch) OctoUpdate(input *common.SketchInput) { s.Update(input)
 
 func (s *CountMinSketch) UpdateWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
+		return
+	}
+	if !s.admit() {
 		return
 	}
 	s.insertMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), many)
@@ -231,6 +298,9 @@ func (s *CountMinSketch) FastInsertWithHashValue(hash uint64) {
 
 func (s *CountMinSketch) FastInsertWeightWithHashValue(hash uint64, many float64) {
 	if many == 0 {
+		return
+	}
+	if !s.admit() {
 		return
 	}
 	shift := uint(0)
