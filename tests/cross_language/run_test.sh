@@ -31,7 +31,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # sketchlib-rust sits next to sketchlib-go
 REPO_ROOT="$(cd "$GO_DIR/.." && pwd)"
-RUST_DIR="$REPO_ROOT/sketchlib-rust"
+if [[ -d "$REPO_ROOT/asap_sketchlib" ]]; then
+    RUST_DIR="$REPO_ROOT/asap_sketchlib"
+else
+    RUST_DIR="$REPO_ROOT/sketchlib-rust"
+fi
 
 # ---------------------------------------------------------------------------
 # Temporary directory for .pb files
