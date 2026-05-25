@@ -96,18 +96,31 @@ type HyperLogLogState struct {
 	// Log₂ of the number of registers (precision parameter p).
 	// Default = 14 → 16 384 registers.
 	Precision uint32 `protobuf:"varint,2,opt,name=precision,proto3" json:"precision,omitempty"`
-	// Raw register values, length = 2^precision.
+	// DENSE register encoding: raw register values, length = 2^precision.
 	// Each byte stores the maximum (leading-zeros + 1) seen for that bucket.
 	// Stored as a raw byte string for compact encoding (1 byte per register).
+	//
+	// Exactly one of `registers` (dense) or `registers_sparse` (sparse) is
+	// populated by a producer. A decoder MUST read whichever is present; if
+	// both are empty the sketch is all-zero. This field stays at tag 3 so old
+	// dense-only readers keep working unchanged.
 	Registers []byte `protobuf:"bytes,3,opt,name=registers,proto3" json:"registers,omitempty"`
 	// HIP accumulator component kxq0.
 	HipKxq0 float64 `protobuf:"fixed64,4,opt,name=hip_kxq0,json=hipKxq0,proto3" json:"hip_kxq0,omitempty"`
 	// HIP accumulator component kxq1.
 	HipKxq1 float64 `protobuf:"fixed64,5,opt,name=hip_kxq1,json=hipKxq1,proto3" json:"hip_kxq1,omitempty"`
 	// HIP running cardinality estimate.
-	HipEst        float64 `protobuf:"fixed64,6,opt,name=hip_est,json=hipEst,proto3" json:"hip_est,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	HipEst float64 `protobuf:"fixed64,6,opt,name=hip_est,json=hipEst,proto3" json:"hip_est,omitempty"`
+	// SPARSE register encoding (additive, tag 7). Populated instead of
+	// `registers` (tag 3) when the number of non-zero registers is below the
+	// producer's dense/sparse crossover. Old readers that predate this field
+	// ignore tag 7 (proto skips unknown fields), so adding it is wire-backward-
+	// compatible. New readers decode BOTH representations — see
+	// HLLSparseRegisters. Reconstruction yields the identical 2^precision-byte
+	// dense register array, so cardinality estimation is unaffected.
+	RegistersSparse *HLLSparseRegisters `protobuf:"bytes,7,opt,name=registers_sparse,json=registersSparse,proto3" json:"registers_sparse,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *HyperLogLogState) Reset() {
@@ -182,6 +195,81 @@ func (x *HyperLogLogState) GetHipEst() float64 {
 	return 0
 }
 
+func (x *HyperLogLogState) GetRegistersSparse() *HLLSparseRegisters {
+	if x != nil {
+		return x.RegistersSparse
+	}
+	return nil
+}
+
+// HLLSparseRegisters is the sparse (HLL++ style) full-state encoding of the
+// register array. Only non-zero registers are stored, sorted by ascending
+// index and varint-packed as (index_delta, value) pairs:
+//
+//	for each non-zero register, in ascending index order:
+//	  uvarint(index - prev_index)   // prev_index starts at 0; deltas are >= 0
+//	  uvarint(value)                // 1..=Q+1, always 1 byte in practice
+//
+// For low/medium cardinality (most registers zero) this is far smaller than
+// the dense 2^precision-byte array. Decoding allocates a zero-filled dense
+// array of length `num_registers` and writes each decoded (index, value).
+type HLLSparseRegisters struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Total number of registers in the reconstructed dense array (= 2^precision).
+	// Carried explicitly so the decoder can size the dense buffer without
+	// re-deriving it from precision.
+	NumRegisters uint32 `protobuf:"varint,1,opt,name=num_registers,json=numRegisters,proto3" json:"num_registers,omitempty"`
+	// Varint-packed (index_delta, value) pairs for non-zero registers, in
+	// ascending index order. See message-level comment for the exact layout.
+	Packed        []byte `protobuf:"bytes,2,opt,name=packed,proto3" json:"packed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HLLSparseRegisters) Reset() {
+	*x = HLLSparseRegisters{}
+	mi := &file_hll_hll_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HLLSparseRegisters) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HLLSparseRegisters) ProtoMessage() {}
+
+func (x *HLLSparseRegisters) ProtoReflect() protoreflect.Message {
+	mi := &file_hll_hll_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HLLSparseRegisters.ProtoReflect.Descriptor instead.
+func (*HLLSparseRegisters) Descriptor() ([]byte, []int) {
+	return file_hll_hll_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *HLLSparseRegisters) GetNumRegisters() uint32 {
+	if x != nil {
+		return x.NumRegisters
+	}
+	return 0
+}
+
+func (x *HLLSparseRegisters) GetPacked() []byte {
+	if x != nil {
+		return x.Packed
+	}
+	return nil
+}
+
 // HLLDelta carries every register that increased since the last snapshot.
 // No threshold is applied — any missed register update causes permanent
 // underestimation (max semantics, not addition).
@@ -194,7 +282,7 @@ type HLLDelta struct {
 
 func (x *HLLDelta) Reset() {
 	*x = HLLDelta{}
-	mi := &file_hll_hll_proto_msgTypes[1]
+	mi := &file_hll_hll_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -206,7 +294,7 @@ func (x *HLLDelta) String() string {
 func (*HLLDelta) ProtoMessage() {}
 
 func (x *HLLDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_hll_hll_proto_msgTypes[1]
+	mi := &file_hll_hll_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -219,7 +307,7 @@ func (x *HLLDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HLLDelta.ProtoReflect.Descriptor instead.
 func (*HLLDelta) Descriptor() ([]byte, []int) {
-	return file_hll_hll_proto_rawDescGZIP(), []int{1}
+	return file_hll_hll_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *HLLDelta) GetUpdates() []*HLLRegisterUpdate {
@@ -240,7 +328,7 @@ type HLLRegisterUpdate struct {
 
 func (x *HLLRegisterUpdate) Reset() {
 	*x = HLLRegisterUpdate{}
-	mi := &file_hll_hll_proto_msgTypes[2]
+	mi := &file_hll_hll_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -252,7 +340,7 @@ func (x *HLLRegisterUpdate) String() string {
 func (*HLLRegisterUpdate) ProtoMessage() {}
 
 func (x *HLLRegisterUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_hll_hll_proto_msgTypes[2]
+	mi := &file_hll_hll_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -265,7 +353,7 @@ func (x *HLLRegisterUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HLLRegisterUpdate.ProtoReflect.Descriptor instead.
 func (*HLLRegisterUpdate) Descriptor() ([]byte, []int) {
-	return file_hll_hll_proto_rawDescGZIP(), []int{2}
+	return file_hll_hll_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *HLLRegisterUpdate) GetIndex() uint32 {
@@ -286,14 +374,18 @@ var File_hll_hll_proto protoreflect.FileDescriptor
 
 const file_hll_hll_proto_rawDesc = "" +
 	"\n" +
-	"\rhll/hll.proto\x12\fsketchlib.v1\"\xd7\x01\n" +
+	"\rhll/hll.proto\x12\fsketchlib.v1\"\xa4\x02\n" +
 	"\x10HyperLogLogState\x122\n" +
 	"\avariant\x18\x01 \x01(\x0e2\x18.sketchlib.v1.HLLVariantR\avariant\x12\x1c\n" +
 	"\tprecision\x18\x02 \x01(\rR\tprecision\x12\x1c\n" +
 	"\tregisters\x18\x03 \x01(\fR\tregisters\x12\x19\n" +
 	"\bhip_kxq0\x18\x04 \x01(\x01R\ahipKxq0\x12\x19\n" +
 	"\bhip_kxq1\x18\x05 \x01(\x01R\ahipKxq1\x12\x17\n" +
-	"\ahip_est\x18\x06 \x01(\x01R\x06hipEstJ\x04\b\a\x10\x10\"E\n" +
+	"\ahip_est\x18\x06 \x01(\x01R\x06hipEst\x12K\n" +
+	"\x10registers_sparse\x18\a \x01(\v2 .sketchlib.v1.HLLSparseRegistersR\x0fregistersSparseJ\x04\b\b\x10\x10\"Q\n" +
+	"\x12HLLSparseRegisters\x12#\n" +
+	"\rnum_registers\x18\x01 \x01(\rR\fnumRegisters\x12\x16\n" +
+	"\x06packed\x18\x02 \x01(\fR\x06packed\"E\n" +
 	"\bHLLDelta\x129\n" +
 	"\aupdates\x18\x01 \x03(\v2\x1f.sketchlib.v1.HLLRegisterUpdateR\aupdates\"?\n" +
 	"\x11HLLRegisterUpdate\x12\x14\n" +
@@ -319,21 +411,23 @@ func file_hll_hll_proto_rawDescGZIP() []byte {
 }
 
 var file_hll_hll_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_hll_hll_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_hll_hll_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_hll_hll_proto_goTypes = []any{
-	(HLLVariant)(0),           // 0: sketchlib.v1.HLLVariant
-	(*HyperLogLogState)(nil),  // 1: sketchlib.v1.HyperLogLogState
-	(*HLLDelta)(nil),          // 2: sketchlib.v1.HLLDelta
-	(*HLLRegisterUpdate)(nil), // 3: sketchlib.v1.HLLRegisterUpdate
+	(HLLVariant)(0),            // 0: sketchlib.v1.HLLVariant
+	(*HyperLogLogState)(nil),   // 1: sketchlib.v1.HyperLogLogState
+	(*HLLSparseRegisters)(nil), // 2: sketchlib.v1.HLLSparseRegisters
+	(*HLLDelta)(nil),           // 3: sketchlib.v1.HLLDelta
+	(*HLLRegisterUpdate)(nil),  // 4: sketchlib.v1.HLLRegisterUpdate
 }
 var file_hll_hll_proto_depIdxs = []int32{
 	0, // 0: sketchlib.v1.HyperLogLogState.variant:type_name -> sketchlib.v1.HLLVariant
-	3, // 1: sketchlib.v1.HLLDelta.updates:type_name -> sketchlib.v1.HLLRegisterUpdate
-	2, // [2:2] is the sub-list for method output_type
-	2, // [2:2] is the sub-list for method input_type
-	2, // [2:2] is the sub-list for extension type_name
-	2, // [2:2] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	2, // 1: sketchlib.v1.HyperLogLogState.registers_sparse:type_name -> sketchlib.v1.HLLSparseRegisters
+	4, // 2: sketchlib.v1.HLLDelta.updates:type_name -> sketchlib.v1.HLLRegisterUpdate
+	3, // [3:3] is the sub-list for method output_type
+	3, // [3:3] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_hll_hll_proto_init() }
@@ -347,7 +441,7 @@ func file_hll_hll_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_hll_hll_proto_rawDesc), len(file_hll_hll_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   3,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

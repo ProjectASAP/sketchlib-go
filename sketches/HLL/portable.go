@@ -10,14 +10,30 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// setStateRegisters fills st with either the SPARSE (registers_sparse, tag 7)
+// or the DENSE (registers, tag 3) encoding of regs, chosen by the
+// SparseCrossoverNonZero threshold. Both representations reconstruct the same
+// dense register array; emitting sparse only below the crossover keeps the
+// payload small for low/medium cardinality without ever inflating it above it.
+//
+// Rollout note: this is safe to enable only once every consumer's decoder can
+// read tag 7 (backend-decode-first) — see PR body. The proto field is additive
+// so the wire format itself stays backward-compatible regardless.
+func setStateRegisters(st *hllpb.HyperLogLogState, regs []uint8) {
+	if countNonZero(regs) < SparseCrossoverNonZero {
+		st.RegistersSparse = encodeSparseRegisters(regs)
+		return
+	}
+	st.Registers = append([]byte(nil), regs...)
+}
+
 // SerializePortable serializes the DataFusion-style HyperLogLog as a SketchEnvelope.
 func (h *HyperLogLog) SerializePortable() (*envpb.SketchEnvelope, error) {
-	regs := append([]byte(nil), h.Registers.AsSlice()...)
 	state := &hllpb.HyperLogLogState{
 		Variant:   hllpb.HLLVariant_HLL_VARIANT_DATAFUSION,
 		Precision: HLLPrecision,
-		Registers: regs,
 	}
+	setStateRegisters(state, h.Registers.AsSlice())
 	return hllEnvelope(state), nil
 }
 
@@ -27,26 +43,24 @@ func (h *HyperLogLogVariant) SerializePortable() (*envpb.SketchEnvelope, error) 
 	if h.Variant == HLLDataFusion {
 		variant = hllpb.HLLVariant_HLL_VARIANT_DATAFUSION
 	}
-	regs := append([]byte(nil), h.Registers.AsSlice()...)
 	state := &hllpb.HyperLogLogState{
 		Variant:   variant,
 		Precision: HLLPrecision,
-		Registers: regs,
 	}
+	setStateRegisters(state, h.Registers.AsSlice())
 	return hllEnvelope(state), nil
 }
 
 // SerializePortable serializes a HyperLogLogHIP as a SketchEnvelope.
 func (h *HyperLogLogHIP) SerializePortable() (*envpb.SketchEnvelope, error) {
-	regs := append([]byte(nil), h.Registers.AsSlice()...)
 	state := &hllpb.HyperLogLogState{
 		Variant:   hllpb.HLLVariant_HLL_VARIANT_HIP,
 		Precision: HLLPrecision,
-		Registers: regs,
 		HipKxq0:   h.kxq0,
 		HipKxq1:   h.kxq1,
 		HipEst:    h.est,
 	}
+	setStateRegisters(state, h.Registers.AsSlice())
 	return hllEnvelope(state), nil
 }
 
@@ -84,7 +98,10 @@ func DeserializeHyperLogLogFromProtoBytes(data []byte) (*HyperLogLog, error) {
 		return nil, fmt.Errorf("hll: proto envelope does not contain HyperLogLogState")
 	}
 
-	regs := append([]byte(nil), st.GetRegisters()...)
+	regs, err := registersFromState(st)
+	if err != nil {
+		return nil, err
+	}
 	if len(regs) != HLLRegisterCount {
 		return nil, fmt.Errorf("hll: invalid register length %d, expected %d", len(regs), HLLRegisterCount)
 	}
@@ -92,6 +109,17 @@ func DeserializeHyperLogLogFromProtoBytes(data []byte) (*HyperLogLog, error) {
 	return &HyperLogLog{
 		Registers: storage.Vector1DFromSlice(regs),
 	}, nil
+}
+
+// registersFromState dual-reads the register array from a HyperLogLogState,
+// accepting BOTH wire encodings. The SPARSE field (registers_sparse, tag 7)
+// takes priority when present; otherwise the DENSE field (registers, tag 3) is
+// used. Both reconstruct the identical dense register array.
+func registersFromState(st *hllpb.HyperLogLogState) ([]uint8, error) {
+	if sp := st.GetRegistersSparse(); sp != nil {
+		return decodeSparseRegisters(sp)
+	}
+	return append([]byte(nil), st.GetRegisters()...), nil
 }
 
 func portableHashSpec() *commonpb.HashSpec {
