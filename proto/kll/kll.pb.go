@@ -46,11 +46,30 @@ type KLLState struct {
 	// levels[0] is always 0; levels[num_levels] = len(items).
 	Levels []uint32 `protobuf:"varint,4,rep,packed,name=levels,proto3" json:"levels,omitempty"`
 	// All retained samples in level order, length = levels[num_levels].
+	//
+	// RAW-F64 representation. Populated when the value-offset fixed-point
+	// representation (offset/value_scale/residuals, fields 7–9) is NOT used —
+	// i.e. when the producer could not represent the retained set exactly at
+	// any candidate decimal scale and fell back to raw f64. When residuals
+	// (field 9) is non-empty, items MUST be empty and decoders MUST reconstruct
+	// from the fixed-point fields instead.
 	Items []float64 `protobuf:"fixed64,5,rep,packed,name=items,proto3" json:"items,omitempty"`
 	// Random bit generator state for deterministic compaction continuation.
 	// Required for sketches that will receive further updates after loading.
 	// Consumers that only query may ignore this field.
-	Coin          *CoinState `protobuf:"bytes,6,opt,name=coin,proto3" json:"coin,omitempty"`
+	Coin *CoinState `protobuf:"bytes,6,opt,name=coin,proto3" json:"coin,omitempty"`
+	// Per-sketch subtraction constant. value = residual * 10^value_scale + offset.
+	Offset float64 `protobuf:"fixed64,7,opt,name=offset,proto3" json:"offset,omitempty"`
+	// Decimal scale exponent. A value v maps to residual = round((v - offset) *
+	// 10^(-value_scale)); reconstruction multiplies by 10^value_scale. scale 0
+	// means residuals are integers; negative scales carry fractional precision
+	// (e.g. value_scale = -3 -> millis). sint32 so negative scales varint-pack.
+	ValueScale int32 `protobuf:"zigzag32,8,opt,name=value_scale,json=valueScale,proto3" json:"value_scale,omitempty"`
+	// Per-sample residual integers, same level order and length as a raw items[]
+	// would have. Zigzag varint (sint64) keeps small magnitudes compact. When
+	// present and non-empty, this is the authoritative item source and items[]
+	// (field 5) MUST be empty.
+	Residuals     []int64 `protobuf:"zigzag64,9,rep,packed,name=residuals,proto3" json:"residuals,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -127,6 +146,27 @@ func (x *KLLState) GetCoin() *CoinState {
 	return nil
 }
 
+func (x *KLLState) GetOffset() float64 {
+	if x != nil {
+		return x.Offset
+	}
+	return 0
+}
+
+func (x *KLLState) GetValueScale() int32 {
+	if x != nil {
+		return x.ValueScale
+	}
+	return 0
+}
+
+func (x *KLLState) GetResiduals() []int64 {
+	if x != nil {
+		return x.Residuals
+	}
+	return nil
+}
+
 // CoinState is the RNG used by KLL's probabilistic compaction.
 // Both Go and Rust use an identical xorshift-based generator.
 type CoinState struct {
@@ -196,7 +236,7 @@ var File_kll_kll_proto protoreflect.FileDescriptor
 
 const file_kll_kll_proto_rawDesc = "" +
 	"\n" +
-	"\rkll/kll.proto\x12\fsketchlib.v1\"\xae\x01\n" +
+	"\rkll/kll.proto\x12\fsketchlib.v1\"\x89\x02\n" +
 	"\bKLLState\x12\f\n" +
 	"\x01k\x18\x01 \x01(\rR\x01k\x12\f\n" +
 	"\x01m\x18\x02 \x01(\rR\x01m\x12\x1d\n" +
@@ -204,7 +244,12 @@ const file_kll_kll_proto_rawDesc = "" +
 	"num_levels\x18\x03 \x01(\rR\tnumLevels\x12\x1a\n" +
 	"\x06levels\x18\x04 \x03(\rB\x02\x10\x01R\x06levels\x12\x18\n" +
 	"\x05items\x18\x05 \x03(\x01B\x02\x10\x01R\x05items\x12+\n" +
-	"\x04coin\x18\x06 \x01(\v2\x17.sketchlib.v1.CoinStateR\x04coinJ\x04\b\a\x10\x10\"e\n" +
+	"\x04coin\x18\x06 \x01(\v2\x17.sketchlib.v1.CoinStateR\x04coin\x12\x16\n" +
+	"\x06offset\x18\a \x01(\x01R\x06offset\x12\x1f\n" +
+	"\vvalue_scale\x18\b \x01(\x11R\n" +
+	"valueScale\x12 \n" +
+	"\tresiduals\x18\t \x03(\x12B\x02\x10\x01R\tresidualsJ\x04\b\n" +
+	"\x10\x10\"e\n" +
 	"\tCoinState\x12\x14\n" +
 	"\x05state\x18\x01 \x01(\x04R\x05state\x12\x1b\n" +
 	"\tbit_cache\x18\x02 \x01(\x04R\bbitCache\x12%\n" +
