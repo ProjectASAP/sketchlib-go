@@ -29,20 +29,9 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	if math.Abs(state.Alpha-0.01) > 1e-12 {
 		t.Errorf("alpha: got %v, want ~0.01", state.Alpha)
 	}
-	if state.Count != 6 {
-		t.Errorf("count: got %d, want 6", state.Count)
-	}
-	// sum of 1+2+5+10+20+50 = 88
-	if state.Sum != 88.0 {
-		t.Errorf("sum: got %v, want 88", state.Sum)
-	}
-	if state.Min != 1.0 {
-		t.Errorf("min: got %v, want 1.0", state.Min)
-	}
-	if state.Max != 50.0 {
-		t.Errorf("max: got %v, want 50.0", state.Max)
-	}
-	// Bucket counts should sum to `count`.
+	// DataPoint-level metric scalars (count/sum/min/max) are no longer
+	// carried on the wire; count is recoverable by summing the bucket
+	// counts.
 	var totalBucketed uint64
 	for _, c := range state.StoreCounts {
 		totalBucketed += c
@@ -62,17 +51,21 @@ func TestSerializeMsgpackEmptySketch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalDDSketch: %v", err)
 	}
-	if state.Count != 0 {
-		t.Errorf("empty count: got %d, want 0", state.Count)
-	}
 	if len(state.StoreCounts) != 0 {
 		t.Errorf("empty store_counts: got %d elements, want 0", len(state.StoreCounts))
 	}
-	// Empty-sketch sentinels match the Rust `DdSketch::new(alpha)` constructor.
-	if !math.IsInf(state.Min, 1) {
-		t.Errorf("empty min: got %v, want +Inf", state.Min)
+	// An empty sketch round-trips to an empty sketch with the +Inf/-Inf
+	// min/max sentinels re-derived from the (empty) bucket distribution.
+	sketch2, err := DeserializeMsgpack(bytes)
+	if err != nil {
+		t.Fatalf("DeserializeMsgpack: %v", err)
 	}
-	if !math.IsInf(state.Max, -1) {
-		t.Errorf("empty max: got %v, want -Inf", state.Max)
+	if sketch2.Count() != 0 {
+		t.Errorf("empty count: got %d, want 0", sketch2.Count())
+	}
+	// Updating the reconstructed empty sketch must work (sentinels seeded).
+	sketch2.Update(42.0)
+	if sketch2.Count() != 1 {
+		t.Errorf("after Update: count=%d, want 1", sketch2.Count())
 	}
 }

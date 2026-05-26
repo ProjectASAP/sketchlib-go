@@ -32,10 +32,6 @@ func (d *DDSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 		Alpha:       alpha,
 		StoreCounts: storeCounts,
 		StoreOffset: d.store.offset,
-		Count:       d.count,
-		Sum:         d.sum,
-		Min:         d.min,
-		Max:         d.max,
 	}
 
 	return &envpb.SketchEnvelope{
@@ -76,10 +72,6 @@ func (d *DDSketch) SerializeStateProtoBytes() ([]byte, error) {
 		Alpha:       alpha,
 		StoreCounts: storeCounts,
 		StoreOffset: d.store.offset,
-		Count:       d.count,
-		Sum:         d.sum,
-		Min:         d.min,
-		Max:         d.max,
 	}
 	return proto.Marshal(state)
 }
@@ -92,8 +84,12 @@ func (d *DDSketch) SerializeStateProtoBytes() ([]byte, error) {
 // `DDSKETCH_ENCODING_PROTO` bytes that were emitted by another
 // sketchlib-go peer (e.g. a DataCollector sketch processor).
 //
-// Empty sketches (count == 0) round-trip via the +Inf/-Inf min/max
-// sentinels the constructor already seeds.
+// The DataPoint-level metric scalars (count/sum/min/max) are no longer
+// carried on the wire: count is recovered by summing the bucket counts,
+// and min/max are derived from the lowest/highest non-empty buckets
+// (relative-accuracy bounded). sum is unrecoverable and is left at zero
+// (callers must not rely on the reconstructed sketch's sum). Empty
+// sketches round-trip via the +Inf/-Inf min/max sentinels.
 func NewFromState(state *ddpb.DDSketchState) (*DDSketch, error) {
 	if state == nil {
 		return nil, errors.New("NewFromState: state is nil")
@@ -112,27 +108,53 @@ func NewFromState(state *ddpb.DDSketchState) (*DDSketch, error) {
 		}
 	}
 
-	// Empty-sketch sentinels. If state.Count == 0 and min/max weren't
-	// explicitly set (i.e. they are the zero-value float), reset them
-	// to +Inf / -Inf so subsequent Add() calls start from the standard
-	// NewDDSketch state.
-	minVal := state.Min
-	maxVal := state.Max
-	if state.Count == 0 && !math.IsInf(minVal, 1) {
-		minVal = math.Inf(1)
-	}
-	if state.Count == 0 && !math.IsInf(maxVal, -1) {
-		maxVal = math.Inf(-1)
-	}
+	count, minVal, maxVal := deriveScalarsFromBuckets(&buckets, mapping)
 
 	return &DDSketch{
 		mapping: mapping,
 		store:   buckets,
-		count:   state.Count,
-		sum:     state.Sum,
-		min:     minVal,
-		max:     maxVal,
+		count:   count,
+		// sum is not carried on the wire and is unrecoverable from the
+		// bucket distribution; leave it at the zero value.
+		sum: 0,
+		min: minVal,
+		max: maxVal,
 	}, nil
+}
+
+// deriveScalarsFromBuckets recomputes the count and min/max scalars from a
+// bucket store now that they are no longer carried on the wire. count is the
+// exact sum of bucket counts. min/max are the representative values of the
+// lowest/highest non-empty buckets (relative-accuracy bounded). An empty store
+// yields count 0 and the +Inf/-Inf sentinels matching NewDDSketch, so a
+// reconstructed empty sketch behaves identically to a freshly constructed one.
+func deriveScalarsFromBuckets(b *Buckets, mapping IndexMapping) (count uint64, min, max float64) {
+	min = math.Inf(1)
+	max = math.Inf(-1)
+	if b.IsEmpty() {
+		return 0, min, max
+	}
+	counts := b.counts.AsSlice()
+	for i, c := range counts {
+		if c == 0 {
+			continue
+		}
+		count += c
+		k := b.offset + int32(i)
+		rep := mapping.Value(k)
+		if rep < min {
+			min = rep
+		}
+		if rep > max {
+			max = rep
+		}
+	}
+	if count == 0 {
+		// Store had only zero-count buckets: treat as empty.
+		min = math.Inf(1)
+		max = math.Inf(-1)
+	}
+	return count, min, max
 }
 
 // NewFromStateProtoBytes is a convenience wrapper: unmarshal the raw

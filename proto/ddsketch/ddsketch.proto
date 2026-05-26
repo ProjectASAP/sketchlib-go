@@ -20,6 +20,11 @@ option go_package = "github.com/ProjectASAP/sketchlib-go/proto/ddsketch;ddsketch
 //
 // Bucket indices: a value v maps to bucket floor(ln(v) * inv_log_gamma).
 // Stored bucket absolute_index = array_index + store_offset.
+//
+// DataPoint-level metric scalars (count/sum/min/max) are intentionally NOT
+// carried on the wire: count is recoverable by summing store_counts, and
+// min/max/quantiles are derived from the bucket distribution within the
+// relative-accuracy guarantee. sum is not recoverable and is not transmitted.
 message DDSketchState {
   // Relative accuracy guarantee. Required. Must satisfy 0 < alpha < 1.
   double alpha = 1;
@@ -32,18 +37,9 @@ message DDSketchState {
   // May be negative (values < 1.0 map to negative bucket indices).
   sint32 store_offset = 3;
 
-  // Total number of values added.
-  uint64 count = 4;
-
-  // Sum of all values added (for mean computation).
-  double sum = 5;
-
-  // Minimum value observed. +Inf when the sketch is empty.
-  double min = 6;
-
-  // Maximum value observed. -Inf when the sketch is empty.
-  double max = 7;
-
+  // Fields 4-7 (count/sum/min/max) removed: DataPoint-level metric scalars
+  // are no longer carried on the wire.
+  reserved 4, 5, 6, 7;
   reserved 8 to 15;
 }
 
@@ -52,16 +48,17 @@ message DDSketchState {
 // ============================================================================
 
 // DDSketchDelta carries only the buckets that changed above threshold T.
-// count/sum are additive deltas. min/max are lossless scalars transmitted
-// only when they changed (min can only decrease, max can only increase).
+//
+// DataPoint-level metric scalars (d_count/d_sum/new_min/new_max/min_changed/
+// max_changed) are intentionally NOT carried on the wire: the count delta is
+// recoverable by summing bucket deltas, and min/max/quantiles are derived from
+// the bucket distribution within the relative-accuracy guarantee.
 message DDSketchDelta {
-  repeated DDSketchBucketDelta buckets     = 1;
-  int64   d_count     = 2;
-  double  d_sum       = 3;
-  double  new_min     = 4;
-  double  new_max     = 5;
-  bool    min_changed = 6;
-  bool    max_changed = 7;
+  repeated DDSketchBucketDelta buckets = 1;
+
+  // Fields 2-7 (d_count/d_sum/new_min/new_max/min_changed/max_changed)
+  // removed: DataPoint-level metric scalars are no longer carried on the wire.
+  reserved 2, 3, 4, 5, 6, 7;
 }
 
 // DDSketchBucketDelta is the delta for one log-scale bucket.

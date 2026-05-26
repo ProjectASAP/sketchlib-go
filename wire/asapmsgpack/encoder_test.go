@@ -73,20 +73,19 @@ func TestCountSketchRejectsRaggedMatrix(t *testing.T) {
 // ─── DDSketch ────────────────────────────────────────────────────────
 
 func TestDDSketchMatchesRustGolden(t *testing.T) {
+	// DataPoint-level metric scalars (count/sum/min/max) are no longer
+	// carried on the wire. The payload is now a 3-element array:
+	//   [ alpha, store_counts, store_offset ]
+	//
 	// Rust:
-	//   DdSketch::from_raw(0.01, vec![1, 2, 3], -2, 6, 30.0, 1.0, 5.0)
-	//     .serialize_msgpack()
+	//   DdSketch::from_raw(0.01, vec![1, 2, 3], -2).serialize_msgpack()
 	golden := mustHex(t,
-		"97cb3f847ae147ae147b93010203fe06cb403e000000000000cb3ff0000000000000cb4014000000000000")
+		"93cb3f847ae147ae147b93010203fe")
 
 	state := DDSketchState{
 		Alpha:       0.01,
 		StoreCounts: []uint64{1, 2, 3},
 		StoreOffset: -2,
-		Count:       6,
-		Sum:         30.0,
-		Min:         1.0,
-		Max:         5.0,
 	}
 	got, err := MarshalDDSketch(state)
 	if err != nil {

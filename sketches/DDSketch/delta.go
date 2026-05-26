@@ -7,25 +7,14 @@ import (
 
 // ComputeDelta computes a sparse delta between snapshot and current.
 // A bucket is included when Δcount ≥ threshold.
-// Count, sum, min, max deltas are always included because they are needed for
-// correct quantile estimation on the receiver side.
+//
+// The DataPoint-level metric scalars (count/sum/min/max deltas) are no longer
+// carried on the wire: the receiver recovers the count delta by summing the
+// applied bucket deltas and derives min/max from the resulting bucket
+// distribution (relative-accuracy bounded).
 // Returns proto-marshalled DDSketchDelta bytes.
 func ComputeDelta(snapshot, current *DDSketch, threshold uint64) ([]byte, error) {
-	delta := &pb.DDSketchDelta{
-		DCount: int64(current.count) - int64(snapshot.count),
-		DSum:   current.sum - snapshot.sum,
-	}
-
-	// min can only decrease; include when it did.
-	if current.count > 0 && (snapshot.count == 0 || current.min < snapshot.min) {
-		delta.MinChanged = true
-		delta.NewMin = current.min
-	}
-	// max can only increase; include when it did.
-	if current.count > 0 && (snapshot.count == 0 || current.max > snapshot.max) {
-		delta.MaxChanged = true
-		delta.NewMax = current.max
-	}
+	delta := &pb.DDSketchDelta{}
 
 	// Compute per-bucket deltas by iterating all buckets in current.
 	if !current.store.IsEmpty() {
@@ -61,7 +50,11 @@ func ComputeDelta(snapshot, current *DDSketch, threshold uint64) ([]byte, error)
 
 // ApplyDelta applies a proto-marshalled DDSketchDelta to target.
 // Bucket deltas are applied with AddToBucket (additive).
-// Count/sum are added. Min/max are applied with min/max semantics.
+//
+// The DataPoint-level metric scalars (count/sum/min/max) are no longer carried
+// on the wire: the count delta is recovered by summing the applied bucket
+// deltas and min/max are derived from each touched bucket's representative
+// value (relative-accuracy bounded). sum is unrecoverable and is not updated.
 func ApplyDelta(target *DDSketch, data []byte) error {
 	var delta pb.DDSketchDelta
 	if err := proto.Unmarshal(data, &delta); err != nil {
@@ -72,18 +65,13 @@ func ApplyDelta(target *DDSketch, data []byte) error {
 		target.store.ensure(b.Index)
 		target.store.counts.AsMutSlice()[int(b.Index-target.store.offset)] += b.DCount
 		target.count += b.DCount
-	}
-
-	target.sum += delta.DSum
-
-	if delta.MinChanged {
-		if target.count == 0 || delta.NewMin < target.min {
-			target.min = delta.NewMin
+		// Derive min/max from the touched bucket's representative value.
+		rep := target.mapping.Value(b.Index)
+		if rep < target.min {
+			target.min = rep
 		}
-	}
-	if delta.MaxChanged {
-		if target.count == 0 || delta.NewMax > target.max {
-			target.max = delta.NewMax
+		if rep > target.max {
+			target.max = rep
 		}
 	}
 
