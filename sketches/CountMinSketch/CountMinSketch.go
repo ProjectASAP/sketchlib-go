@@ -353,6 +353,9 @@ func (s *CountMinSketch) queryFrequencyFast(hash uint64) float64 {
 	shift := uint(0)
 	for r := 0; r < s.Rows; r++ {
 		c := int((hash >> shift) & s.mask)
+		if c >= s.Cols {
+			c %= s.Cols
+		}
 		shift += s.bitsPerRow
 		v := s.countStore.RowSlice(r)[c]
 		if v < res {

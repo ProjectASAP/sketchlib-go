@@ -609,3 +609,80 @@ func TestCountMin_Quality_SpecificUnsupportedQuery(t *testing.T) {
 		t.Fatal("expected unsupported query error")
 	}
 }
+
+// TestCMS_NonPowerOfTwoCols_QueryFold guards against a regression where the
+// fast point-query path (queryFrequencyFast, reached via QueryFrequency /
+// FastEstimateWithHash) failed to fold the per-row column index with
+// `c %= s.Cols` the way the INSERT path does. For a non-power-of-two `cols`,
+// the column mask spans the next power of two, so a masked index can exceed
+// `cols`; without the fold the query either panics (index out of range) or
+// reads a different cell than insert wrote, breaking the CMS guarantee.
+//
+// The Rust asap_sketchlib CMS folds on both insert and query; this asserts the
+// Go library matches. Insert and query MUST land on the same cell, so the
+// one-sided over-estimate property (estimate >= true count) must hold.
+func TestCMS_NonPowerOfTwoCols_QueryFold(t *testing.T) {
+	for _, cols := range []int{17, 2000} {
+		cols := cols
+		t.Run(fmt.Sprintf("cols=%d", cols), func(t *testing.T) {
+			s, err := NewCountMinSketch(4, cols)
+			if err != nil {
+				t.Fatalf("NewCountMinSketch(4, %d): %v", cols, err)
+			}
+
+			// Several keys with distinct known true counts.
+			truth := map[string]int{
+				"alpha":   137,
+				"bravo":   1,
+				"charlie": 999,
+				"delta":   42,
+				"echo":    5000,
+				"foxtrot": 73,
+			}
+
+			for key, n := range truth {
+				h := common.FromString(key).Hash
+				for i := 0; i < n; i++ {
+					// Insert via the fast hash path that folds the column.
+					s.InsertWithHash(h)
+				}
+			}
+
+			for key, n := range truth {
+				h := common.FromString(key).Hash
+
+				// (a) No panic: exercise BOTH point-query entry points that go
+				// through queryFrequencyFast.
+				estQuery, err := s.QueryWithHash(common.QueryFrequency, h)
+				if err != nil {
+					t.Fatalf("QueryWithHash(%q): %v", key, err)
+				}
+				estFast := s.FastEstimateWithHash(h)
+				if estQuery != estFast {
+					t.Fatalf("key %q: QueryWithHash=%v disagrees with FastEstimateWithHash=%v",
+						key, estQuery, estFast)
+				}
+
+				logCMS(t, fmt.Sprintf("NonPow2(cols=%d) %s", cols, key), float64(n), estQuery)
+
+				// (b) One-sided over-estimate: estimate must be >= true count.
+				if estQuery < float64(n) {
+					t.Fatalf("key %q (cols=%d): CMS underestimate: est=%v < true=%d "+
+						"(insert/query column folds disagree)", key, cols, estQuery, n)
+				}
+
+				// Reasonable: with 4 rows and these column counts, the total
+				// mass is small relative to the table, so the min-of-rows
+				// estimate should not blow up. Bound generously.
+				totalMass := 0.0
+				for _, c := range truth {
+					totalMass += float64(c)
+				}
+				if estQuery > float64(n)+totalMass {
+					t.Fatalf("key %q (cols=%d): implausibly large estimate est=%v true=%d totalMass=%v",
+						key, cols, estQuery, n, totalMass)
+				}
+			}
+		})
+	}
+}
