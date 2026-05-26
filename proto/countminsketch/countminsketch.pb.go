@@ -9,13 +9,12 @@
 package countminsketchpb
 
 import (
-	reflect "reflect"
-	sync "sync"
-	unsafe "unsafe"
-
 	common "github.com/ProjectASAP/sketchlib-go/proto/common"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	reflect "reflect"
+	sync "sync"
+	unsafe "unsafe"
 )
 
 const (
@@ -164,6 +163,13 @@ func (x *CountMinState) GetL2() []float64 {
 //	cell_rows[i], cell_cols[i], d_counts[i] describe the i-th changed cell.
 //	d_sum / d_sum2 are omitted; receiver reconstructs Sum[r][c] += d_count
 //	and Sum2[r][c] += d_count for unweighted (unit-weight) streams.
+//
+// CountMinDelta is structurally identical to CountSketchDelta: rows, cols,
+// the packed cell encoding (cell_rows/cell_cols/d_counts), per-row norm
+// deltas, and an optional repeated hh_keys at the SAME field number (6).
+// Both sketches can track heavy hitters; whether hh_keys is populated is a
+// control-plane decision (it is empty/omitted when heavy-hitter tracking is
+// not enabled for this sketch).
 type CountMinDelta struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Rows  uint32                 `protobuf:"varint,1,opt,name=rows,proto3" json:"rows,omitempty"`
@@ -173,6 +179,12 @@ type CountMinDelta struct {
 	CellsLegacy []*CountMinCell `protobuf:"bytes,3,rep,name=cells_legacy,json=cellsLegacy,proto3" json:"cells_legacy,omitempty"`
 	L1          []float64       `protobuf:"fixed64,4,rep,packed,name=l1,proto3" json:"l1,omitempty"`
 	L2          []float64       `protobuf:"fixed64,5,rep,packed,name=l2,proto3" json:"l2,omitempty"`
+	// Heavy-hitter candidate keys from an upstream tracker, mirroring
+	// CountSketchDelta.hh_keys (same field number 6, same wire shape).
+	// Downstream queries the merged CMS matrix for each key to (re)build its
+	// Top-K with globally-merged estimates. Empty/omitted when heavy-hitter
+	// tracking is not enabled.
+	HhKeys []string `protobuf:"bytes,6,rep,name=hh_keys,json=hhKeys,proto3" json:"hh_keys,omitempty"`
 	// New packed encoding (Opt-1+2, Stage 2):
 	CellRows      []uint32 `protobuf:"varint,9,rep,packed,name=cell_rows,json=cellRows,proto3" json:"cell_rows,omitempty"`  // row index of each changed cell
 	CellCols      []uint32 `protobuf:"varint,10,rep,packed,name=cell_cols,json=cellCols,proto3" json:"cell_cols,omitempty"` // col index of each changed cell
@@ -242,6 +254,13 @@ func (x *CountMinDelta) GetL1() []float64 {
 func (x *CountMinDelta) GetL2() []float64 {
 	if x != nil {
 		return x.L2
+	}
+	return nil
+}
+
+func (x *CountMinDelta) GetHhKeys() []string {
+	if x != nil {
+		return x.HhKeys
 	}
 	return nil
 }
@@ -363,13 +382,14 @@ const file_countminsketch_countminsketch_proto_rawDesc = "" +
 	"sum2Counts\x12\x12\n" +
 	"\x02l1\x18\b \x03(\x01B\x02\x10\x01R\x02l1\x12\x12\n" +
 	"\x02l2\x18\t \x03(\x01B\x02\x10\x01R\x02l2J\x04\b\n" +
-	"\x10\x10\"\xff\x01\n" +
+	"\x10\x10\"\x98\x02\n" +
 	"\rCountMinDelta\x12\x12\n" +
 	"\x04rows\x18\x01 \x01(\rR\x04rows\x12\x12\n" +
 	"\x04cols\x18\x02 \x01(\rR\x04cols\x12=\n" +
 	"\fcells_legacy\x18\x03 \x03(\v2\x1a.sketchlib.v1.CountMinCellR\vcellsLegacy\x12\x12\n" +
 	"\x02l1\x18\x04 \x03(\x01B\x02\x10\x01R\x02l1\x12\x12\n" +
-	"\x02l2\x18\x05 \x03(\x01B\x02\x10\x01R\x02l2\x12\x1f\n" +
+	"\x02l2\x18\x05 \x03(\x01B\x02\x10\x01R\x02l2\x12\x17\n" +
+	"\ahh_keys\x18\x06 \x03(\tR\x06hhKeys\x12\x1f\n" +
 	"\tcell_rows\x18\t \x03(\rB\x02\x10\x01R\bcellRows\x12\x1f\n" +
 	"\tcell_cols\x18\n" +
 	" \x03(\rB\x02\x10\x01R\bcellCols\x12\x1d\n" +
