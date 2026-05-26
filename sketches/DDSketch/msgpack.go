@@ -3,7 +3,6 @@ package ddsketch
 import (
 	"errors"
 	"fmt"
-	"math"
 
 	"github.com/ProjectASAP/sketchlib-go/common/storage"
 	"github.com/ProjectASAP/sketchlib-go/wire/asapmsgpack"
@@ -43,30 +42,10 @@ func (d *DDSketch) SerializeMsgpack() ([]byte, error) {
 		storeOffset = d.store.offset
 	}
 
-	// The Rust `DdSketch::new(alpha)` constructor seeds `min = +Inf`
-	// and `max = -Inf`. Our zero-value Go sketch starts with the same
-	// sentinels (see `NewDDSketch`), so empty sketches round-trip
-	// cleanly. If the caller constructs via a struct literal and
-	// forgets to set min/max, we fall back to the same sentinels.
-	min := d.min
-	max := d.max
-	if d.count == 0 {
-		if math.IsNaN(min) || !math.IsInf(min, 1) {
-			min = math.Inf(1)
-		}
-		if math.IsNaN(max) || !math.IsInf(max, -1) {
-			max = math.Inf(-1)
-		}
-	}
-
 	return asapmsgpack.MarshalDDSketch(asapmsgpack.DDSketchState{
 		Alpha:       alpha,
 		StoreCounts: storeCounts,
 		StoreOffset: storeOffset,
-		Count:       d.count,
-		Sum:         d.sum,
-		Min:         min,
-		Max:         max,
 	})
 }
 
@@ -91,19 +70,14 @@ func DeserializeMsgpack(buf []byte) (*DDSketch, error) {
 			offset: state.StoreOffset,
 		}
 	}
-	minVal := state.Min
-	maxVal := state.Max
-	if state.Count == 0 && !math.IsInf(minVal, 1) {
-		minVal = math.Inf(1)
-	}
-	if state.Count == 0 && !math.IsInf(maxVal, -1) {
-		maxVal = math.Inf(-1)
-	}
+	// count/min/max are no longer carried on the wire; recompute them from
+	// the bucket distribution. sum is unrecoverable and is left at zero.
+	count, minVal, maxVal := deriveScalarsFromBuckets(&buckets, mapping)
 	return &DDSketch{
 		mapping: mapping,
 		store:   buckets,
-		count:   state.Count,
-		sum:     state.Sum,
+		count:   count,
+		sum:     0,
 		min:     minVal,
 		max:     maxVal,
 	}, nil

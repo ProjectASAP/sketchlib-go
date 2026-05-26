@@ -303,6 +303,12 @@ func (d *DDSketch) mergeBuckets(a *Buckets, b *Buckets) {
 
 // Quantile returns the value at quantile q (0 <= q <= 1). Mirrors Rust's
 // `quantile` (sketches/ddsketch.rs) in the unified API.
+//
+// The top-of-walk fallback is derived from the highest non-empty bucket's
+// representative value rather than a stored `max` scalar (which is no longer
+// carried on the wire). The result stays within the relative-accuracy
+// guarantee because a bucket's representative value is within alpha of every
+// value mapped into it.
 func (d *DDSketch) Quantile(q float64) (float64, bool) {
 	if d.count == 0 || q < 0 || q > 1 {
 		return 0, false
@@ -311,18 +317,31 @@ func (d *DDSketch) Quantile(q float64) (float64, bool) {
 	if q == 0 {
 		return d.min, true
 	}
-	if q == 1 {
+
+	if d.store.counts == nil {
 		return d.max, true
 	}
 
 	rank := uint64(math.Ceil(q * float64(d.count)))
 
-	var seen uint64
+	counts := d.store.counts.AsSlice()
 
-	if d.store.counts == nil {
-		return d.max, true
+	// Highest non-empty bucket's representative value: the top of the walk
+	// and the q==1 answer, both bounded by relative accuracy.
+	topVal := d.max
+	for i := len(counts) - 1; i >= 0; i-- {
+		if counts[i] != 0 {
+			topVal = d.mapping.Value(d.store.offset + int32(i))
+			break
+		}
 	}
-	for i, c := range d.store.counts.AsSlice() {
+
+	if q == 1 {
+		return topVal, true
+	}
+
+	var seen uint64
+	for i, c := range counts {
 		if c == 0 {
 			continue
 		}
@@ -335,14 +354,14 @@ func (d *DDSketch) Quantile(q float64) (float64, bool) {
 			if v < d.min {
 				v = d.min
 			}
-			if v > d.max {
-				v = d.max
+			if v > topVal {
+				v = topVal
 			}
 			return v, true
 		}
 	}
 
-	return d.max, true
+	return topVal, true
 }
 
 // QueryWithHash implements common.Sketch.

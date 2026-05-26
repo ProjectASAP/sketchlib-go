@@ -34,6 +34,11 @@ const (
 //
 // Bucket indices: a value v maps to bucket floor(ln(v) * inv_log_gamma).
 // Stored bucket absolute_index = array_index + store_offset.
+//
+// DataPoint-level metric scalars (count/sum/min/max) are intentionally NOT
+// carried on the wire: count is recoverable by summing store_counts, and
+// min/max/quantiles are derived from the bucket distribution within the
+// relative-accuracy guarantee. sum is not recoverable and is not transmitted.
 type DDSketchState struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Relative accuracy guarantee. Required. Must satisfy 0 < alpha < 1.
@@ -43,15 +48,7 @@ type DDSketchState struct {
 	StoreCounts []uint64 `protobuf:"varint,2,rep,packed,name=store_counts,json=storeCounts,proto3" json:"store_counts,omitempty"`
 	// Absolute bucket index corresponding to store_counts[0].
 	// May be negative (values < 1.0 map to negative bucket indices).
-	StoreOffset int32 `protobuf:"zigzag32,3,opt,name=store_offset,json=storeOffset,proto3" json:"store_offset,omitempty"`
-	// Total number of values added.
-	Count uint64 `protobuf:"varint,4,opt,name=count,proto3" json:"count,omitempty"`
-	// Sum of all values added (for mean computation).
-	Sum float64 `protobuf:"fixed64,5,opt,name=sum,proto3" json:"sum,omitempty"`
-	// Minimum value observed. +Inf when the sketch is empty.
-	Min float64 `protobuf:"fixed64,6,opt,name=min,proto3" json:"min,omitempty"`
-	// Maximum value observed. -Inf when the sketch is empty.
-	Max           float64 `protobuf:"fixed64,7,opt,name=max,proto3" json:"max,omitempty"`
+	StoreOffset   int32 `protobuf:"zigzag32,3,opt,name=store_offset,json=storeOffset,proto3" json:"store_offset,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -107,46 +104,15 @@ func (x *DDSketchState) GetStoreOffset() int32 {
 	return 0
 }
 
-func (x *DDSketchState) GetCount() uint64 {
-	if x != nil {
-		return x.Count
-	}
-	return 0
-}
-
-func (x *DDSketchState) GetSum() float64 {
-	if x != nil {
-		return x.Sum
-	}
-	return 0
-}
-
-func (x *DDSketchState) GetMin() float64 {
-	if x != nil {
-		return x.Min
-	}
-	return 0
-}
-
-func (x *DDSketchState) GetMax() float64 {
-	if x != nil {
-		return x.Max
-	}
-	return 0
-}
-
 // DDSketchDelta carries only the buckets that changed above threshold T.
-// count/sum are additive deltas. min/max are lossless scalars transmitted
-// only when they changed (min can only decrease, max can only increase).
+//
+// DataPoint-level metric scalars (d_count/d_sum/new_min/new_max/min_changed/
+// max_changed) are intentionally NOT carried on the wire: the count delta is
+// recoverable by summing bucket deltas, and min/max/quantiles are derived from
+// the bucket distribution within the relative-accuracy guarantee.
 type DDSketchDelta struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Buckets       []*DDSketchBucketDelta `protobuf:"bytes,1,rep,name=buckets,proto3" json:"buckets,omitempty"`
-	DCount        int64                  `protobuf:"varint,2,opt,name=d_count,json=dCount,proto3" json:"d_count,omitempty"`
-	DSum          float64                `protobuf:"fixed64,3,opt,name=d_sum,json=dSum,proto3" json:"d_sum,omitempty"`
-	NewMin        float64                `protobuf:"fixed64,4,opt,name=new_min,json=newMin,proto3" json:"new_min,omitempty"`
-	NewMax        float64                `protobuf:"fixed64,5,opt,name=new_max,json=newMax,proto3" json:"new_max,omitempty"`
-	MinChanged    bool                   `protobuf:"varint,6,opt,name=min_changed,json=minChanged,proto3" json:"min_changed,omitempty"`
-	MaxChanged    bool                   `protobuf:"varint,7,opt,name=max_changed,json=maxChanged,proto3" json:"max_changed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -186,48 +152,6 @@ func (x *DDSketchDelta) GetBuckets() []*DDSketchBucketDelta {
 		return x.Buckets
 	}
 	return nil
-}
-
-func (x *DDSketchDelta) GetDCount() int64 {
-	if x != nil {
-		return x.DCount
-	}
-	return 0
-}
-
-func (x *DDSketchDelta) GetDSum() float64 {
-	if x != nil {
-		return x.DSum
-	}
-	return 0
-}
-
-func (x *DDSketchDelta) GetNewMin() float64 {
-	if x != nil {
-		return x.NewMin
-	}
-	return 0
-}
-
-func (x *DDSketchDelta) GetNewMax() float64 {
-	if x != nil {
-		return x.NewMax
-	}
-	return 0
-}
-
-func (x *DDSketchDelta) GetMinChanged() bool {
-	if x != nil {
-		return x.MinChanged
-	}
-	return false
-}
-
-func (x *DDSketchDelta) GetMaxChanged() bool {
-	if x != nil {
-		return x.MaxChanged
-	}
-	return false
 }
 
 // DDSketchBucketDelta is the delta for one log-scale bucket.
@@ -287,25 +211,13 @@ var File_ddsketch_ddsketch_proto protoreflect.FileDescriptor
 
 const file_ddsketch_ddsketch_proto_rawDesc = "" +
 	"\n" +
-	"\x17ddsketch/ddsketch.proto\x12\fsketchlib.v1\"\xc1\x01\n" +
+	"\x17ddsketch/ddsketch.proto\x12\fsketchlib.v1\"\x8d\x01\n" +
 	"\rDDSketchState\x12\x14\n" +
 	"\x05alpha\x18\x01 \x01(\x01R\x05alpha\x12%\n" +
 	"\fstore_counts\x18\x02 \x03(\x04B\x02\x10\x01R\vstoreCounts\x12!\n" +
-	"\fstore_offset\x18\x03 \x01(\x11R\vstoreOffset\x12\x14\n" +
-	"\x05count\x18\x04 \x01(\x04R\x05count\x12\x10\n" +
-	"\x03sum\x18\x05 \x01(\x01R\x03sum\x12\x10\n" +
-	"\x03min\x18\x06 \x01(\x01R\x03min\x12\x10\n" +
-	"\x03max\x18\a \x01(\x01R\x03maxJ\x04\b\b\x10\x10\"\xee\x01\n" +
+	"\fstore_offset\x18\x03 \x01(\x11R\vstoreOffsetJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\x10\"p\n" +
 	"\rDDSketchDelta\x12;\n" +
-	"\abuckets\x18\x01 \x03(\v2!.sketchlib.v1.DDSketchBucketDeltaR\abuckets\x12\x17\n" +
-	"\ad_count\x18\x02 \x01(\x03R\x06dCount\x12\x13\n" +
-	"\x05d_sum\x18\x03 \x01(\x01R\x04dSum\x12\x17\n" +
-	"\anew_min\x18\x04 \x01(\x01R\x06newMin\x12\x17\n" +
-	"\anew_max\x18\x05 \x01(\x01R\x06newMax\x12\x1f\n" +
-	"\vmin_changed\x18\x06 \x01(\bR\n" +
-	"minChanged\x12\x1f\n" +
-	"\vmax_changed\x18\a \x01(\bR\n" +
-	"maxChanged\"D\n" +
+	"\abuckets\x18\x01 \x03(\v2!.sketchlib.v1.DDSketchBucketDeltaR\abucketsJ\x04\b\x02\x10\x03J\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\b\"D\n" +
 	"\x13DDSketchBucketDelta\x12\x14\n" +
 	"\x05index\x18\x01 \x01(\x11R\x05index\x12\x17\n" +
 	"\ad_count\x18\x02 \x01(\x04R\x06dCountB?Z=github.com/ProjectASAP/sketchlib-go/proto/ddsketch;ddsketchpbb\x06proto3"
