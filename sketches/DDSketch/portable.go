@@ -41,6 +41,7 @@ func (d *DDSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 			Version: "0.1.0",
 		},
 		HashSpec: portableHashSpec(),
+		SampleP:  d.wireSampleP(),
 		SketchState: &envpb.SketchEnvelope_Ddsketch{
 			Ddsketch: state,
 		},
