@@ -2,6 +2,7 @@ package countsketch
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
@@ -47,10 +48,25 @@ func ComputeDelta(snapshot, current *CountSketch, threshold float64) (*Delta, er
 		snapCount := snapshot.Count[r]
 		curCount := current.Count[r]
 		for c := 0; c < cols; c++ {
-			dc := int64(curCount[c] - snapCount[c])
-			if dc != 0 && (dc <= -int64(threshold) || dc >= int64(threshold)) {
-				d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
+			df := curCount[c] - snapCount[c]
+			// Threshold on the float magnitude (not a truncated int) so a
+			// fractional threshold behaves as written and |Δ|<1 cells are not
+			// silently mis-filtered.
+			if df == 0 || math.Abs(df) < threshold {
+				continue
 			}
+			dc, ok := integralCellDelta(df)
+			if !ok {
+				// CellDelta.DCount is i64 (proto d_counts is sint64); a
+				// fractional/weighted cell cannot be carried losslessly, and
+				// truncating it would make full ≠ delta-against-empty. Reject
+				// so callers emit the lossless full f64 frame instead.
+				return nil, fmt.Errorf(
+					"countsketch: ComputeDelta: cell (%d,%d) delta %v is non-integral; "+
+						"the sparse delta wire is integer-only (use the full frame for "+
+						"weighted/fractional sketches)", r, c, df)
+			}
+			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
 		}
 		d.L2[r] = current.L2[r] - snapshot.L2[r]
 	}

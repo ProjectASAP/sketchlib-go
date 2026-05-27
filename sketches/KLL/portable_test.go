@@ -145,10 +145,14 @@ func TestProtoRoundTripBothForms(t *testing.T) {
 	s := buildKLL(t, 200, 42, values)
 	want := retained(s)
 
-	// Value-offset form (default).
-	fpBytes, err := s.SerializeProtoBytes()
+	// Value-offset form (explicit opt-in via SerializePortable).
+	fpEnv, err := s.SerializePortable()
 	if err != nil {
-		t.Fatalf("SerializeProtoBytes: %v", err)
+		t.Fatalf("SerializePortable: %v", err)
+	}
+	fpBytes, err := proto.Marshal(fpEnv)
+	if err != nil {
+		t.Fatalf("marshal value-offset: %v", err)
 	}
 	fpSketch, err := DeserializeKLLSketchFromProtoBytes(fpBytes)
 	if err != nil {
@@ -188,6 +192,66 @@ func TestProtoRoundTripBothForms(t *testing.T) {
 		}
 		if got := rawSketch.Quantile(q); got != orig {
 			t.Fatalf("raw-f64 quantile mismatch at p=%v: %v != %v", q, got, orig)
+		}
+	}
+}
+
+// TestSerializeProtoBytesEmitsRawF64 is the P0-1 guard: the default production
+// emit path (SerializeProtoBytes, used by the OTel-SDK KLL aggregator and the
+// backend-facing producers) MUST emit the raw items[] form — never the
+// value-offset fixed-point form the ASAPQuery-backend decoder cannot read.
+// Uses an integer-ish series that the fixed-point encoder WOULD otherwise
+// happily pick scale 0 for, so this fails loudly if the default ever regresses
+// back to fixed-point.
+func TestSerializeProtoBytesEmitsRawF64(t *testing.T) {
+	values := make([]float64, 5000)
+	for i := range values {
+		values[i] = float64(i + 1) // integer-exact → tempts the fixed-point path
+	}
+	s := buildKLL(t, 200, 42, values)
+	want := retained(s)
+
+	b, err := s.SerializeProtoBytes()
+	if err != nil {
+		t.Fatalf("SerializeProtoBytes: %v", err)
+	}
+
+	var env envpb.SketchEnvelope
+	if err := proto.Unmarshal(b, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	st := env.GetKll()
+	if st == nil {
+		t.Fatal("envelope has no KLLState")
+	}
+	if len(st.GetResiduals()) != 0 {
+		t.Fatalf("SerializeProtoBytes must NOT emit value-offset residuals (got %d)", len(st.GetResiduals()))
+	}
+	if st.GetValueScale() != 0 || st.GetOffset() != 0 {
+		t.Fatalf("SerializeProtoBytes must leave offset/value_scale zero (got offset=%v scale=%d)",
+			st.GetOffset(), st.GetValueScale())
+	}
+	if len(st.GetItems()) == 0 {
+		t.Fatal("SerializeProtoBytes (raw-f64) must populate items[]")
+	}
+	if len(st.GetItems()) != len(want) {
+		t.Fatalf("items[] length %d != retained %d", len(st.GetItems()), len(want))
+	}
+
+	// Round-trip through the same dual-reader the backend mirrors: bit-exact
+	// retained set and identical quantiles.
+	got, err := DeserializeKLLSketchFromProtoBytes(b)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	for i := range want {
+		if got.items[i] != want[i] {
+			t.Fatalf("raw-f64 round-trip item mismatch at %d: %v != %v", i, got.items[i], want[i])
+		}
+	}
+	for _, q := range []float64{0.0, 0.25, 0.5, 0.75, 0.99, 1.0} {
+		if got.Quantile(q) != s.Quantile(q) {
+			t.Fatalf("quantile mismatch at p=%v: %v != %v", q, got.Quantile(q), s.Quantile(q))
 		}
 	}
 }
@@ -291,6 +355,61 @@ func TestRustGoldenDecodesInGo(t *testing.T) {
 	}
 	if s.Quantile(0.0) != 1.0 || s.Quantile(1.0) != 50.0 {
 		t.Fatalf("rust golden quantiles p0=%v p100=%v", s.Quantile(0.0), s.Quantile(1.0))
+	}
+}
+
+// TestNegativeValueScaleRoundTrip is the P1-3 guard: the only pinned golden was
+// scale==0 (integers). This exercises a NEGATIVE value_scale (fractional /
+// milli-resolution) so the fractional fixed-point path is round-trip-verified
+// and a Rust-side golden can be pinned from the captured hex. Values 100.000,
+// 100.001, …, 100.000+0.001*(n-1) are exactly representable at scale -3.
+func TestNegativeValueScaleRoundTrip(t *testing.T) {
+	const n = 64
+	values := make([]float64, n)
+	for i := range values {
+		values[i] = 100.0 + float64(i)*0.001
+	}
+	s := buildKLL(t, 200, 99, values) // k=200, n<k → no compaction, exact set
+	want := retained(s)
+
+	env, err := s.SerializePortable()
+	if err != nil {
+		t.Fatalf("SerializePortable: %v", err)
+	}
+	st := env.GetKll()
+	if len(st.GetResiduals()) == 0 {
+		t.Fatal("milli-decimal series should use the value-offset form")
+	}
+	if st.GetValueScale() >= 0 {
+		t.Fatalf("expected a NEGATIVE value_scale, got %d", st.GetValueScale())
+	}
+	if len(st.GetItems()) != 0 {
+		t.Fatal("value-offset form must leave items[] empty")
+	}
+
+	// Stable golden hex (producer/hash_spec cleared) for cross-repo pinning.
+	env.Producer = nil
+	env.HashSpec = nil
+	b, err := proto.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	t.Logf("GO_NEG_SCALE_GOLDEN_HEX scale=%d offset=%v (%d bytes):\n%s",
+		st.GetValueScale(), st.GetOffset(), len(b), hex.EncodeToString(b))
+
+	// Round-trip bit-exact through the dual-reader.
+	got, err := DeserializeKLLSketchFromProtoBytes(b)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	for i := range want {
+		if got.items[i] != want[i] {
+			t.Fatalf("neg-scale round-trip mismatch at %d: %v != %v", i, got.items[i], want[i])
+		}
+	}
+	if got.Quantile(0.0) != want[0] || got.Quantile(1.0) != want[len(want)-1] {
+		t.Fatalf("neg-scale quantiles p0=%v p100=%v want %v/%v",
+			got.Quantile(0.0), got.Quantile(1.0), want[0], want[len(want)-1])
 	}
 }
 

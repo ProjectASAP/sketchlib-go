@@ -38,6 +38,8 @@ import (
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/sketches/ElasticSKetch"
 	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
 	kll "github.com/ProjectASAP/sketchlib-go/sketches/KLL"
+
+	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
 )
 
 func TestXtestProducer(t *testing.T) {
@@ -85,7 +87,10 @@ func TestXtestProducer(t *testing.T) {
 		sk.Update(float64(i))
 	}
 	t.Logf("[KLL] Step 3/3 — p50≈%.1f  p99≈%.1f", sk.Quantile(0.50), sk.Quantile(0.99))
-	writeEnvelope(t, outDir, "kll.pb", tmust(sk.SerializePortable()))
+	// Emit the RAW-F64 items[] form (the wire shape the ASAPQuery-backend
+	// runtime KLL decoder reconstructs); the value-offset fixed-point form is
+	// not consumable there. See SerializeProtoBytes / KLLWrapper.Snapshot.
+	writeEnvelope(t, outDir, "kll.pb", tmust(sk.SerializePortableRawF64()))
 
 	// -----------------------------------------------------------------------
 	// DDSketch
@@ -116,6 +121,30 @@ func TestXtestProducer(t *testing.T) {
 	}
 	t.Logf("[HLL] Step 3/3 — cardinality≈%d (expect ~50000)", h.Estimate())
 	writeEnvelope(t, outDir, "hll.pb", tmust(h.SerializePortable()))
+
+	// -----------------------------------------------------------------------
+	// HLL (low cardinality → SPARSE registers, proto tag 7)
+	// -----------------------------------------------------------------------
+	// The default 50 000-key HLL above lands DENSE; below ~6000 non-zero
+	// registers the encoder emits the SPARSE registers_sparse field (tag 7),
+	// which is what most real-world HLLs now emit. This fixture pins that path
+	// for the cross-language consumer (which dual-reads tag 7 via
+	// registers_from_state). Written as a separate, optional file so existing
+	// dense-only consumer slots are unaffected.
+	t.Log()
+	t.Log("[HLL/sparse] Step 1/3 — Create HyperLogLog sketch")
+	hSparse := hll.NewHyperLogLog()
+	t.Log("[HLL/sparse] Step 2/3 — Insert 500 distinct keys (sparse-encoded)")
+	for i := 0; i < 500; i++ {
+		hSparse.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("hllsparse:%d", i))))
+	}
+	sparseEnv := tmust(hSparse.SerializePortable()).(*envpb.SketchEnvelope)
+	if sparseEnv.GetHll().GetRegistersSparse() == nil {
+		t.Fatal("[HLL/sparse] expected SPARSE (tag 7) encoding at 500 keys")
+	}
+	t.Logf("[HLL/sparse] Step 3/3 — cardinality≈%d (expect ~500), sparse tag 7 populated",
+		hSparse.Estimate())
+	writeEnvelope(t, outDir, "hll_sparse.pb", sparseEnv)
 
 	// -----------------------------------------------------------------------
 	// CountSketch

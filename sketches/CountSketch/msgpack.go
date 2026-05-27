@@ -2,10 +2,34 @@ package countsketch
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/ProjectASAP/sketchlib-go/wire/asapmsgpack"
 )
+
+// integralCellDelta converts a float64 cell delta to its exact int64 value,
+// returning ok=false when the delta is fractional. The msgpack-heap DELTA
+// wire carries cells as i64 (cross-repo contract with the ASAPQuery-backend's
+// `cells: Vec<(u32,u32,i64)>` decode), while the FULL frame's matrix is f64.
+// A fractional/weighted cell therefore cannot be represented losslessly on the
+// delta wire, and truncating it would make a window-1 full frame and a
+// window-2 delta-against-empty reconstruct to DIFFERENT matrices (and would
+// silently vanish |Δ|<1 cells). Returning ok=false lets the caller reject the
+// delta and fall back to the lossless full f64 frame instead of truncating.
+func integralCellDelta(df float64) (int64, bool) {
+	if math.IsNaN(df) || math.IsInf(df, 0) {
+		return 0, false
+	}
+	r := math.Round(df)
+	if r != df { // fractional (or beyond f64 integer precision)
+		return 0, false
+	}
+	if r > math.MaxInt64 || r < math.MinInt64 {
+		return 0, false
+	}
+	return int64(r), true
+}
 
 // SerializeMsgpack emits the MessagePack wire format ASAPQuery-backend
 // decodes when the modified-OTLP `CountSketchDataPoint.encoding` is
@@ -92,12 +116,27 @@ func (s *CountSketch) SerializeMsgpackWithHeapDelta(
 		baseRow := base.Count[r]
 		curRow := s.Count[r]
 		for c := 0; c < s.Cols; c++ {
-			dc := int64(curRow[c] - baseRow[c])
-			if dc != 0 && (dc <= -int64(threshold) || dc >= int64(threshold)) {
-				cells = append(cells, asapmsgpack.HeapCellDelta{
-					Row: uint32(r), Col: uint32(c), DCount: dc,
-				})
+			df := curRow[c] - baseRow[c]
+			// Threshold compared on the float magnitude (not a truncated int)
+			// so a fractional threshold like 0.5 behaves as written and
+			// sub-unit deltas are not silently mis-filtered.
+			if df == 0 || math.Abs(df) < threshold {
+				continue
 			}
+			dc, ok := integralCellDelta(df)
+			if !ok {
+				// Fractional/weighted cell: the i64 delta wire cannot carry it
+				// losslessly. Reject so the caller emits the full f64 frame
+				// (which DOES preserve fractional cells), keeping full ≡
+				// delta-against-empty reconstruction exact.
+				return nil, fmt.Errorf(
+					"countsketch: SerializeMsgpackWithHeapDelta: cell (%d,%d) delta %v is "+
+						"non-integral; the msgpack-heap delta wire is integer-only "+
+						"(use the full frame for weighted/fractional sketches)", r, c, df)
+			}
+			cells = append(cells, asapmsgpack.HeapCellDelta{
+				Row: uint32(r), Col: uint32(c), DCount: dc,
+			})
 		}
 	}
 	heap := s.buildWireHeap(heapSize)
@@ -174,9 +213,47 @@ func (s *CountSketch) ApplyMsgpackWithHeapDelta(buf []byte) error {
 // IsMsgpackWithHeapDelta reports whether buf is a DELTA-HEAP frame
 // (4-element array with a leading `is_delta=true` marker), as opposed to a
 // full heap frame (3-element array) or any other payload.
+//
+// It only PEEKS the framing prefix — the outer array header (which must encode
+// length 4) followed by the first element being msgpack `true` (0xc3) — rather
+// than fully decoding the matrix delta + heap (which on a large sparse frame is
+// O(cells) work just to return a bool). The full frame is a 3-element array and
+// any non-delta payload either has a different array length or a non-true first
+// element, so this prefix is a sufficient and unambiguous discriminator (the
+// two frame shapes are proven distinct by the wire tests).
 func IsMsgpackWithHeapDelta(buf []byte) bool {
-	_, _, _, _, _, err := asapmsgpack.UnmarshalCountSketchWithHeapDelta(buf)
-	return err == nil
+	// Outer array length must be exactly 4. rmp_serde emits a fixarray
+	// (0x90|len) for our 4-element frame, but accept array16/array32 too for
+	// robustness against any future re-encoding.
+	if len(buf) < 2 {
+		return false
+	}
+	var hdr int
+	var rest []byte
+	switch b := buf[0]; {
+	case b&0xf0 == 0x90: // fixarray
+		hdr = int(b & 0x0f)
+		rest = buf[1:]
+	case b == 0xdc: // array16
+		if len(buf) < 3 {
+			return false
+		}
+		hdr = int(buf[1])<<8 | int(buf[2])
+		rest = buf[3:]
+	case b == 0xdd: // array32
+		if len(buf) < 5 {
+			return false
+		}
+		hdr = int(buf[1])<<24 | int(buf[2])<<16 | int(buf[3])<<8 | int(buf[4])
+		rest = buf[5:]
+	default:
+		return false
+	}
+	if hdr != 4 || len(rest) == 0 {
+		return false
+	}
+	// First element must be msgpack true (the is_delta marker).
+	return rest[0] == 0xc3
 }
 
 // DeserializeMsgpackWithHeapMatrix rebuilds a CountSketch (matrix only,
