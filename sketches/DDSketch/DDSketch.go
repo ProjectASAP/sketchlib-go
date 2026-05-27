@@ -135,6 +135,48 @@ type DDSketch struct {
 	sum   float64
 	min   float64
 	max   float64
+
+	// sampler implements optional NitroSketch geometric skip-sampling. When nil
+	// (the default) every value is recorded and the sketch is byte-identical to
+	// an unsampled one. When set with p<1, a Geometric(p)-distributed run of
+	// values is skipped after each admitted one — skipping the WHOLE Update
+	// (bucket-index mapping + store grow + increment), so the CPU saving is real
+	// (the skip decision is value-independent, unlike a hash-determined filter).
+	// RAW sampled bucket counts are stored; quantiles are rank-preserving and
+	// need no rescale, while a total-count query rescales ×1/p. The probability
+	// rides on the SketchEnvelope (see SerializePortable), never inside
+	// DDSketchState, so downstream literal constructors are unaffected.
+	sampler *common.GeometricSampler
+}
+
+// WithSampleP enables NitroSketch geometric skip-sampling at probability p in
+// (0,1]. p>=1 disables sampling (exact, the default no-op). The seed makes the
+// admitted subset reproducible. Returns the receiver for fluent construction.
+func (d *DDSketch) WithSampleP(p float64, seed int64) *DDSketch {
+	if p >= 1.0 {
+		d.sampler = nil
+		return d
+	}
+	d.sampler = common.NewGeometricSampler(p, seed)
+	return d
+}
+
+// wireSampleP returns the sampling probability to stamp on the envelope (0.0
+// when unsampled = exact).
+func (d *DDSketch) wireSampleP() float64 {
+	if d.sampler == nil {
+		return 0.0
+	}
+	return d.sampler.P()
+}
+
+// admit reports whether the next value should be recorded. Always true when no
+// sampler is configured.
+func (d *DDSketch) admit() bool {
+	if d.sampler == nil {
+		return true
+	}
+	return d.sampler.Admit()
 }
 
 func NewDDSketch(alpha float64) *DDSketch {
@@ -180,6 +222,11 @@ func (d *DDSketch) TypeName() string {
 func (d *DDSketch) Update(v float64) {
 	if !(v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)) {
 		return // ignore invalid or non-positive
+	}
+	// Geometric skip-sampling: when sampling is on, skip the whole record
+	// (mapping + store grow + increment) for non-admitted values.
+	if !d.admit() {
+		return
 	}
 
 	d.count++
