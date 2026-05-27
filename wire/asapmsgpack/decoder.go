@@ -146,6 +146,21 @@ func (d *decoder) readInt() (int64, error) {
 	return 0, fmt.Errorf("asapmsgpack: expected int, got 0x%02x", b)
 }
 
+// readBool reads a msgpack bool (0xc3 = true, 0xc2 = false).
+func (d *decoder) readBool() (bool, error) {
+	b, err := d.readByte()
+	if err != nil {
+		return false, err
+	}
+	switch b {
+	case 0xc3:
+		return true, nil
+	case 0xc2:
+		return false, nil
+	}
+	return false, fmt.Errorf("asapmsgpack: expected bool (0xc2/0xc3), got 0x%02x", b)
+}
+
 func (d *decoder) readFloat64() (float64, error) {
 	b, err := d.readByte()
 	if err != nil {

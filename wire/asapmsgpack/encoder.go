@@ -110,6 +110,16 @@ func (e *encoder) writeInt(v int64) {
 	}
 }
 
+// writeBool emits a msgpack bool (0xc3 = true, 0xc2 = false). Matches
+// rmp_serde's serialization of a Rust `bool`.
+func (e *encoder) writeBool(v bool) {
+	if v {
+		e.buf = append(e.buf, 0xc3)
+	} else {
+		e.buf = append(e.buf, 0xc2)
+	}
+}
+
 // writeFloat64 emits a msgpack float64 (0xcb + 8 big-endian IEEE-754
 // bytes). Matches rmp_serde: no float32 compaction.
 func (e *encoder) writeFloat64(v float64) {
