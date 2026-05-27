@@ -40,8 +40,15 @@ func countNonZero(regs []uint8) int {
 // HLLSparseRegisters message using the (index_delta, value) uvarint layout
 // documented on the proto message. regs is the full dense register array.
 func encodeSparseRegisters(regs []uint8) *hllpb.HLLSparseRegisters {
-	// Worst-case 2 bytes (index delta) + 1 byte (value) per non-zero register.
-	packed := make([]byte, 0, len(regs))
+	// Size the backing array to the actual worst case: each non-zero register
+	// costs up to 2 bytes (index-delta uvarint, since a delta can exceed 127)
+	// plus 1 byte (value uvarint, register values are 1..=51 → always 1 byte),
+	// i.e. up to 3 bytes per non-zero register. The previous cap of len(regs)
+	// (== num_registers, e.g. 16384) under-allocates whenever the encoded size
+	// exceeds the register count, forcing a mid-encode realloc; counting the
+	// non-zeros first and reserving nonzero*3 avoids that.
+	nonzero := countNonZero(regs)
+	packed := make([]byte, 0, nonzero*3)
 	var buf [binary.MaxVarintLen64]byte
 
 	prev := 0

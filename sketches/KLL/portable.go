@@ -158,8 +158,17 @@ func decodeValueOffset(offset float64, scale int32, residuals []int64) []float64
 }
 
 // SerializeProtoBytes serializes the KLLSketch as a proto-encoded SketchEnvelope.
+//
+// It emits the RAW-F64 items[] form (see SerializePortableRawF64), NOT the
+// value-offset fixed-point form. The ASAPQuery-backend runtime KLL decoder
+// reconstructs only the raw items[] representation; a fixed-point frame
+// (offset/value_scale/residuals, items[] empty) decodes there as a degenerate
+// empty sketch (observed in the field as `KllState.k must be >= 8 (got 0)` for
+// integer-valued metrics whose exact-integer samples always trip the
+// fixed-point path). The fixed-point optimization remains available behind the
+// explicit SerializePortable() opt-in; no default production emit path uses it.
 func (s *KLLSketch) SerializeProtoBytes() ([]byte, error) {
-	env, err := s.SerializePortable()
+	env, err := s.SerializePortableRawF64()
 	if err != nil {
 		return nil, err
 	}

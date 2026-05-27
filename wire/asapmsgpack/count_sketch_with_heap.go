@@ -83,10 +83,19 @@ func MarshalCountSketchWithHeap(
 }
 
 // HeapCellDelta is one signed (row, col, Δcount) entry of a sparse
-// CountSketch-with-heap matrix delta on the wire. The delta count is an
-// integer (CountSketch cells are stored as signed i64 on the backend); it
-// is carried as a msgpack int so the backend reads it via the same
-// positional-array contract as the rest of this format.
+// CountSketch-with-heap matrix delta on the wire.
+//
+// DCount is an INTEGER (i64) by cross-repo contract: the ASAPQuery-backend
+// decodes this frame with rmp_serde into `cells: Vec<(u32, u32, i64)>`
+// (data_plane count_min_sketch_with_heap_accumulator.rs::MatrixDeltaWire), so
+// the cell delta MUST be a msgpack int — emitting an f64 here would fail the
+// backend's typed decode. The FULL frame's matrix, by contrast, is f64
+// (writeFloat64Matrix); to keep a window-1 full frame and a window-2
+// delta-against-empty reconstruct to IDENTICAL matrices, the delta path is
+// therefore restricted to integer-valued cells. The producer
+// (SerializeMsgpackWithHeapDelta) enforces this: any fractional/weighted cell
+// makes it return an error so the caller falls back to the lossless full f64
+// frame. See MarshalCountSketchWithHeapDelta, which re-validates here.
 type HeapCellDelta struct {
 	Row, Col uint32
 	DCount   int64
@@ -127,6 +136,25 @@ func MarshalCountSketchWithHeapDelta(
 	heap []HeapItem,
 	heapSize uint64,
 ) ([]byte, error) {
+	// Bounds validation, mirroring MarshalCountSketchWithHeap's rectangular
+	// guard (P2c). The delta frame is sparse, so there is no dense matrix to
+	// shape-check; instead validate that every sparse cell addresses a
+	// position inside the declared rows×cols grid. This catches a producer
+	// emitting a cell the backend would silently drop (cells outside dims are
+	// skipped on apply) — surfacing the dimension bug at marshal time instead.
+	for i := range cells {
+		c := &cells[i]
+		if uint64(c.Row) >= rows {
+			return nil, fmt.Errorf(
+				"asapmsgpack: CountSketchWithHeapDelta cell %d row %d out of range (rows=%d)",
+				i, c.Row, rows)
+		}
+		if uint64(c.Col) >= cols {
+			return nil, fmt.Errorf(
+				"asapmsgpack: CountSketchWithHeapDelta cell %d col %d out of range (cols=%d)",
+				i, c.Col, cols)
+		}
+	}
 	e := newEncoder()
 	// Outer wire: 4-element array (distinct from the 3-element full frame).
 	e.writeArrayLen(4)

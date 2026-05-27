@@ -2,10 +2,54 @@ package countminsketch
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
+
+// TestDelta_FullEqualsDeltaAgainstEmpty is the P0-2 guard: for integer cells a
+// FULL frame and a DELTA-against-empty must reconstruct to identical matrices.
+func TestDelta_FullEqualsDeltaAgainstEmpty(t *testing.T) {
+	cur := newCMS(t)
+	cur.Count[0][0] = 7
+	cur.Count[1][2] = 13
+	cur.Sum[0][0] = 7
+	cur.Sum2[0][0] = 7
+	cur.Sum[1][2] = 13
+	cur.Sum2[1][2] = 13
+
+	empty := newCMS(t)
+	delta, err := ComputeDelta(empty, cur, 1.0)
+	if err != nil {
+		t.Fatalf("ComputeDelta: %v", err)
+	}
+	recon := newCMS(t)
+	ApplyDelta(recon, delta)
+	for r := 0; r < cur.Rows; r++ {
+		for c := 0; c < cur.Cols; c++ {
+			if recon.Count[r][c] != cur.Count[r][c] {
+				t.Fatalf("Count[%d][%d]: delta=%v full=%v", r, c, recon.Count[r][c], cur.Count[r][c])
+			}
+		}
+	}
+}
+
+// TestDelta_RejectsFractionalCells is the P0-2 guard: a fractional cell makes
+// ComputeDelta error (the i64 sparse delta wire cannot carry it), so the caller
+// falls back to the lossless full frame instead of truncating.
+func TestDelta_RejectsFractionalCells(t *testing.T) {
+	cur := newCMS(t)
+	cur.Count[0][0] = 2.5 // fractional / weighted
+	empty := newCMS(t)
+	_, err := ComputeDelta(empty, cur, 0.1)
+	if err == nil {
+		t.Fatal("expected error for fractional cell delta, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-integral") {
+		t.Fatalf("error should mention non-integral, got: %v", err)
+	}
+}
 
 // helpers
 

@@ -127,6 +127,51 @@ func TestMarshalCountSketchWithHeapDelta_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestMarshalCountSketchWithHeapDelta_RustGolden is the P1-2 cross-repo
+// contract pin for the DELTA-HEAP frame. The production decoder is the Rust
+// ASAPQuery-backend (data_plane count_min_sketch_with_heap_accumulator.rs),
+// which decodes this frame via rmp_serde into
+// `(is_delta:bool, (rows:u32,cols:u32,cells:Vec<(u32,u32,i64)>), Vec<(String,f64)>, u64)`.
+// These two hex strings are the EXACT byte goldens the Rust side pins and
+// decodes (its GO_DELTA_HEAP_GOLDEN_HEX and GO_PARITY_HEX constants). Pinning
+// them here as well means a drift in this Go encoder fails loudly on BOTH
+// sides of the contract, not only in the Rust repo.
+//
+// Note the cells are i64 (msgpack int, e.g. -4 → 0xfc negative fixint,
+// 1_000_000 → 0xce uint32, 50 → 0x32 positive fixint) — the integer-only delta
+// wire that the producer (SerializeMsgpackWithHeapDelta) enforces.
+func TestMarshalCountSketchWithHeapDelta_RustGolden(t *testing.T) {
+	// Case 1 — Rust GO_DELTA_HEAP_GOLDEN_HEX inputs.
+	got1, err := MarshalCountSketchWithHeapDelta(5, 1024,
+		[]HeapCellDelta{
+			{Row: 0, Col: 1, DCount: 50},
+			{Row: 1, Col: 3, DCount: -4},
+			{Row: 4, Col: 1023, DCount: 1_000_000},
+		},
+		[]HeapItem{{Key: "/checkout", Value: 50}, {Key: "/cart", Value: 20}},
+		20)
+	if err != nil {
+		t.Fatalf("marshal case1: %v", err)
+	}
+	const want1 = "94c39305cd04009393000132930103fc9304cd03ffce000f42409292a92f636865636b6f7574cb404900000000000092a52f63617274cb403400000000000014"
+	if h := hex.EncodeToString(got1); h != want1 {
+		t.Fatalf("case1 byte mismatch (cross-repo contract drift):\n got=%s\nwant=%s", h, want1)
+	}
+
+	// Case 2 — Rust GO_PARITY_HEX inputs.
+	got2, err := MarshalCountSketchWithHeapDelta(5, 4,
+		[]HeapCellDelta{{Row: 0, Col: 0, DCount: 50}, {Row: 1, Col: 1, DCount: 50}},
+		[]HeapItem{{Key: "k", Value: 50}},
+		20)
+	if err != nil {
+		t.Fatalf("marshal case2: %v", err)
+	}
+	const want2 = "94c39305049293000032930101329192a16bcb404900000000000014"
+	if h := hex.EncodeToString(got2); h != want2 {
+		t.Fatalf("case2 byte mismatch (cross-repo contract drift):\n got=%s\nwant=%s", h, want2)
+	}
+}
+
 // TestDeltaFrame_DistinctFromFullFrame guards the framing invariant: a delta
 // frame (4-element array, is_delta marker) is NOT decodable as a full frame,
 // and a full frame is NOT decodable as a delta frame. This is what lets the

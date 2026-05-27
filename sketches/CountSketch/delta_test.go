@@ -2,10 +2,52 @@ package countsketch
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
+
+// TestCSDelta_FullEqualsDeltaAgainstEmpty is the P0-2 guard: for integer cells
+// a FULL snapshot and a DELTA-against-empty reconstruct to identical matrices.
+// CountSketch cells are signed, so include a negative.
+func TestCSDelta_FullEqualsDeltaAgainstEmpty(t *testing.T) {
+	cur := newCS(t)
+	cur.Count[0][0] = 9
+	cur.Count[2][5] = -4
+	cur.Count[4][100] = 250
+
+	empty := newCS(t)
+	delta, err := ComputeDelta(empty, cur, 1.0)
+	if err != nil {
+		t.Fatalf("ComputeDelta: %v", err)
+	}
+	recon := newCS(t)
+	ApplyDelta(recon, delta)
+	for r := 0; r < cur.Rows; r++ {
+		for c := 0; c < cur.Cols; c++ {
+			if recon.Count[r][c] != cur.Count[r][c] {
+				t.Fatalf("Count[%d][%d]: delta=%v full=%v", r, c, recon.Count[r][c], cur.Count[r][c])
+			}
+		}
+	}
+}
+
+// TestCSDelta_RejectsFractionalCells is the P0-2 guard: a fractional/weighted
+// cell makes ComputeDelta error so the caller falls back to the lossless full
+// frame (the i64 sparse delta wire cannot carry a fractional Δ losslessly).
+func TestCSDelta_RejectsFractionalCells(t *testing.T) {
+	cur := newCS(t)
+	cur.Count[0][0] = -2.25 // fractional, signed
+	empty := newCS(t)
+	_, err := ComputeDelta(empty, cur, 0.1)
+	if err == nil {
+		t.Fatal("expected error for fractional cell delta, got nil")
+	}
+	if !strings.Contains(err.Error(), "non-integral") {
+		t.Fatalf("error should mention non-integral, got: %v", err)
+	}
+}
 
 func newCS(t *testing.T) *CountSketch {
 	t.Helper()

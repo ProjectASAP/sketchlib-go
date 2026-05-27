@@ -1,13 +1,131 @@
 package hll
 
 import (
+	"encoding/hex"
 	"fmt"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	hllpb "github.com/ProjectASAP/sketchlib-go/proto/hll"
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
 	"google.golang.org/protobuf/proto"
 )
+
+// deterministicSparseHLL builds an HLL with a fixed, hash-independent set of
+// non-zero registers so the encoded bytes are stable and mirror exactly what a
+// Rust producer would emit for the same register array. Used for the
+// cross-language sparse (tag 7) golden.
+func deterministicSparseHLL() *HyperLogLog {
+	h := NewHyperLogLog()
+	regs := h.Registers.AsMutSlice()
+	// A handful of registers at known indices with known values. Index deltas
+	// span both <128 (1-byte uvarint) and >=128 (2-byte uvarint) to exercise
+	// the multi-byte index-delta path the Rust decoder must read.
+	set := map[int]uint8{0: 3, 5: 12, 200: 7, 16383: 51}
+	for i, v := range set {
+		regs[i] = v
+	}
+	return h
+}
+
+// TestSparseRegistersTag7_CrossLanguageGolden is the P1-1 guard: it pins the
+// exact wire bytes of the SPARSE registers (proto tag 7,
+// HLLSparseRegisters.packed) for a deterministic register array and verifies a
+// full round-trip. The sparse path is now the DEFAULT for most real HLLs
+// (<~6000 non-zero registers) yet previously had NO cross-language fixture —
+// the xtest producer only inserted enough keys to land DENSE.
+//
+// The packed layout (index-delta uvarint, value uvarint; first delta is the
+// absolute index) is the cross-repo contract decoded by asap_sketchlib's
+// `decode_sparse_registers` / `registers_from_state`. Pinning the bytes here
+// fails loudly if the Go encoder drifts from that layout.
+func TestSparseRegistersTag7_CrossLanguageGolden(t *testing.T) {
+	h := deterministicSparseHLL()
+	want := append([]uint8(nil), h.RegisterSlice()...)
+
+	env, err := h.SerializePortable()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	st := env.GetHll()
+	sp := st.GetRegistersSparse()
+	if sp == nil {
+		t.Fatal("expected SPARSE (tag 7) encoding")
+	}
+	if len(st.GetRegisters()) != 0 {
+		t.Fatal("dense field must be empty when sparse is used")
+	}
+	if sp.GetNumRegisters() != uint32(HLLRegisterCount) {
+		t.Fatalf("num_registers=%d want %d", sp.GetNumRegisters(), HLLRegisterCount)
+	}
+
+	// Golden packed blob: (delta,value) uvarint pairs, ascending by index.
+	//   idx 0     : delta 0      -> 00, value 3  -> 03
+	//   idx 5     : delta 5      -> 05, value 12 -> 0c
+	//   idx 200   : delta 195    -> c301 (uvarint), value 7  -> 07
+	//   idx 16383 : delta 16183  -> b77e (uvarint), value 51 -> 33
+	const wantPackedHex = "0003050cc30107b77e33"
+	if got := hex.EncodeToString(sp.GetPacked()); got != wantPackedHex {
+		t.Fatalf("sparse packed bytes drifted from cross-repo contract:\n got=%s\nwant=%s",
+			got, wantPackedHex)
+	}
+
+	// Round-trip through the dual-reader (mirrors the Rust registers_from_state).
+	data, err := proto.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	gotSketch, err := DeserializeHyperLogLogFromProtoBytes(data)
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	assertRegistersEqual(t, want, gotSketch.RegisterSlice())
+}
+
+// TestHLLDeltaPackedUpdates_CrossLanguageGolden is the P1-1 companion: it pins
+// the HLLDelta.packed_updates blob (the sparse register-increase delta) for a
+// deterministic set of increased registers and verifies a full round-trip.
+// packed_updates shares the (index-delta, value) uvarint layout with the
+// sparse full state, so the same Rust unpacker reads it.
+func TestHLLDeltaPackedUpdates_CrossLanguageGolden(t *testing.T) {
+	// Snapshot: empty. Current: the deterministic sparse register array, so
+	// every non-zero register is an "increase" and appears in the delta.
+	snap := NewHyperLogLog()
+	current := &HyperLogLog{Registers: storage.Vector1DFromSlice(deterministicSparseHLL().RegisterSlice())}
+
+	d := ComputeRegisterDelta(snap, current)
+	if len(d.Updates) != 4 {
+		t.Fatalf("expected 4 register updates, got %d", len(d.Updates))
+	}
+
+	b, err := SerializeRegisterDelta(d)
+	if err != nil {
+		t.Fatalf("serialize delta: %v", err)
+	}
+	var msg hllpb.HLLDelta
+	if err := proto.Unmarshal(b, &msg); err != nil {
+		t.Fatalf("unmarshal delta: %v", err)
+	}
+	// Same (delta,value) layout as the sparse full state above.
+	const wantPackedHex = "0003050cc30107b77e33"
+	if got := hex.EncodeToString(msg.GetPackedUpdates()); got != wantPackedHex {
+		t.Fatalf("packed_updates bytes drifted from cross-repo contract:\n got=%s\nwant=%s",
+			got, wantPackedHex)
+	}
+
+	// Round-trip: apply the decoded delta onto empty and compare to current.
+	decoded, err := DeserializeRegisterDelta(b)
+	if err != nil {
+		t.Fatalf("deserialize delta: %v", err)
+	}
+	target := NewHyperLogLog()
+	ApplyRegisterDelta(target, decoded)
+	for i, v := range current.RegisterSlice() {
+		if target.RegisterSlice()[i] != v {
+			t.Fatalf("register[%d] after delta apply: got %d want %d", i, target.RegisterSlice()[i], v)
+		}
+	}
+}
 
 // buildHLL inserts `card` distinct keys and returns the populated sketch.
 func buildHLL(card int) *HyperLogLog {

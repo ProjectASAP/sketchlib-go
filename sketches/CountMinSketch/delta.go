@@ -2,9 +2,32 @@ package countminsketch
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
+
+// integralCellDelta converts a float64 cell delta to its exact int64 value,
+// returning ok=false when the delta is fractional or out of i64 range. The
+// CMS sparse delta wire carries cells as i64 (proto d_counts is sint64), while
+// the full-frame counters are f64; a fractional/weighted cell cannot be
+// represented losslessly on the delta wire, so the caller rejects the delta
+// and falls back to the lossless full frame rather than truncating (which
+// would make a window-1 full frame and a window-2 delta-against-empty
+// reconstruct to different matrices, and silently vanish |Δ|<1 cells).
+func integralCellDelta(df float64) (int64, bool) {
+	if math.IsNaN(df) || math.IsInf(df, 0) {
+		return 0, false
+	}
+	r := math.Round(df)
+	if r != df {
+		return 0, false
+	}
+	if r > math.MaxInt64 || r < math.MinInt64 {
+		return 0, false
+	}
+	return int64(r), true
+}
 
 // CellDelta holds the additive delta for a single (row, col) cell.
 // DSum and DSum2 are dropped: the receiver reconstructs Sum and Sum2
@@ -83,12 +106,24 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 		curCount := current.Count[r]
 
 		for c := 0; c < cols; c++ {
-			dc := int64(curCount[c] - snapCount[c])
-			if dc < 0 && float64(-dc) >= threshold {
-				d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
-			} else if dc > 0 && float64(dc) >= threshold {
-				d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
+			df := curCount[c] - snapCount[c]
+			// Threshold on the float magnitude so a fractional threshold
+			// behaves as written and |Δ|<1 cells are not silently dropped via
+			// int truncation.
+			if df == 0 || math.Abs(df) < threshold {
+				continue
 			}
+			dc, ok := integralCellDelta(df)
+			if !ok {
+				// i64 cell wire (proto d_counts sint64) cannot carry a
+				// fractional/weighted delta losslessly; reject so the caller
+				// emits the lossless full frame instead of truncating.
+				return nil, fmt.Errorf(
+					"countminsketch: ComputeDelta: cell (%d,%d) delta %v is non-integral; "+
+						"the sparse delta wire is integer-only (use the full frame for "+
+						"weighted/fractional sketches)", r, c, df)
+			}
+			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
 		}
 		d.L1[r] = current.L1[r] - snapshot.L1[r]
 		d.L2[r] = current.L2[r] - snapshot.L2[r]
