@@ -44,7 +44,11 @@ func ComputeRegisterDelta(snapshot, current *HyperLogLog) *RegisterDelta {
 
 // ApplyRegisterDelta applies d to target using max semantics.
 // Each update sets target[index] = max(target[index], value).
+// A sparse target is promoted to dense first (the delta path is dense-oriented).
 func ApplyRegisterDelta(target *HyperLogLog, d *RegisterDelta) {
+	if target.isSparse() {
+		target.promote()
+	}
 	regs := target.Registers.AsMutSlice()
 	for i := range d.Updates {
 		u := &d.Updates[i]

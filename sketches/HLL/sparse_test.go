@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
-	hllpb "github.com/ProjectASAP/sketchlib-go/proto/hll"
 	"github.com/ProjectASAP/sketchlib-go/common/storage"
+	hllpb "github.com/ProjectASAP/sketchlib-go/proto/hll"
 	"google.golang.org/protobuf/proto"
 )
 

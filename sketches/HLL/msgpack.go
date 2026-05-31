@@ -27,8 +27,9 @@ import (
 // consumer ignores these fields for non-HIP variants.
 func (h *HyperLogLog) SerializeMsgpack() ([]byte, error) {
 	// Clone the register bytes so the caller can't mutate the sketch's
-	// backing storage through the returned payload.
-	src := h.Registers.AsSlice()
+	// backing storage through the returned payload. RegisterSlice() materialises
+	// the dense array for a sparse instance (already a fresh copy).
+	src := h.RegisterSlice()
 	registers := make([]byte, len(src))
 	copy(registers, src)
 

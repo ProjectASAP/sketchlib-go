@@ -54,6 +54,25 @@ type HyperLogLog struct {
 	// Stable per key, so frequency does not affect retention. The RAW sampled
 	// registers are stored; the consumer rescales cardinality ×1/p at query.
 	sampleP float64
+
+	// sparse, when non-nil, holds the in-memory sparse register set and means
+	// this instance is in the SPARSE state: the dense Registers array and the
+	// pendingMask are NOT used for register storage (Registers is nil), saving
+	// ~18KB at low cardinality. Inserts go into the sparse store until the
+	// distinct non-zero count reaches SparsePromoteThreshold, at which point the
+	// instance promotes to the dense representation (sparse becomes nil and
+	// Registers is allocated). See inmemory_sparse.go. NewHyperLogLog() starts
+	// dense (sparse == nil) and is byte- and behaviour-identical to before;
+	// NewSparseHyperLogLog() opts into the sparse state.
+	sparse *sparseStore
+
+	// bornSparse records that this instance was created via
+	// NewSparseHyperLogLog(). It controls Reset() semantics: a born-sparse
+	// instance returns to the sparse state on Reset (releasing the dense array +
+	// pendingMask so pooled/SketchSink-reused instances actually free the memory
+	// after a promotion), whereas a born-dense instance clears its registers in
+	// place with zero allocations, exactly as before.
+	bornSparse bool
 }
 
 // NewHyperLogLog returns a new zero-initialized HLL sketch.
@@ -108,6 +127,27 @@ func New() *HyperLogLog {
 	return NewHyperLogLog()
 }
 
+// NewSparseHyperLogLog returns an HLL that starts in the IN-MEMORY SPARSE state:
+// it allocates no dense register array and no pendingMask, storing only its
+// non-zero registers compactly (~18KB saved at low cardinality). It promotes to
+// the dense representation automatically once the distinct non-zero register
+// count reaches SparsePromoteThreshold, after which it is indistinguishable from
+// a NewHyperLogLog() instance.
+//
+// Estimate(), Merge(), Reset() and serialization all return results numerically
+// identical to the dense path (within HLL's error bounds), and Snapshot/Serialize
+// emit BYTE-IDENTICAL proto to a dense instance with the same registers, so the
+// existing wire format and its cross-language parity are preserved. The
+// OctoSketch delta path (ProcessInput/MergeDelta/Flush) and register-level
+// accessors transparently promote-to-dense on first use.
+//
+// This is opt-in: NewHyperLogLog() remains dense and fully unchanged.
+func NewSparseHyperLogLog() *HyperLogLog {
+	h := &HyperLogLog{sampleP: 1.0, bornSparse: true}
+	h.initSparse()
+	return h
+}
+
 // clearPending resets the pending dirty-register state.
 func (h *HyperLogLog) clearPending() {
 	for i := range h.pendingMask {
@@ -121,8 +161,15 @@ func (h *HyperLogLog) Debug() {
 	fmt.Println(h.RegisterSlice())
 }
 
-// RegisterSlice returns a direct view of register memory.
+// RegisterSlice returns the dense register array. For a dense instance this is a
+// direct view of register memory. For a sparse instance it materialises a fresh
+// dense array from the sparse entries WITHOUT promoting (the returned slice is a
+// copy; mutating it does not affect the sparse store). Callers that need to
+// mutate registers in place should be on a dense instance.
 func (h *HyperLogLog) RegisterSlice() []uint8 {
+	if h.isSparse() {
+		return h.sparseDenseRegisters()
+	}
 	return h.Registers.AsSlice()
 }
 
@@ -189,7 +236,6 @@ func (h *HyperLogLog) InsertWithHash(hash uint64) {
 	if h.sampleP > 0 && h.sampleP < 1.0 && !common.KeepKeyByThreshold(hash, h.sampleP) {
 		return
 	}
-	registers := h.Registers.AsMutSlice()
 	// Upper HLLPrecision bits select the register bucket.
 	index := int((hash >> HLLRegisterBits) & uint64(HLLRegisterMask))
 	// Lower HLLRegisterBits bits, left-aligned and with low bits set to 1.
@@ -201,6 +247,12 @@ func (h *HyperLogLog) InsertWithHash(hash uint64) {
 		leadingZeros = maxLeadingZeros
 	}
 
+	if h.isSparse() {
+		h.sparseInsert(index, leadingZeros)
+		return
+	}
+
+	registers := h.Registers.AsMutSlice()
 	if registers[index] < leadingZeros {
 		registers[index] = leadingZeros
 	}
@@ -264,6 +316,13 @@ func (h *HyperLogLog) getHistogram() [HLLRegisterBits + 2]uint32 {
 // Estimate returns the estimated cardinality. Mirrors Rust's HLL
 // `estimate(&self) -> usize` (sketches/hll.rs) — no key argument.
 func (h *HyperLogLog) Estimate() int {
+	if h.isSparse() {
+		// Linear counting in the sparse regime: cheaper than Ertl and more
+		// accurate at low cardinality (HyperLogLog++ behaviour). The Ertl
+		// estimator below is used once dense.
+		return h.sparseLinearEstimate()
+	}
+
 	histogram := h.getHistogram()
 	m := float64(HLLRegisterCount)
 
@@ -291,7 +350,27 @@ func (h *HyperLogLog) QueryWithHash(q common.QueryType, hash uint64) (float64, e
 //
 
 // Reset clears all registers, returning the sketch to its zero state.
+//
+// A born-sparse instance (NewSparseHyperLogLog) returns to the SPARSE state,
+// dropping any dense register array and pendingMask allocated by a prior
+// promotion so the memory is actually released for pooled / reused instances.
+// A born-dense instance clears its registers in place with zero allocations,
+// preserving the previous behaviour exactly.
 func (h *HyperLogLog) Reset() {
+	if h.bornSparse {
+		if h.sparse != nil {
+			// Already sparse: clear the entry slices in place (no realloc).
+			h.sparse.sorted = h.sparse.sorted[:0]
+			h.sparse.temp = h.sparse.temp[:0]
+		} else {
+			// Was promoted to dense: release the dense array + pendingMask and
+			// return to the sparse state.
+			h.Registers = nil
+			h.clearPending()
+			h.sparse = newSparseStore()
+		}
+		return
+	}
 	clear(h.Registers.AsMutSlice())
 	h.clearPending()
 }
@@ -302,6 +381,36 @@ func (h *HyperLogLog) Merge(other common.Sketch) error {
 	o, ok := other.(*HyperLogLog)
 	if !ok {
 		return errors.New("cannot merge: incompatible sketch type")
+	}
+
+	// Sparse ⊕ sparse: apply the other side's entries into this sparse store via
+	// register-wise max. sparseInsert may promote h to dense mid-iteration (when
+	// the combined distinct count crosses the threshold), which nils h.sparse, so
+	// route every entry through applyRegister, which re-checks the state and
+	// writes onto the dense array once promoted.
+	if h.isSparse() && o.isSparse() {
+		o.sparse.forEach(func(index int, rho uint8) {
+			h.applyRegister(index, rho)
+		})
+		return nil
+	}
+
+	// Sparse ⊕ dense: densify this side first, then fall through to the dense
+	// merge so semantics are identical to an all-dense merge.
+	if h.isSparse() {
+		h.promote()
+	}
+
+	// dense ⊕ sparse: apply the other side's sparse entries directly onto this
+	// dense array via register-wise max (no need to materialise the other side).
+	if o.isSparse() {
+		self := h.Registers.AsMutSlice()
+		o.sparse.forEach(func(index int, rho uint8) {
+			if rho > self[index] {
+				self[index] = rho
+			}
+		})
+		return nil
 	}
 
 	if h.Registers.Len() != o.Registers.Len() {
@@ -359,6 +468,12 @@ func (h *HyperLogLog) ProcessInput(input *common.SketchInput, tau float64, emit 
 	if input == nil {
 		return
 	}
+	// The OctoSketch τ-batching path operates on the dense register array and
+	// pendingMask. Promote a sparse instance to dense on first use so this path
+	// is never silently corrupted.
+	if h.isSparse() {
+		h.promote()
+	}
 	index, lz := h.IndexAndLZ(input.CanonicalHash)
 	if _, changed := h.UpdateRegister(index, lz); changed {
 		h.pendingMask[index/64] |= 1 << uint(index%64)
@@ -379,14 +494,23 @@ func (h *HyperLogLog) ProcessInput(input *common.SketchInput, tau float64, emit 
 	}
 }
 
-// RegisterValue returns the current value of register at index.
+// RegisterValue returns the current value of register at index. A sparse
+// instance is promoted to dense first (this is a register-level accessor used by
+// the OctoSketch delta path, which is dense-only).
 func (h *HyperLogLog) RegisterValue(index int) uint8 {
+	if h.isSparse() {
+		h.promote()
+	}
 	return h.Registers.AsSlice()[index]
 }
 
 // UpdateRegister applies max(registers[index], lz). Returns (float64(newVal),
 // true) when the register increased; (float64(currentVal), false) otherwise.
+// A sparse instance is promoted to dense first.
 func (h *HyperLogLog) UpdateRegister(index int, lz uint8) (newVal float64, changed bool) {
+	if h.isSparse() {
+		h.promote()
+	}
 	regs := h.Registers.AsMutSlice()
 	if lz > regs[index] {
 		regs[index] = lz
@@ -396,8 +520,12 @@ func (h *HyperLogLog) UpdateRegister(index int, lz uint8) (newVal float64, chang
 }
 
 // SetRegisterIfGreater writes registers[index] = val when val > registers[index].
-// Used by HLLOcto.MergeDelta to apply max-semantics on received deltas.
+// Used by HLLOcto.MergeDelta to apply max-semantics on received deltas. A sparse
+// instance is promoted to dense first.
 func (h *HyperLogLog) SetRegisterIfGreater(index int, val uint8) {
+	if h.isSparse() {
+		h.promote()
+	}
 	regs := h.Registers.AsMutSlice()
 	if val > regs[index] {
 		regs[index] = val
