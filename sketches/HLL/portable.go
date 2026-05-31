@@ -33,7 +33,11 @@ func (h *HyperLogLog) SerializePortable() (*envpb.SketchEnvelope, error) {
 		Variant:   hllpb.HLLVariant_HLL_VARIANT_DATAFUSION,
 		Precision: HLLPrecision,
 	}
-	setStateRegisters(state, h.Registers.AsSlice())
+	// RegisterSlice() materialises the dense array for a sparse instance without
+	// promoting, so the emitted proto is byte-identical to a dense instance with
+	// the same registers (the existing encoder + cross-language wire format are
+	// untouched).
+	setStateRegisters(state, h.RegisterSlice())
 	return hllEnvelope(state, h.wireSampleP()), nil
 }
 
