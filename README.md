@@ -31,7 +31,7 @@ This library follows several **strict, non-negotiable rules**:
 ## High-Level Execution Flow
 
 ```
-User / OpenTelemetry
+User  
         ↓
 common.FromXxx        (hash computed once)
         ↓
