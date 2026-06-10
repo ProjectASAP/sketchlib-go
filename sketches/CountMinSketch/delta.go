@@ -141,6 +141,48 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 	return d, nil
 }
 
+// ComputeDeltaAgainstEmpty computes the sparse delta of current against an
+// implicit all-zero snapshot of the same dimensions, WITHOUT materializing a
+// zero snapshot sketch. It is the allocation-free fast path for the
+// per-window-reset (PWR) delta contract, where the cached base is always the
+// empty matrix and ComputeDelta(emptyPrev, current) reduces to "encode
+// current's non-zero cells".
+//
+// The result is byte-identical to ComputeDelta(zeroSketch, current, threshold)
+// for a freshly-constructed zeroSketch of current's dimensions: the same
+// threshold test, the same integral-cell rejection, the same cell ordering
+// (row-major), and L1/L2 carried in full (== current's, since the base is
+// zero). Callers SerializeDelta the result exactly as for ComputeDelta.
+func ComputeDeltaAgainstEmpty(current *CountMinSketch, threshold float64) (*Delta, error) {
+	rows, cols := current.Rows, current.Cols
+	d := &Delta{
+		Rows:  uint32(rows),
+		Cols:  uint32(cols),
+		Cells: make([]CellDelta, 0, rows*cols/20), // ~5% fill hint
+		L1:    make([]float64, rows),
+		L2:    make([]float64, rows),
+	}
+	for r := 0; r < rows; r++ {
+		curCount := current.Count[r]
+		for c := 0; c < cols; c++ {
+			df := curCount[c] // snapshot cell is 0
+			if df == 0 || math.Abs(df) < threshold {
+				continue
+			}
+			dc, ok := integralCellDelta(df)
+			if !ok {
+				return nil, fmt.Errorf(
+					"countminsketch: ComputeDeltaAgainstEmpty: cell (%d,%d) delta %v is "+
+						"non-integral; the sparse delta wire is integer-only", r, c, df)
+			}
+			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
+		}
+		d.L1[r] = current.L1[r] // snapshot.L1[r] == 0
+		d.L2[r] = current.L2[r] // snapshot.L2[r] == 0
+	}
+	return d, nil
+}
+
 // HeavyHitterSink receives heavy-hitter (key, count) estimates rebuilt from a
 // delta's HHKeys after the matrix has been merged. It mirrors CountSketch's
 // receiver-side Top-K rebuild (target.TopK.Update). A plain CMS has no such
