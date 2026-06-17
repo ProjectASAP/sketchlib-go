@@ -25,8 +25,12 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
+	if len(bytes) == 0 || bytes[0] != asapmsgpack.MagicCountSketch {
+		t.Fatalf("expected magic-ID 0x%02x as first byte, got 0x%02x", asapmsgpack.MagicCountSketch, bytes[0])
+	}
 
-	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(bytes)
+	// Strip the magic byte before feeding into the low-level unmarshal.
+	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(bytes[1:])
 	if err != nil {
 		t.Fatalf("UnmarshalCountSketch: %v", err)
 	}

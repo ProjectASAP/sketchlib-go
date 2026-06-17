@@ -19,8 +19,12 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
+	if len(bytes) == 0 || bytes[0] != asapmsgpack.MagicDDSketch {
+		t.Fatalf("expected magic-ID 0x%02x as first byte, got 0x%02x", asapmsgpack.MagicDDSketch, bytes[0])
+	}
 
-	state, err := asapmsgpack.UnmarshalDDSketch(bytes)
+	// Strip the magic byte before feeding into the low-level unmarshal.
+	state, err := asapmsgpack.UnmarshalDDSketch(bytes[1:])
 	if err != nil {
 		t.Fatalf("UnmarshalDDSketch: %v", err)
 	}
@@ -47,7 +51,11 @@ func TestSerializeMsgpackEmptySketch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
-	state, err := asapmsgpack.UnmarshalDDSketch(bytes)
+	if len(bytes) == 0 || bytes[0] != asapmsgpack.MagicDDSketch {
+		t.Fatalf("expected magic-ID 0x%02x as first byte, got 0x%02x", asapmsgpack.MagicDDSketch, bytes[0])
+	}
+	// Strip the magic byte before feeding into the low-level unmarshal.
+	state, err := asapmsgpack.UnmarshalDDSketch(bytes[1:])
 	if err != nil {
 		t.Fatalf("UnmarshalDDSketch: %v", err)
 	}

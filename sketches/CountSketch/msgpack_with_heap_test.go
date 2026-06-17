@@ -159,7 +159,11 @@ func TestSerializeMsgpackWithHeap_BuildsHeapFromCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
-	rows, cols, _, heap, heapSize, err := asapmsgpack.UnmarshalCountSketchWithHeap(b)
+	if len(b) == 0 || b[0] != asapmsgpack.MagicCountMinSketchWithHeap {
+		t.Fatalf("expected magic-ID 0x%02x as first byte, got 0x%02x", asapmsgpack.MagicCountMinSketchWithHeap, b[0])
+	}
+	// Strip the magic byte before feeding into the low-level unmarshal.
+	rows, cols, _, heap, heapSize, err := asapmsgpack.UnmarshalCountSketchWithHeap(b[1:])
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -191,7 +195,11 @@ func TestSerializeMsgpackWithHeap_EmptyWhenNoCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
-	_, _, _, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(b)
+	if len(b) == 0 || b[0] != asapmsgpack.MagicCountMinSketchWithHeap {
+		t.Fatalf("expected magic-ID 0x%02x as first byte, got 0x%02x", asapmsgpack.MagicCountMinSketchWithHeap, b[0])
+	}
+	// Strip the magic byte before feeding into the low-level unmarshal.
+	_, _, _, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(b[1:])
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

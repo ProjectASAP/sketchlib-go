@@ -42,11 +42,15 @@ func (d *DDSketch) SerializeMsgpack() ([]byte, error) {
 		storeOffset = d.store.offset
 	}
 
-	return asapmsgpack.MarshalDDSketch(asapmsgpack.DDSketchState{
+	payload, err := asapmsgpack.MarshalDDSketch(asapmsgpack.DDSketchState{
 		Alpha:       alpha,
 		StoreCounts: storeCounts,
 		StoreOffset: storeOffset,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte{asapmsgpack.MagicDDSketch}, payload...), nil
 }
 
 // DeserializeMsgpack rebuilds a DDSketch from the cross-language
@@ -54,7 +58,14 @@ func (d *DDSketch) SerializeMsgpack() ([]byte, error) {
 // `sketch_core::dd_sketch::DdSketch::serialize_msgpack`). Mirrors
 // Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
 func DeserializeMsgpack(buf []byte) (*DDSketch, error) {
-	state, err := asapmsgpack.UnmarshalDDSketch(buf)
+	if len(buf) == 0 || buf[0] != asapmsgpack.MagicDDSketch {
+		got := byte(0)
+		if len(buf) > 0 {
+			got = buf[0]
+		}
+		return nil, fmt.Errorf("ddsketch: msgpack magic-ID mismatch: expected 0x%02x, got 0x%02x", asapmsgpack.MagicDDSketch, got)
+	}
+	state, err := asapmsgpack.UnmarshalDDSketch(buf[1:])
 	if err != nil {
 		return nil, fmt.Errorf("ddsketch: msgpack decode: %w", err)
 	}
