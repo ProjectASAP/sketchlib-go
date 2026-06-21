@@ -49,7 +49,7 @@ func (s *CountSketch) SerializeMsgpack() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte{asapmsgpack.MagicCountSketch}, payload...), nil
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountSketch}, payload), nil
 }
 
 // SerializeMsgpackWithHeap emits the heap-bearing MessagePack wire
@@ -87,7 +87,7 @@ func (s *CountSketch) SerializeMsgpackWithHeap(heapSize int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, payload...), nil
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, payload), nil
 }
 
 // SerializeMsgpackWithHeapDelta emits the DELTA-HEAP MessagePack wire form
@@ -158,7 +158,7 @@ func (s *CountSketch) SerializeMsgpackWithHeapDelta(
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, payload...), nil
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, payload), nil
 }
 
 // buildWireHeap returns up to heapSize (key, estimatedCount) pairs for the
@@ -201,14 +201,14 @@ func (s *CountSketch) buildWireHeap(heapSize int) []asapmsgpack.HeapItem {
 // round-trip tests; the backend (data_plane) applies the same frame via
 // rmp_serde directly onto its stored matrix + heap.
 func (s *CountSketch) ApplyMsgpackWithHeapDelta(buf []byte) error {
-	if len(buf) == 0 || buf[0] != asapmsgpack.MagicCountMinSketchWithHeap {
-		got := byte(0)
-		if len(buf) > 0 {
-			got = buf[0]
-		}
-		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: magic-ID mismatch: expected 0x%02x, got 0x%02x", asapmsgpack.MagicCountMinSketchWithHeap, got)
+	kindID, payload, err := asapmsgpack.DecodeWrapper(buf)
+	if err != nil {
+		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: %w", err)
 	}
-	_, _, cells, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeapDelta(buf[1:])
+	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
+		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicCountMinSketchWithHeap, kindID)
+	}
+	_, _, cells, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeapDelta(payload)
 	if err != nil {
 		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: %w", err)
 	}
@@ -240,41 +240,43 @@ func (s *CountSketch) ApplyMsgpackWithHeapDelta(buf []byte) error {
 // is a 3-element array and any non-delta payload either has a different array
 // length or a non-true first element.
 func IsMsgpackWithHeapDelta(buf []byte) bool {
-	// Must start with the CountMinSketchWithHeap magic-ID byte.
-	if len(buf) < 2 || buf[0] != asapmsgpack.MagicCountMinSketchWithHeap {
+	// Strip the ASK1 envelope and verify it's a CountMinSketchWithHeap frame.
+	kindID, msgpackPayload, err := asapmsgpack.DecodeWrapper(buf)
+	if err != nil || len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
 		return false
 	}
-	// Inspect the msgpack payload (after the magic byte).
-	// Outer array length must be exactly 4. rmp_serde emits a fixarray
-	// (0x90|len) for our 4-element frame, but accept array16/array32 too for
-	// robustness against any future re-encoding.
-	rest := buf[1:]
+	// Inspect the msgpack payload: outer array length must be exactly 4.
+	// rmp_serde emits a fixarray (0x90|len) for our 4-element frame, but
+	// accept array16/array32 too for robustness.
+	if len(msgpackPayload) == 0 {
+		return false
+	}
 	var hdr int
-	var payload []byte
-	switch b := rest[0]; {
+	var rest []byte
+	switch b := msgpackPayload[0]; {
 	case b&0xf0 == 0x90: // fixarray
 		hdr = int(b & 0x0f)
-		payload = rest[1:]
+		rest = msgpackPayload[1:]
 	case b == 0xdc: // array16
-		if len(rest) < 3 {
+		if len(msgpackPayload) < 3 {
 			return false
 		}
-		hdr = int(rest[1])<<8 | int(rest[2])
-		payload = rest[3:]
+		hdr = int(msgpackPayload[1])<<8 | int(msgpackPayload[2])
+		rest = msgpackPayload[3:]
 	case b == 0xdd: // array32
-		if len(rest) < 5 {
+		if len(msgpackPayload) < 5 {
 			return false
 		}
-		hdr = int(rest[1])<<24 | int(rest[2])<<16 | int(rest[3])<<8 | int(rest[4])
-		payload = rest[5:]
+		hdr = int(msgpackPayload[1])<<24 | int(msgpackPayload[2])<<16 | int(msgpackPayload[3])<<8 | int(msgpackPayload[4])
+		rest = msgpackPayload[5:]
 	default:
 		return false
 	}
-	if hdr != 4 || len(payload) == 0 {
+	if hdr != 4 || len(rest) == 0 {
 		return false
 	}
 	// First element must be msgpack true (the is_delta marker).
-	return payload[0] == 0xc3
+	return rest[0] == 0xc3
 }
 
 // DeserializeMsgpackWithHeapMatrix rebuilds a CountSketch (matrix only,
@@ -289,14 +291,14 @@ func IsMsgpackWithHeapDelta(buf []byte) bool {
 // the frame is ignored (the producer always ships its own current heap in
 // the delta frame).
 func DeserializeMsgpackWithHeapMatrix(buf []byte) (*CountSketch, error) {
-	if len(buf) == 0 || buf[0] != asapmsgpack.MagicCountMinSketchWithHeap {
-		got := byte(0)
-		if len(buf) > 0 {
-			got = buf[0]
-		}
-		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: magic-ID mismatch: expected 0x%02x, got 0x%02x", asapmsgpack.MagicCountMinSketchWithHeap, got)
+	kindID, payload, err := asapmsgpack.DecodeWrapper(buf)
+	if err != nil {
+		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: %w", err)
 	}
-	rowNum, colNum, matrix, _, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(buf[1:])
+	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
+		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicCountMinSketchWithHeap, kindID)
+	}
+	rowNum, colNum, matrix, _, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(payload)
 	if err != nil {
 		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: %w", err)
 	}
@@ -319,14 +321,14 @@ func DeserializeMsgpackWithHeapMatrix(buf []byte) (*CountSketch, error) {
 // `sketch_core::count_sketch::CountSketch::serialize_msgpack`). Mirrors
 // Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
 func DeserializeMsgpack(buf []byte) (*CountSketch, error) {
-	if len(buf) == 0 || buf[0] != asapmsgpack.MagicCountSketch {
-		got := byte(0)
-		if len(buf) > 0 {
-			got = buf[0]
-		}
-		return nil, fmt.Errorf("countsketch: msgpack magic-ID mismatch: expected 0x%02x, got 0x%02x", asapmsgpack.MagicCountSketch, got)
+	kindID, payload, err := asapmsgpack.DecodeWrapper(buf)
+	if err != nil {
+		return nil, fmt.Errorf("countsketch: %w", err)
 	}
-	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(buf[1:])
+	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountSketch {
+		return nil, fmt.Errorf("countsketch: msgpack kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicCountSketch, kindID)
+	}
+	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(payload)
 	if err != nil {
 		return nil, fmt.Errorf("countsketch: msgpack decode: %w", err)
 	}

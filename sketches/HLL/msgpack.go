@@ -41,7 +41,7 @@ func (h *HyperLogLog) SerializeMsgpack() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte{asapmsgpack.MagicHLL}, payload...), nil
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicHLL}, payload), nil
 }
 
 // DeserializeMsgpack rebuilds a HyperLogLog from the cross-language
@@ -49,14 +49,14 @@ func (h *HyperLogLog) SerializeMsgpack() ([]byte, error) {
 // `sketch_core::hll_sketch::HllSketch::serialize_msgpack`). Mirrors
 // Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
 func DeserializeMsgpack(buf []byte) (*HyperLogLog, error) {
-	if len(buf) == 0 || buf[0] != asapmsgpack.MagicHLL {
-		got := byte(0)
-		if len(buf) > 0 {
-			got = buf[0]
-		}
-		return nil, fmt.Errorf("hll: msgpack magic-ID mismatch: expected 0x%02x, got 0x%02x", asapmsgpack.MagicHLL, got)
+	kindID, payload, err := asapmsgpack.DecodeWrapper(buf)
+	if err != nil {
+		return nil, fmt.Errorf("hll: %w", err)
 	}
-	state, err := asapmsgpack.UnmarshalHLLSketch(buf[1:])
+	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicHLL {
+		return nil, fmt.Errorf("hll: msgpack kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicHLL, kindID)
+	}
+	state, err := asapmsgpack.UnmarshalHLLSketch(payload)
 	if err != nil {
 		return nil, fmt.Errorf("hll: msgpack decode: %w", err)
 	}

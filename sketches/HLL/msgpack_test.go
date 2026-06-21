@@ -18,12 +18,17 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
-	if len(bytes) == 0 || bytes[0] != asapmsgpack.MagicHLL {
-		t.Fatalf("expected magic-ID 0x%02x as first byte, got 0x%02x", asapmsgpack.MagicHLL, bytes[0])
+
+	// Strip the ASK1 envelope before feeding into the low-level unmarshal.
+	kindID, payload, err := asapmsgpack.DecodeWrapper(bytes)
+	if err != nil {
+		t.Fatalf("DecodeWrapper: %v", err)
+	}
+	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicHLL {
+		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicHLL, kindID)
 	}
 
-	// Strip the magic byte before feeding into the low-level unmarshal.
-	state, err := asapmsgpack.UnmarshalHLLSketch(bytes[1:])
+	state, err := asapmsgpack.UnmarshalHLLSketch(payload)
 	if err != nil {
 		t.Fatalf("UnmarshalHLLSketch: %v", err)
 	}
@@ -56,11 +61,17 @@ func TestSerializeMsgpackEmptyRegisters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
-	if len(bytes) == 0 || bytes[0] != asapmsgpack.MagicHLL {
-		t.Fatalf("expected magic-ID 0x%02x as first byte, got 0x%02x", asapmsgpack.MagicHLL, bytes[0])
+
+	// Strip the ASK1 envelope before feeding into the low-level unmarshal.
+	kindID, payload, err := asapmsgpack.DecodeWrapper(bytes)
+	if err != nil {
+		t.Fatalf("DecodeWrapper: %v", err)
 	}
-	// Strip the magic byte before feeding into the low-level unmarshal.
-	state, err := asapmsgpack.UnmarshalHLLSketch(bytes[1:])
+	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicHLL {
+		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicHLL, kindID)
+	}
+
+	state, err := asapmsgpack.UnmarshalHLLSketch(payload)
 	if err != nil {
 		t.Fatalf("UnmarshalHLLSketch: %v", err)
 	}
