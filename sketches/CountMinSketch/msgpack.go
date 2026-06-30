@@ -47,7 +47,7 @@ func DeserializeMsgpack(buf []byte) (*CountMinSketch, error) {
 		return nil, fmt.Errorf("countminsketch: %w", err)
 	}
 	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketch {
-		return nil, fmt.Errorf("countminsketch: msgpack kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicCountMinSketch, kindID)
+		return nil, fmt.Errorf("countminsketch: msgpack kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicCountMinSketch, kindID)
 	}
 	matrix, rowNum, colNum, err := asapmsgpack.UnmarshalCountMinSketch(payload)
 	if err != nil {

@@ -63,7 +63,7 @@ func DeserializeMsgpack(buf []byte) (*DDSketch, error) {
 		return nil, fmt.Errorf("ddsketch: %w", err)
 	}
 	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicDDSketch {
-		return nil, fmt.Errorf("ddsketch: msgpack kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicDDSketch, kindID)
+		return nil, fmt.Errorf("ddsketch: msgpack kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicDDSketch, kindID)
 	}
 	state, err := asapmsgpack.UnmarshalDDSketch(payload)
 	if err != nil {

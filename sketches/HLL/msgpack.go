@@ -54,7 +54,7 @@ func DeserializeMsgpack(buf []byte) (*HyperLogLog, error) {
 		return nil, fmt.Errorf("hll: %w", err)
 	}
 	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicHLL {
-		return nil, fmt.Errorf("hll: msgpack kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicHLL, kindID)
+		return nil, fmt.Errorf("hll: msgpack kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicHLL, kindID)
 	}
 	state, err := asapmsgpack.UnmarshalHLLSketch(payload)
 	if err != nil {

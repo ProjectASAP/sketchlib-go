@@ -31,7 +31,7 @@ func DecodeWrapper(data []byte) (kindID []byte, payload []byte, err error) {
 		return nil, nil, fmt.Errorf(
 			"asapmsgpack: wrapper too short (%d bytes, need ≥7)", len(data))
 	}
-	if data[0] != 'A' || data[1] != 'S' || data[2] != 'K' || data[3] != '1' {
+	if [4]byte(data[:4]) != WrapperMagic {
 		return nil, nil, fmt.Errorf(
 			"asapmsgpack: bad wrapper magic %q, expected \"ASK1\"", data[:4])
 	}

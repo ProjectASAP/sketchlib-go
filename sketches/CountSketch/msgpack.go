@@ -206,7 +206,7 @@ func (s *CountSketch) ApplyMsgpackWithHeapDelta(buf []byte) error {
 		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: %w", err)
 	}
 	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
-		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicCountMinSketchWithHeap, kindID)
+		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicCountMinSketchWithHeap, kindID)
 	}
 	_, _, cells, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeapDelta(payload)
 	if err != nil {
@@ -296,7 +296,7 @@ func DeserializeMsgpackWithHeapMatrix(buf []byte) (*CountSketch, error) {
 		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: %w", err)
 	}
 	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
-		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicCountMinSketchWithHeap, kindID)
+		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicCountMinSketchWithHeap, kindID)
 	}
 	rowNum, colNum, matrix, _, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(payload)
 	if err != nil {
@@ -326,7 +326,7 @@ func DeserializeMsgpack(buf []byte) (*CountSketch, error) {
 		return nil, fmt.Errorf("countsketch: %w", err)
 	}
 	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountSketch {
-		return nil, fmt.Errorf("countsketch: msgpack kind_id mismatch: expected [0x%02x], got %v", asapmsgpack.MagicCountSketch, kindID)
+		return nil, fmt.Errorf("countsketch: msgpack kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicCountSketch, kindID)
 	}
 	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(payload)
 	if err != nil {
