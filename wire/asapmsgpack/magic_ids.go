@@ -3,17 +3,14 @@ package asapmsgpack
 // Magic-ID constants for the portable MessagePack wire format.
 //
 // Every serialized binary produced by a sketch's SerializeMsgpack method is
-// prefixed with a single byte that identifies the sketch type, analogous to
-// how Prometheus uses magic bytes to discriminate metric types.
+// wrapped in the ASK1 envelope (see wire/asapmsgpack/wrapper.go):
 //
-// Prefix layout:
+//	[ b"ASK1" | version:u8 | kind_id_len:u8 | kind_id:bytes | msgpack_payload ]
 //
-//	[ magic_id: uint8 | <msgpack payload> ]
-//
-// Magic IDs are stable across versions. Adding a new sketch type requires a
-// new constant here; removing or repurposing an existing constant is a
-// breaking protocol change. The Rust mirror of this table lives in
-// asap_sketchlib/src/message_pack_format/magic_ids.rs.
+// The constants below are the 1-byte kind_id values for each portable sketch
+// type. Magic IDs are stable — once assigned, a value is never reused or
+// repurposed. Adding a new sketch type requires a new constant here and a
+// corresponding entry in asap_sketchlib/src/message_pack_format/magic_ids.rs.
 const (
 	// MagicHLL is the magic-ID prefix for HLL sketches (all variants).
 	MagicHLL byte = 0x01
