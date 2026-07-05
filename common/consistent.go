@@ -1,5 +1,18 @@
 package common
 
+import "hash/fnv"
+
+// SeedForMetric is the CANONICAL per-metric seed for consistent sampling:
+// FNV-1a-64 of the metric name. Every stage that evaluates ConsistentAdmit for
+// a metric's items (SDK aggregator, wire-level otlpfilter, collector wrapper)
+// derives its seed through this one function, so their decisions agree by
+// construction.
+func SeedForMetric(name string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return h.Sum64()
+}
+
 // RowSampler is the admission interface consumed by the per-row sampled sketch
 // updates (CountSketch.UpdateStringSampledPerRow, CountMinSketch.
 // InsertWithHashSampledPerRow). The caller invokes BeginItem() exactly once per
@@ -70,6 +83,10 @@ type ConsistentSampler struct {
 	seed uint64
 	occ  uint64
 	row  int
+	// pinned marks that occ was set externally (SetOccurrence/Rebind) for the
+	// NEXT item, so the item's BeginItem() must consume it instead of advancing
+	// the internal counter past it.
+	pinned bool
 }
 
 // NewConsistentSampler returns a sampler admitting each (item,row) candidate
@@ -92,12 +109,21 @@ func (s *ConsistentSampler) Reset(p float64, seed uint64) {
 	s.seed = seed
 	s.occ = 0
 	s.row = 0
+	s.pinned = false
 }
 
 // BeginItem advances to the next occurrence and rewinds the row cursor.
 // Call exactly once per stream item, before the per-row Admit() calls.
+// A pending SetOccurrence/Rebind pin is CONSUMED here instead of advancing —
+// so `Rebind(seed, occ)` followed by a sampled sketch update (which calls
+// BeginItem internally) evaluates exactly (seed, occ), not occ+1.
 func (s *ConsistentSampler) BeginItem() {
 	if s == nil {
+		return
+	}
+	if s.pinned {
+		s.pinned = false
+		s.row = 0
 		return
 	}
 	s.occ++
@@ -105,11 +131,22 @@ func (s *ConsistentSampler) BeginItem() {
 }
 
 // SetOccurrence pins the occurrence id explicitly (wire-derived identity such
-// as a datapoint's TimeUnixNano) instead of the internal counter, and rewinds
-// the row cursor. Use this at stages that recompute another stage's decision.
+// as a datapoint's timestamp) instead of the internal counter, and rewinds the
+// row cursor. Use this at stages that recompute another stage's decision. The
+// pin applies to the NEXT item: an immediately following BeginItem() consumes
+// it rather than advancing past it.
 func (s *ConsistentSampler) SetOccurrence(occ uint64) {
 	s.occ = occ
 	s.row = 0
+	s.pinned = true
+}
+
+// Rebind pins BOTH the seed and the occurrence id for the next item. Used by
+// per-item identity threading (e.g. seed = FNV(metric), occ = timestamp) where
+// one sampler instance serves items whose identity arrives with each item.
+func (s *ConsistentSampler) Rebind(seed, occ uint64) {
+	s.seed = seed
+	s.SetOccurrence(occ)
 }
 
 // Admit reports the decision for the current (occurrence, row) candidate and

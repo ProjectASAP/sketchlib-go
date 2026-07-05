@@ -65,6 +65,21 @@ func TestConsistentAdmit_DeterministicIdempotent(t *testing.T) {
 			t.Fatalf("SetOccurrence mismatch at row=%d", r)
 		}
 	}
+	// A pin is CONSUMED by the next BeginItem (the sampled sketch updates call
+	// BeginItem internally): Rebind(seed, occ) + BeginItem must evaluate occ,
+	// not occ+1 — and the following un-pinned item advances normally.
+	s3 := NewConsistentSampler(0.5, 0)
+	s3.Rebind(42, 7)
+	s3.BeginItem()
+	for r := 0; r < 5; r++ {
+		if s3.Admit() != ConsistentAdmit(42, 7, r, 0.5) {
+			t.Fatalf("Rebind+BeginItem must stay at occ=7, row=%d", r)
+		}
+	}
+	s3.BeginItem() // no pin → advances to 8
+	if s3.Admit() != ConsistentAdmit(42, 8, 0, 0.5) {
+		t.Fatal("un-pinned BeginItem must advance to occ=8")
+	}
 }
 
 // Rows within one occurrence decide independently: P[both rows admitted] ≈ p².

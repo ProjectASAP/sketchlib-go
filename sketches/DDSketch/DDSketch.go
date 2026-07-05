@@ -136,6 +136,11 @@ type DDSketch struct {
 	min   float64
 	max   float64
 
+	// wireP is the EXTERNAL-sampling probability stamped on the wire envelope
+	// when admission is decided outside the sketch (SetWireSampleP); 0 = exact.
+	// Ignored while an internal sampler is installed (sampler.P() wins).
+	wireP float64
+
 	// sampler implements optional NitroSketch geometric skip-sampling. When nil
 	// (the default) every value is recorded and the sketch is byte-identical to
 	// an unsampled one. When set with p<1, a Geometric(p)-distributed run of
@@ -161,11 +166,26 @@ func (d *DDSketch) WithSampleP(p float64, seed int64) *DDSketch {
 	return d
 }
 
+// SetWireSampleP stamps a sampling probability on the wire envelope WITHOUT
+// installing an internal sampler. Used when admission is decided EXTERNALLY
+// (e.g. consistent per-item sampling at the collector wrapper or the wire
+// filter, design §3.1.1): the sketch stores the raw admitted counts, the
+// external stage owns the drop decision, and the consumer still learns p for
+// its ×1/p rescale. p >= 1 or <= 0 clears the override (exact).
+func (d *DDSketch) SetWireSampleP(p float64) {
+	if p >= 1.0 || p <= 0 || math.IsNaN(p) {
+		d.wireP = 0
+		return
+	}
+	d.wireP = p
+}
+
 // wireSampleP returns the sampling probability to stamp on the envelope (0.0
-// when unsampled = exact).
+// when unsampled = exact). An internal sampler wins; otherwise the external
+// SetWireSampleP override applies.
 func (d *DDSketch) wireSampleP() float64 {
 	if d.sampler == nil {
-		return 0.0
+		return d.wireP
 	}
 	return d.sampler.P()
 }
