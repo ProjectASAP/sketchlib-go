@@ -277,10 +277,14 @@ type CountSketchDelta struct {
 	// Downstream queries the merged CS accumulator for each key to build TopK.
 	HhKeys []string `protobuf:"bytes,6,rep,name=hh_keys,json=hhKeys,proto3" json:"hh_keys,omitempty"`
 	// New packed encoding (Opt-2, Stage 2):
-	CellRows      []uint32  `protobuf:"varint,9,rep,packed,name=cell_rows,json=cellRows,proto3" json:"cell_rows,omitempty"`  // row index of each changed cell
-	CellCols      []uint32  `protobuf:"varint,10,rep,packed,name=cell_cols,json=cellCols,proto3" json:"cell_cols,omitempty"` // col index of each changed cell
-	DCounts       []int64   `protobuf:"zigzag64,11,rep,packed,name=d_counts,json=dCounts,proto3" json:"d_counts,omitempty"`  // signed integer count delta
-	L2            []float64 `protobuf:"fixed64,12,rep,packed,name=l2,proto3" json:"l2,omitempty"`                            // per-row L2 norm deltas
+	CellRows []uint32  `protobuf:"varint,9,rep,packed,name=cell_rows,json=cellRows,proto3" json:"cell_rows,omitempty"`  // row index of each changed cell
+	CellCols []uint32  `protobuf:"varint,10,rep,packed,name=cell_cols,json=cellCols,proto3" json:"cell_cols,omitempty"` // col index of each changed cell
+	DCounts  []int64   `protobuf:"zigzag64,11,rep,packed,name=d_counts,json=dCounts,proto3" json:"d_counts,omitempty"`  // signed integer count delta
+	L2       []float64 `protobuf:"fixed64,12,rep,packed,name=l2,proto3" json:"l2,omitempty"`                            // per-row L2 norm deltas
+	// Float count deltas, populated INSTEAD of d_counts when any cell delta is
+	// non-integral (weighted / sampled 1/p streams). Same length/order as
+	// cell_rows/cell_cols. Decoders prefer this field when present.
+	DCountsFloat  []float64 `protobuf:"fixed64,13,rep,packed,name=d_counts_float,json=dCountsFloat,proto3" json:"d_counts_float,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -385,6 +389,13 @@ func (x *CountSketchDelta) GetL2() []float64 {
 	return nil
 }
 
+func (x *CountSketchDelta) GetDCountsFloat() []float64 {
+	if x != nil {
+		return x.DCountsFloat
+	}
+	return nil
+}
+
 // CountSketchCell is kept for backward-compat deserialization only.
 // New producers must write to CountSketchDelta's packed arrays instead.
 type CountSketchCell struct {
@@ -467,7 +478,7 @@ const file_countsketch_countsketch_proto_rawDesc = "" +
 	"\aentries\x18\x02 \x03(\v2\x17.sketchlib.v1.HeapEntryR\aentries\"9\n" +
 	"\tHeapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05count\x18\x02 \x01(\x01R\x05countJ\x04\b\x03\x10\x04\"\xd8\x02\n" +
+	"\x05count\x18\x02 \x01(\x01R\x05countJ\x04\b\x03\x10\x04\"\x82\x03\n" +
 	"\x10CountSketchDelta\x12\x12\n" +
 	"\x04rows\x18\x01 \x01(\rR\x04rows\x12\x12\n" +
 	"\x04cols\x18\x02 \x01(\rR\x04cols\x12@\n" +
@@ -479,7 +490,8 @@ const file_countsketch_countsketch_proto_rawDesc = "" +
 	"\tcell_cols\x18\n" +
 	" \x03(\rB\x02\x10\x01R\bcellCols\x12\x1d\n" +
 	"\bd_counts\x18\v \x03(\x12B\x02\x10\x01R\adCounts\x12\x12\n" +
-	"\x02l2\x18\f \x03(\x01B\x02\x10\x01R\x02l2\"N\n" +
+	"\x02l2\x18\f \x03(\x01B\x02\x10\x01R\x02l2\x12(\n" +
+	"\x0ed_counts_float\x18\r \x03(\x01B\x02\x10\x01R\fdCountsFloat\"N\n" +
 	"\x0fCountSketchCell\x12\x10\n" +
 	"\x03row\x18\x01 \x01(\rR\x03row\x12\x10\n" +
 	"\x03col\x18\x02 \x01(\rR\x03col\x12\x17\n" +

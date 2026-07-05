@@ -2,7 +2,6 @@ package countsketch
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
@@ -33,19 +32,30 @@ func TestCSDelta_FullEqualsDeltaAgainstEmpty(t *testing.T) {
 	}
 }
 
-// TestCSDelta_RejectsFractionalCells is the P0-2 guard: a fractional/weighted
-// cell makes ComputeDelta error so the caller falls back to the lossless full
-// frame (the i64 sparse delta wire cannot carry a fractional Δ losslessly).
-func TestCSDelta_RejectsFractionalCells(t *testing.T) {
+// TestCSDelta_FractionalCellsLossless supersedes the old P0-2 rejection guard:
+// a fractional/weighted cell now rides the packed-float64 d_counts_float wire
+// and round-trips losslessly (see float_wire_test.go for the sampled-stream
+// end-to-end version).
+func TestCSDelta_FractionalCellsLossless(t *testing.T) {
 	cur := newCS(t)
 	cur.Count[0][0] = -2.25 // fractional, signed
 	empty := newCS(t)
-	_, err := ComputeDelta(empty, cur, 0.1)
-	if err == nil {
-		t.Fatal("expected error for fractional cell delta, got nil")
+	d, err := ComputeDelta(empty, cur, 0.1)
+	if err != nil {
+		t.Fatalf("fractional delta must be accepted: %v", err)
 	}
-	if !strings.Contains(err.Error(), "non-integral") {
-		t.Fatalf("error should mention non-integral, got: %v", err)
+	payload, err := SerializeDelta(d)
+	if err != nil {
+		t.Fatalf("SerializeDelta: %v", err)
+	}
+	got, err := DeserializeDelta(payload)
+	if err != nil {
+		t.Fatalf("DeserializeDelta: %v", err)
+	}
+	recon := newCS(t)
+	ApplyDelta(recon, got)
+	if recon.Count[0][0] != -2.25 {
+		t.Fatalf("fractional cell not lossless: got %v want -2.25", recon.Count[0][0])
 	}
 }
 
