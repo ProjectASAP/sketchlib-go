@@ -29,13 +29,18 @@ const maxSampledRowsCMS = 64
 // consumer can recover the counts — the correction must be per-update. The wire
 // envelope therefore stays "exact" (wireSampleP()==0) and downstream does NOT
 // double-correct. A nil / full-rate (p>=1) sampler degenerates to InsertWithHash.
-func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler *common.GeometricSampler) {
+//
+// The sampler is any common.RowSampler: *common.GeometricSampler (NitroSketch
+// skip-sampling, stateful) or *common.ConsistentSampler (stateless hash
+// decision — location-independent, see design §3.1 single-location sampling).
+func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler common.RowSampler) {
 	if sampler == nil || sampler.P() >= 1.0 || s.Rows > maxSampledRowsCMS {
 		s.InsertWithHash(hash)
 		return
 	}
 
 	// 1. Per-row admission (no cell work yet).
+	sampler.BeginItem()
 	var admitted [maxSampledRowsCMS]int
 	n := 0
 	for r := 0; r < s.Rows; r++ {

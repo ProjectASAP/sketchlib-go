@@ -64,7 +64,20 @@ func (s *GeometricSampler) Reset(p float64, seed int64) {
 }
 
 // P returns the configured sampling probability (1.0 when exact).
-func (s *GeometricSampler) P() float64 { return s.p }
+// Nil-safe: a nil sampler reports 1.0, so interface callers holding a typed-nil
+// *GeometricSampler degrade to the exact (unsampled) path.
+func (s *GeometricSampler) P() float64 {
+	if s == nil {
+		return 1.0
+	}
+	return s.p
+}
+
+// BeginItem marks a stream-item boundary (RowSampler). The geometric
+// skip-sampler runs over the FLATTENED (item,row) candidate stream, so item
+// boundaries carry no state here — this is a no-op kept for interface parity
+// with ConsistentSampler.
+func (s *GeometricSampler) BeginItem() {}
 
 // IsExact reports whether the sampler admits every update (p == 1.0).
 func (s *GeometricSampler) IsExact() bool { return s.exact }
@@ -137,8 +150,9 @@ func KeepKeyByThreshold(canonicalHash uint64, p float64) bool {
 // applied by the consumer at query time, never here.
 //
 // With p == 1.0 this is a single comparison and never draws from the RNG.
+// Nil-safe: a nil sampler admits everything (exact).
 func (s *GeometricSampler) Admit() bool {
-	if s.exact {
+	if s == nil || s.exact {
 		return true
 	}
 	if s.skip > 0 {

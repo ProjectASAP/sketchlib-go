@@ -26,13 +26,18 @@ const maxSampledRows = 64
 // median-of-rows concentrates the sampling error into the (1−δ) guarantee
 // instead of leaving it as a common-mode term (see §3.2). A nil sampler or a
 // full-rate sampler (p≥1) degenerates to the plain UpdateString.
-func (s *CountSketch) UpdateStringSampledPerRow(key string, count float64, sampler *common.GeometricSampler) {
+//
+// The sampler is any common.RowSampler: *common.GeometricSampler (NitroSketch
+// skip-sampling, stateful) or *common.ConsistentSampler (stateless hash
+// decision — location-independent, see design §3.1 single-location sampling).
+func (s *CountSketch) UpdateStringSampledPerRow(key string, count float64, sampler common.RowSampler) {
 	if sampler == nil || sampler.P() >= 1.0 || s.Rows > maxSampledRows {
 		s.UpdateString(key, count)
 		return
 	}
 
 	// 1. Per-row admission (no hash).
+	sampler.BeginItem()
 	var admitted [maxSampledRows]int
 	n := 0
 	for r := 0; r < s.Rows; r++ {
