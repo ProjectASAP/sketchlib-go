@@ -3,9 +3,9 @@ package asapmsgpack
 // Magic-ID constants for the portable MessagePack wire format.
 //
 // Every serialized binary produced by a sketch's SerializeMsgpack method is
-// wrapped in the ASK1 envelope (see wire/asapmsgpack/wrapper.go):
+// wrapped in the ASAPv1 envelope (see wire/asapmsgpack/wrapper.go):
 //
-//	[ b"ASK1" | version:u8 | kind_id_len:u8 | kind_id:bytes | msgpack_payload ]
+//	[ b"ASAPv1" | version:u8 | kind_id_len:u8 | kind_id:bytes | msgpack_payload ]
 //
 // The constants below are the 1-byte kind_id values for each portable sketch
 // type. Magic IDs are stable — once assigned, a value is never reused or

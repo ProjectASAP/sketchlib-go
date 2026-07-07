@@ -159,7 +159,7 @@ func TestSerializeMsgpackWithHeap_BuildsHeapFromCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
-	// Strip the ASK1 envelope before feeding into the low-level unmarshal.
+	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
 	kindID, wrapPayload, err := asapmsgpack.DecodeWrapper(b)
 	if err != nil {
 		t.Fatalf("DecodeWrapper: %v", err)
@@ -199,7 +199,7 @@ func TestSerializeMsgpackWithHeap_EmptyWhenNoCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
-	// Strip the ASK1 envelope before feeding into the low-level unmarshal.
+	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
 	kindID2, wrapPayload2, err := asapmsgpack.DecodeWrapper(b)
 	if err != nil {
 		t.Fatalf("DecodeWrapper: %v", err)

@@ -240,7 +240,7 @@ func (s *CountSketch) ApplyMsgpackWithHeapDelta(buf []byte) error {
 // is a 3-element array and any non-delta payload either has a different array
 // length or a non-true first element.
 func IsMsgpackWithHeapDelta(buf []byte) bool {
-	// Strip the ASK1 envelope and verify it's a CountMinSketchWithHeap frame.
+	// Strip the ASAPv1 envelope and verify it's a CountMinSketchWithHeap frame.
 	kindID, msgpackPayload, err := asapmsgpack.DecodeWrapper(buf)
 	if err != nil || len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
 		return false

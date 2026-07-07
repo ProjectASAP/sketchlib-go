@@ -19,7 +19,7 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
-	// Strip the ASK1 envelope before feeding into the low-level unmarshal.
+	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
 	kindID, payload, err := asapmsgpack.DecodeWrapper(bytes)
 	if err != nil {
 		t.Fatalf("DecodeWrapper: %v", err)
@@ -54,7 +54,7 @@ func TestSerializeMsgpackEmptySketch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
-	// Strip the ASK1 envelope before feeding into the low-level unmarshal.
+	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
 	kindID2, payload2, err := asapmsgpack.DecodeWrapper(bytes)
 	if err != nil {
 		t.Fatalf("DecodeWrapper: %v", err)
