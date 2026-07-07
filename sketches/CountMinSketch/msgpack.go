@@ -42,12 +42,9 @@ func (s *CountMinSketch) SerializeMsgpack() ([]byte, error) {
 // not part of the msgpack wire shape; use SerializeProtoBytes if those
 // must be preserved).
 func DeserializeMsgpack(buf []byte) (*CountMinSketch, error) {
-	kindID, payload, err := asapmsgpack.DecodeWrapper(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountMinSketch)
 	if err != nil {
 		return nil, fmt.Errorf("countminsketch: %w", err)
-	}
-	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketch {
-		return nil, fmt.Errorf("countminsketch: msgpack kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicCountMinSketch, kindID)
 	}
 	matrix, rowNum, colNum, err := asapmsgpack.UnmarshalCountMinSketch(payload)
 	if err != nil {

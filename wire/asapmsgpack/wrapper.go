@@ -57,3 +57,16 @@ func DecodeWrapper(data []byte) (kindID []byte, payload []byte, err error) {
 	}
 	return data[kindIDOffset:headerEnd], data[headerEnd:], nil
 }
+
+// DecodePayload strips the ASAPv1 envelope and verifies the portable 1-byte
+// kind ID before returning the MessagePack payload.
+func DecodePayload(data []byte, expectedKind byte) ([]byte, error) {
+	kindID, payload, err := DecodeWrapper(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(kindID) != 1 || kindID[0] != expectedKind {
+		return nil, fmt.Errorf("kind_id mismatch: expected [0x%02x], got %x", expectedKind, kindID)
+	}
+	return payload, nil
+}

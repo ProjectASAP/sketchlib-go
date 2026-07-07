@@ -201,12 +201,9 @@ func (s *CountSketch) buildWireHeap(heapSize int) []asapmsgpack.HeapItem {
 // round-trip tests; the backend (data_plane) applies the same frame via
 // rmp_serde directly onto its stored matrix + heap.
 func (s *CountSketch) ApplyMsgpackWithHeapDelta(buf []byte) error {
-	kindID, payload, err := asapmsgpack.DecodeWrapper(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountMinSketchWithHeap)
 	if err != nil {
 		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: %w", err)
-	}
-	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
-		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicCountMinSketchWithHeap, kindID)
 	}
 	_, _, cells, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeapDelta(payload)
 	if err != nil {
@@ -241,8 +238,8 @@ func (s *CountSketch) ApplyMsgpackWithHeapDelta(buf []byte) error {
 // length or a non-true first element.
 func IsMsgpackWithHeapDelta(buf []byte) bool {
 	// Strip the ASAPv1 envelope and verify it's a CountMinSketchWithHeap frame.
-	kindID, msgpackPayload, err := asapmsgpack.DecodeWrapper(buf)
-	if err != nil || len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
+	msgpackPayload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountMinSketchWithHeap)
+	if err != nil {
 		return false
 	}
 	// Inspect the msgpack payload: outer array length must be exactly 4.
@@ -291,12 +288,9 @@ func IsMsgpackWithHeapDelta(buf []byte) bool {
 // the frame is ignored (the producer always ships its own current heap in
 // the delta frame).
 func DeserializeMsgpackWithHeapMatrix(buf []byte) (*CountSketch, error) {
-	kindID, payload, err := asapmsgpack.DecodeWrapper(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountMinSketchWithHeap)
 	if err != nil {
 		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: %w", err)
-	}
-	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
-		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicCountMinSketchWithHeap, kindID)
 	}
 	rowNum, colNum, matrix, _, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(payload)
 	if err != nil {
@@ -321,12 +315,9 @@ func DeserializeMsgpackWithHeapMatrix(buf []byte) (*CountSketch, error) {
 // `sketch_core::count_sketch::CountSketch::serialize_msgpack`). Mirrors
 // Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
 func DeserializeMsgpack(buf []byte) (*CountSketch, error) {
-	kindID, payload, err := asapmsgpack.DecodeWrapper(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountSketch)
 	if err != nil {
 		return nil, fmt.Errorf("countsketch: %w", err)
-	}
-	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountSketch {
-		return nil, fmt.Errorf("countsketch: msgpack kind_id mismatch: expected [0x%02x], got %x", asapmsgpack.MagicCountSketch, kindID)
 	}
 	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(payload)
 	if err != nil {
