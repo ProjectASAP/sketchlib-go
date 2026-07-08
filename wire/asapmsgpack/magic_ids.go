@@ -5,7 +5,7 @@ package asapmsgpack
 // Every serialized binary produced by a sketch's SerializeMsgpack method is
 // wrapped in the ASAPv1 envelope (see wire/asapmsgpack/wrapper.go):
 //
-//	[ b"ASAPv1" | version:u8 | kind_id_len:u8 | kind_id:bytes | msgpack_payload ]
+//	[ b"ASAPv1" | version:u8 | kind_id_len:u8 | kind_id:bytes | metadata_len:u32 | metadata:msgpack | msgpack_payload ]
 //
 // The constants below are the 1-byte kind_id values for each portable sketch
 // type. Magic IDs are stable — once assigned, a value is never reused or
