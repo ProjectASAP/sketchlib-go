@@ -57,6 +57,138 @@ func MarshalCountMinSketch(rowNum, colNum uint64, matrix [][]float64) ([]byte, e
 	return EncodeWrapper(CMSKind, metadata, e.bytes()), nil
 }
 
+// CountMinWireState is a fully-specified Count-Min wire state: the two
+// structural params (counter type + mode) plus the row-major counter matrix in
+// exactly one of the two counter representations. It lets a caller build any
+// wire-eligible Count-Min config (i64/f64 × regular/fast) directly from known
+// state — the path the cross-language golden parity test exercises for configs
+// (e.g. i64/regular) the higher-level MarshalCountMinSketch does not cover.
+type CountMinWireState struct {
+	Rows uint64
+	Cols uint64
+	// CounterType is CMSCounterI64 or CMSCounterF64.
+	CounterType string
+	// Mode is CMSModeRegular or CMSModeFast.
+	Mode string
+	// CountsI64 is the row-major counter matrix; used iff CounterType is
+	// CMSCounterI64. Length MUST equal Rows*Cols.
+	CountsI64 []int64
+	// CountsF64 is the row-major counter matrix; used iff CounterType is
+	// CMSCounterF64. Length MUST equal Rows*Cols.
+	CountsF64 []float64
+}
+
+// MarshalCountMinSketchState encodes a fully-specified Count-Min wire state into
+// a complete ASAPv1 envelope. The payload is the positional array
+// [ rows:uint, cols:uint, counts:array ]; counter_type and mode live in the
+// metadata. Integer counters are written with rmp_serde's family/width rule
+// (non-negative → uint family minimal width, negative → int family), matching
+// the Rust reference encoder.
+func MarshalCountMinSketchState(s CountMinWireState) ([]byte, error) {
+	if s.Mode != CMSModeRegular && s.Mode != CMSModeFast {
+		return nil, fmt.Errorf("asapmsgpack: unsupported CMS mode %q", s.Mode)
+	}
+	n := s.Rows * s.Cols
+
+	e := newEncoder()
+	e.writeArrayLen(3)
+	e.writeUint(s.Rows)
+	e.writeUint(s.Cols)
+	e.writeArrayLen(int(n))
+	switch s.CounterType {
+	case CMSCounterI64:
+		if uint64(len(s.CountsI64)) != n {
+			return nil, fmt.Errorf(
+				"asapmsgpack: CountMin i64 counts length %d != rows*cols %d",
+				len(s.CountsI64), n)
+		}
+		for _, v := range s.CountsI64 {
+			e.writeInt(v)
+		}
+	case CMSCounterF64:
+		if uint64(len(s.CountsF64)) != n {
+			return nil, fmt.Errorf(
+				"asapmsgpack: CountMin f64 counts length %d != rows*cols %d",
+				len(s.CountsF64), n)
+		}
+		for _, v := range s.CountsF64 {
+			e.writeFloat64(v)
+		}
+	default:
+		return nil, fmt.Errorf("asapmsgpack: unsupported counter_type %q", s.CounterType)
+	}
+
+	metadata := encodeCMSMetadata(s.CounterType, s.Mode)
+	return EncodeWrapper(CMSKind, metadata, e.bytes()), nil
+}
+
+// UnmarshalCountMinSketchState is the inverse of MarshalCountMinSketchState: it
+// preserves the counter type and mode (rather than widening i64 to float64) so a
+// decode→re-encode round-trip is byte-exact. Fails closed on any envelope,
+// metadata or payload inconsistency.
+func UnmarshalCountMinSketchState(buf []byte) (CountMinWireState, error) {
+	var s CountMinWireState
+
+	kindID, metadata, payload, err := SplitWrapper(buf)
+	if err != nil {
+		return s, err
+	}
+	if len(kindID) != len(CMSKind) || kindID[0] != CMSKind[0] || kindID[1] != CMSKind[1] {
+		return s, fmt.Errorf("asapmsgpack: kind_id %x is not Count-Min", kindID)
+	}
+	counterType, mode, err := decodeCMSMetadata(metadata)
+	if err != nil {
+		return s, err
+	}
+	if counterType != CMSCounterI64 && counterType != CMSCounterF64 {
+		return s, fmt.Errorf("asapmsgpack: unsupported counter_type %q", counterType)
+	}
+	s.CounterType = counterType
+	s.Mode = mode
+
+	d := newDecoder(payload)
+	n, err := d.readArrayLen()
+	if err != nil {
+		return s, err
+	}
+	if n != 3 {
+		return s, fmt.Errorf("asapmsgpack: CountMinSketch expected 3-element array, got %d", n)
+	}
+	if s.Rows, err = d.readUint(); err != nil {
+		return s, err
+	}
+	if s.Cols, err = d.readUint(); err != nil {
+		return s, err
+	}
+	countLen, err := d.readArrayLen()
+	if err != nil {
+		return s, err
+	}
+	if uint64(countLen) != s.Rows*s.Cols {
+		return s, fmt.Errorf(
+			"asapmsgpack: counts length %d != rows*cols %d", countLen, s.Rows*s.Cols)
+	}
+	if counterType == CMSCounterI64 {
+		s.CountsI64 = make([]int64, countLen)
+		for i := 0; i < countLen; i++ {
+			if s.CountsI64[i], err = d.readInt(); err != nil {
+				return s, err
+			}
+		}
+	} else {
+		s.CountsF64 = make([]float64, countLen)
+		for i := 0; i < countLen; i++ {
+			if s.CountsF64[i], err = d.readFloat64(); err != nil {
+				return s, err
+			}
+		}
+	}
+	if err := d.done(); err != nil {
+		return s, err
+	}
+	return s, nil
+}
+
 // UnmarshalCountMinSketch is the inverse of MarshalCountMinSketch: it takes a
 // complete ASAPv1 envelope and returns the row-major matrix as [][]float64,
 // failing closed on any envelope, metadata or payload inconsistency. Integer
