@@ -22,15 +22,14 @@ import (
 // Sum2 semantics should keep using `SerializeProtoBytes`, which routes
 // through the sketchlib `CountMinState` proto that does carry them.
 func (s *CountMinSketch) SerializeMsgpack() ([]byte, error) {
-	payload, err := asapmsgpack.MarshalCountMinSketch(
+	// MarshalCountMinSketch returns the complete ASAPv1 envelope (kind_id
+	// CMSKind, metadata carrying counter_type/mode, payload [rows, cols,
+	// counts]), so no separate EncodeWrapper call is needed.
+	return asapmsgpack.MarshalCountMinSketch(
 		uint64(s.Rows),
 		uint64(s.Cols),
 		s.Count,
 	)
-	if err != nil {
-		return nil, err
-	}
-	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketch}, payload), nil
 }
 
 // DeserializeMsgpack rebuilds a CountMinSketch from the cross-language
@@ -42,11 +41,7 @@ func (s *CountMinSketch) SerializeMsgpack() ([]byte, error) {
 // not part of the msgpack wire shape; use SerializeProtoBytes if those
 // must be preserved).
 func DeserializeMsgpack(buf []byte) (*CountMinSketch, error) {
-	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountMinSketch)
-	if err != nil {
-		return nil, fmt.Errorf("countminsketch: %w", err)
-	}
-	matrix, rowNum, colNum, err := asapmsgpack.UnmarshalCountMinSketch(payload)
+	matrix, rowNum, colNum, err := asapmsgpack.UnmarshalCountMinSketch(buf)
 	if err != nil {
 		return nil, fmt.Errorf("countminsketch: msgpack decode: %w", err)
 	}

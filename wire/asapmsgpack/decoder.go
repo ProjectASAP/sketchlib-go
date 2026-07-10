@@ -62,6 +62,72 @@ func (d *decoder) readArrayLen() (int, error) {
 	return 0, fmt.Errorf("asapmsgpack: expected array header, got 0x%02x", b)
 }
 
+// readMapLen reads a fixmap / map16 / map32 header and returns the number
+// of key/value pairs.
+func (d *decoder) readMapLen() (int, error) {
+	b, err := d.readByte()
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case b&0xf0 == 0x80:
+		return int(b & 0x0f), nil
+	case b == 0xde:
+		nb, err := d.readN(2)
+		if err != nil {
+			return 0, err
+		}
+		return int(binary.BigEndian.Uint16(nb)), nil
+	case b == 0xdf:
+		nb, err := d.readN(4)
+		if err != nil {
+			return 0, err
+		}
+		return int(binary.BigEndian.Uint32(nb)), nil
+	}
+	return 0, fmt.Errorf("asapmsgpack: expected map header, got 0x%02x", b)
+}
+
+// readBin reads a MessagePack bin8 / bin16 / bin32 value (the encoding
+// produced by writeBin / rmp_serde serde_bytes) and returns its bytes.
+func (d *decoder) readBin() ([]byte, error) {
+	b, err := d.readByte()
+	if err != nil {
+		return nil, err
+	}
+	var n int
+	switch b {
+	case 0xc4:
+		v, err := d.readByte()
+		if err != nil {
+			return nil, err
+		}
+		n = int(v)
+	case 0xc5:
+		nb, err := d.readN(2)
+		if err != nil {
+			return nil, err
+		}
+		n = int(binary.BigEndian.Uint16(nb))
+	case 0xc6:
+		nb, err := d.readN(4)
+		if err != nil {
+			return nil, err
+		}
+		n = int(binary.BigEndian.Uint32(nb))
+	default:
+		return nil, fmt.Errorf("asapmsgpack: expected bin header, got 0x%02x", b)
+	}
+	raw, err := d.readN(n)
+	if err != nil {
+		return nil, err
+	}
+	// Copy out so the returned slice does not alias the decoder buffer.
+	out := make([]byte, n)
+	copy(out, raw)
+	return out, nil
+}
+
 // readUint reads a msgpack integer as uint64. Accepts positive fixint,
 // uint8, uint16, uint32, uint64. Returns an error on negative ints.
 func (d *decoder) readUint() (uint64, error) {

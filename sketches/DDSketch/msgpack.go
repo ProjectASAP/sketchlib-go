@@ -50,7 +50,7 @@ func (d *DDSketch) SerializeMsgpack() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicDDSketch}, payload), nil
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicDDSketch}, asapmsgpack.StandardHashMetadata(), payload), nil
 }
 
 // DeserializeMsgpack rebuilds a DDSketch from the cross-language
