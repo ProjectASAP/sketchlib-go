@@ -39,6 +39,8 @@ const (
 	keySeedList           = "seed_list"
 	keyCanonicalSeedIndex = "canonical_seed_index"
 	keyMatrixSeedIndex    = "matrix_seed_index"
+	keyRows               = "rows"
+	keyCols               = "cols"
 	keyPrecision          = "precision"
 	keyCounterType        = "counter_type"
 	keyMode               = "mode"
@@ -82,14 +84,20 @@ func encodeHLLMetadata(precision uint32) []byte {
 }
 
 // encodeCMSMetadata builds the Count-Min descriptor metadata map (§2): the
-// shared hash spec plus `matrix_seed_index`, `counter_type` and `mode`.
-// Mirrors Rust `CmsMetadata` field order (9 keys).
-func encodeCMSMetadata(counterType, mode string) []byte {
+// shared hash spec plus `matrix_seed_index`, the structural matrix dimensions
+// `rows`/`cols`, `counter_type` and `mode`. Mirrors Rust `CmsMetadata` field
+// order (11 keys). The matrix dimensions are configuration (like HLL's
+// `precision`) and so live in the metadata, not the payload.
+func encodeCMSMetadata(rows, cols uint32, counterType, mode string) []byte {
 	enc := newEncoder()
-	enc.writeMapLen(9)
+	enc.writeMapLen(11)
 	writeHashSpecPairs(enc)
 	enc.writeString(keyMatrixSeedIndex)
 	enc.writeUint(uint64(matrixSeedIndex))
+	enc.writeString(keyRows)
+	enc.writeUint(uint64(rows))
+	enc.writeString(keyCols)
+	enc.writeUint(uint64(cols))
 	enc.writeString(keyCounterType)
 	enc.writeString(counterType)
 	enc.writeString(keyMode)
@@ -126,6 +134,8 @@ type parsedMetadata struct {
 	seedList           []uint64
 	canonicalSeedIndex uint64
 	matrixSeedIndex    uint64
+	rows               uint64
+	cols               uint64
 	precision          uint64
 	counterType        string
 	mode               string
@@ -171,6 +181,10 @@ func decodeMetadataMap(buf []byte, allowed map[string]bool) (parsedMetadata, err
 			m.canonicalSeedIndex, err = dec.readUint()
 		case keyMatrixSeedIndex:
 			m.matrixSeedIndex, err = dec.readUint()
+		case keyRows:
+			m.rows, err = dec.readUint()
+		case keyCols:
+			m.cols, err = dec.readUint()
 		case keyPrecision:
 			m.precision, err = dec.readUint()
 		case keyCounterType:
@@ -267,21 +281,30 @@ func decodeHLLMetadata(buf []byte) (precision uint32, err error) {
 }
 
 // decodeCMSMetadata validates the hash spec and returns the Count-Min structural
-// params (counter type and column-derivation mode).
-func decodeCMSMetadata(buf []byte) (counterType, mode string, err error) {
+// params: the matrix dimensions (rows/cols), counter type and column-derivation
+// mode. The dimensions are structural (the matrix is dynamically sized), so they
+// are read out of the metadata rather than validated against a fixed expectation.
+func decodeCMSMetadata(buf []byte) (rows, cols uint32, counterType, mode string, err error) {
 	m, err := decodeMetadataMap(buf, map[string]bool{
 		keyMetadataVersion: true, keyHashProfileID: true, keyHashAlgorithm: true,
 		keySeedDerivation: true, keyInputEncoding: true, keySeedList: true,
-		keyMatrixSeedIndex: true, keyCounterType: true, keyMode: true,
+		keyMatrixSeedIndex: true, keyRows: true, keyCols: true,
+		keyCounterType: true, keyMode: true,
 	})
 	if err != nil {
-		return "", "", err
+		return 0, 0, "", "", err
 	}
-	if err := m.validateHashSpec(keyMatrixSeedIndex, keyCounterType, keyMode); err != nil {
-		return "", "", err
+	if err := m.validateHashSpec(keyMatrixSeedIndex, keyRows, keyCols, keyCounterType, keyMode); err != nil {
+		return 0, 0, "", "", err
 	}
 	if m.matrixSeedIndex != uint64(matrixSeedIndex) {
-		return "", "", fmt.Errorf("asapmsgpack: unexpected matrix_seed_index %d", m.matrixSeedIndex)
+		return 0, 0, "", "", fmt.Errorf("asapmsgpack: unexpected matrix_seed_index %d", m.matrixSeedIndex)
 	}
-	return m.counterType, m.mode, nil
+	if m.rows > 0xffffffff {
+		return 0, 0, "", "", fmt.Errorf("asapmsgpack: rows %d out of u32 range", m.rows)
+	}
+	if m.cols > 0xffffffff {
+		return 0, 0, "", "", fmt.Errorf("asapmsgpack: cols %d out of u32 range", m.cols)
+	}
+	return uint32(m.rows), uint32(m.cols), m.counterType, m.mode, nil
 }

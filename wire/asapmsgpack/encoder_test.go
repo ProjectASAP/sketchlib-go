@@ -180,10 +180,10 @@ func TestHLLSketchRejectsWrongRegisterCount(t *testing.T) {
 
 // NOTE: the pre-alignment Count-Min golden pinned the OLD payload-only format
 // ([ matrix:[][]f64, row_num, col_num ], no envelope). The ASAPv1-aligned
-// MarshalCountMinSketch now emits a full envelope (kind_id 0x02 0x00,
-// counter_type/mode in the metadata) with the payload [ rows, cols, counts ]
-// where counts is a flat row-major array. This is now a structural + round-trip
-// test; cross-language golden vectors are a follow-up (see PR body).
+// MarshalCountMinSketch now emits a full envelope (kind_id 0x02 0x00, with
+// rows/cols/counter_type/mode in the metadata) and the payload [ counts ] where
+// counts is a flat row-major array. This is a structural + round-trip test;
+// cross-language byte parity is pinned by the golden tests (golden_test.go).
 func TestCountMinSketchNewFormatRoundTrip(t *testing.T) {
 	matrix := [][]float64{
 		{0, 0, 0},
@@ -197,21 +197,24 @@ func TestCountMinSketchNewFormatRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(got[8:10], []byte{0x02, 0x00}) {
 		t.Fatalf("kind_id: got %x, want 0200", got[8:10])
 	}
-	// Metadata must carry counter_type=f64 and mode=fast.
+	// Metadata must carry rows=2, cols=3, counter_type=f64 and mode=fast.
 	_, meta, payload, err := SplitWrapper(got)
 	if err != nil {
 		t.Fatalf("SplitWrapper: %v", err)
 	}
-	counterType, mode, err := decodeCMSMetadata(meta)
+	rows, cols, counterType, mode, err := decodeCMSMetadata(meta)
 	if err != nil {
 		t.Fatalf("decodeCMSMetadata: %v", err)
+	}
+	if rows != 2 || cols != 3 {
+		t.Fatalf("metadata dims: got %dx%d, want 2x3", rows, cols)
 	}
 	if counterType != CMSCounterF64 || mode != CMSModeFast {
 		t.Fatalf("metadata: got %q/%q, want f64/fast", counterType, mode)
 	}
-	// Payload is a positional array [rows, cols, counts]; header 0x93.
-	if payload[0] != 0x93 {
-		t.Fatalf("payload header: 0x%02x, want 0x93 (array3)", payload[0])
+	// Payload is a positional array [counts]; header 0x91.
+	if payload[0] != 0x91 {
+		t.Fatalf("payload header: 0x%02x, want 0x91 (array1)", payload[0])
 	}
 
 	gotMatrix, rowNum, colNum, err := UnmarshalCountMinSketch(got)

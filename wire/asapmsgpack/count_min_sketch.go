@@ -24,10 +24,11 @@ const (
 // by bit-slicing a single hash, so it serializes as the `f64` counter type in
 // `fast` mode. The payload is a positional MessagePack array:
 //
-//	[ rows:uint, cols:uint, counts:array<f64> ]   // counts packed row-major
+//	[ counts:array<f64> ]   // counts packed row-major
 //
-// counter_type and mode live in the metadata, not the payload. Non-rectangular
-// matrices are rejected before any bytes are emitted.
+// The matrix dimensions (rows/cols), counter_type and mode all live in the
+// metadata, not the payload. Non-rectangular matrices are rejected before any
+// bytes are emitted.
 func MarshalCountMinSketch(rowNum, colNum uint64, matrix [][]float64) ([]byte, error) {
 	if uint64(len(matrix)) != rowNum {
 		return nil, fmt.Errorf(
@@ -43,9 +44,7 @@ func MarshalCountMinSketch(rowNum, colNum uint64, matrix [][]float64) ([]byte, e
 	}
 
 	e := newEncoder()
-	e.writeArrayLen(3)
-	e.writeUint(rowNum)
-	e.writeUint(colNum)
+	e.writeArrayLen(1)
 	e.writeArrayLen(int(rowNum * colNum))
 	for _, row := range matrix {
 		for _, v := range row {
@@ -53,7 +52,7 @@ func MarshalCountMinSketch(rowNum, colNum uint64, matrix [][]float64) ([]byte, e
 		}
 	}
 
-	metadata := encodeCMSMetadata(CMSCounterF64, CMSModeFast)
+	metadata := encodeCMSMetadata(uint32(rowNum), uint32(colNum), CMSCounterF64, CMSModeFast)
 	return EncodeWrapper(CMSKind, metadata, e.bytes()), nil
 }
 
@@ -79,8 +78,8 @@ type CountMinWireState struct {
 }
 
 // MarshalCountMinSketchState encodes a fully-specified Count-Min wire state into
-// a complete ASAPv1 envelope. The payload is the positional array
-// [ rows:uint, cols:uint, counts:array ]; counter_type and mode live in the
+// a complete ASAPv1 envelope. The payload is the positional array [ counts:array ];
+// the matrix dimensions (rows/cols), counter_type and mode all live in the
 // metadata. Integer counters are written with rmp_serde's family/width rule
 // (non-negative → uint family minimal width, negative → int family), matching
 // the Rust reference encoder.
@@ -91,9 +90,7 @@ func MarshalCountMinSketchState(s CountMinWireState) ([]byte, error) {
 	n := s.Rows * s.Cols
 
 	e := newEncoder()
-	e.writeArrayLen(3)
-	e.writeUint(s.Rows)
-	e.writeUint(s.Cols)
+	e.writeArrayLen(1)
 	e.writeArrayLen(int(n))
 	switch s.CounterType {
 	case CMSCounterI64:
@@ -118,7 +115,7 @@ func MarshalCountMinSketchState(s CountMinWireState) ([]byte, error) {
 		return nil, fmt.Errorf("asapmsgpack: unsupported counter_type %q", s.CounterType)
 	}
 
-	metadata := encodeCMSMetadata(s.CounterType, s.Mode)
+	metadata := encodeCMSMetadata(uint32(s.Rows), uint32(s.Cols), s.CounterType, s.Mode)
 	return EncodeWrapper(CMSKind, metadata, e.bytes()), nil
 }
 
@@ -136,13 +133,15 @@ func UnmarshalCountMinSketchState(buf []byte) (CountMinWireState, error) {
 	if len(kindID) != len(CMSKind) || kindID[0] != CMSKind[0] || kindID[1] != CMSKind[1] {
 		return s, fmt.Errorf("asapmsgpack: kind_id %x is not Count-Min", kindID)
 	}
-	counterType, mode, err := decodeCMSMetadata(metadata)
+	rows, cols, counterType, mode, err := decodeCMSMetadata(metadata)
 	if err != nil {
 		return s, err
 	}
 	if counterType != CMSCounterI64 && counterType != CMSCounterF64 {
 		return s, fmt.Errorf("asapmsgpack: unsupported counter_type %q", counterType)
 	}
+	s.Rows = uint64(rows)
+	s.Cols = uint64(cols)
 	s.CounterType = counterType
 	s.Mode = mode
 
@@ -151,14 +150,8 @@ func UnmarshalCountMinSketchState(buf []byte) (CountMinWireState, error) {
 	if err != nil {
 		return s, err
 	}
-	if n != 3 {
-		return s, fmt.Errorf("asapmsgpack: CountMinSketch expected 3-element array, got %d", n)
-	}
-	if s.Rows, err = d.readUint(); err != nil {
-		return s, err
-	}
-	if s.Cols, err = d.readUint(); err != nil {
-		return s, err
+	if n != 1 {
+		return s, fmt.Errorf("asapmsgpack: CountMinSketch expected 1-element array, got %d", n)
 	}
 	countLen, err := d.readArrayLen()
 	if err != nil {
@@ -201,28 +194,23 @@ func UnmarshalCountMinSketch(buf []byte) (matrix [][]float64, rowNum, colNum uin
 	if len(kindID) != len(CMSKind) || kindID[0] != CMSKind[0] || kindID[1] != CMSKind[1] {
 		return nil, 0, 0, fmt.Errorf("asapmsgpack: kind_id %x is not Count-Min", kindID)
 	}
-	counterType, _, err := decodeCMSMetadata(metadata)
+	rows, cols, counterType, _, err := decodeCMSMetadata(metadata)
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	if counterType != CMSCounterF64 && counterType != CMSCounterI64 {
 		return nil, 0, 0, fmt.Errorf("asapmsgpack: unsupported counter_type %q", counterType)
 	}
+	rowNum, colNum = uint64(rows), uint64(cols)
 
 	d := newDecoder(payload)
 	n, err := d.readArrayLen()
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	if n != 3 {
+	if n != 1 {
 		return nil, 0, 0, fmt.Errorf(
-			"asapmsgpack: CountMinSketch expected 3-element array, got %d", n)
-	}
-	if rowNum, err = d.readUint(); err != nil {
-		return nil, 0, 0, err
-	}
-	if colNum, err = d.readUint(); err != nil {
-		return nil, 0, 0, err
+			"asapmsgpack: CountMinSketch expected 1-element array, got %d", n)
 	}
 	countLen, err := d.readArrayLen()
 	if err != nil {

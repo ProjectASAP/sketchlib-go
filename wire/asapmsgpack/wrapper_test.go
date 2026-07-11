@@ -97,10 +97,13 @@ func TestHLLMetadataRoundTripAndValidation(t *testing.T) {
 }
 
 func TestCMSMetadataRoundTripAndValidation(t *testing.T) {
-	meta := encodeCMSMetadata(CMSCounterF64, CMSModeFast)
-	counterType, mode, err := decodeCMSMetadata(meta)
+	meta := encodeCMSMetadata(2, 3, CMSCounterF64, CMSModeFast)
+	rows, cols, counterType, mode, err := decodeCMSMetadata(meta)
 	if err != nil {
 		t.Fatalf("decodeCMSMetadata: %v", err)
+	}
+	if rows != 2 || cols != 3 {
+		t.Fatalf("dims: got %dx%d, want 2x3", rows, cols)
 	}
 	if counterType != CMSCounterF64 || mode != CMSModeFast {
 		t.Fatalf("got %q/%q, want f64/fast", counterType, mode)
