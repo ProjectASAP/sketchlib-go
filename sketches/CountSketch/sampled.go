@@ -27,9 +27,9 @@ const maxSampledRows = 64
 // instead of leaving it as a common-mode term (see §3.2). A nil sampler or a
 // full-rate sampler (p≥1) degenerates to the plain UpdateString.
 //
-// The sampler is any common.RowSampler: *common.GeometricSampler (NitroSketch
-// skip-sampling, stateful) or *common.ConsistentSampler (stateless hash
-// decision — location-independent, see design §3.1 single-location sampling).
+// The sampler is any common.RowSampler — currently *common.GeometricSampler
+// (NitroSketch skip-sampling, stateful). Admission is decided exactly once,
+// upstream of serialization, so no downstream stage re-derives it.
 func (s *CountSketch) UpdateStringSampledPerRow(key string, count float64, sampler common.RowSampler) {
 	if sampler == nil || sampler.P() >= 1.0 || s.Rows > maxSampledRows {
 		s.UpdateString(key, count)

@@ -5,6 +5,21 @@ import (
 	"math/rand"
 )
 
+// RowSampler is the admission interface consumed by the per-row sampled sketch
+// updates (CountSketch.UpdateStringSampledPerRow, CountMinSketch.
+// InsertWithHashSampledPerRow). The caller invokes BeginItem() exactly once per
+// stream item, then Admit() exactly once per row in row order (0..d-1).
+//
+// The sole implementation is *GeometricSampler — NitroSketch skip-sampling
+// over the flattened (item,row) candidate stream. Stateful (RNG skip
+// counter); cheapest RNG. Admission is decided exactly once, upstream of
+// serialization (SDK-side), so no other pipeline stage re-derives it.
+type RowSampler interface {
+	BeginItem()
+	Admit() bool
+	P() float64
+}
+
 // GeometricSampler implements NitroSketch-style geometric skip-sampling.
 //
 // Instead of flipping an independent Bernoulli(p) coin on every stream update
@@ -75,8 +90,8 @@ func (s *GeometricSampler) P() float64 {
 
 // BeginItem marks a stream-item boundary (RowSampler). The geometric
 // skip-sampler runs over the FLATTENED (item,row) candidate stream, so item
-// boundaries carry no state here — this is a no-op kept for interface parity
-// with ConsistentSampler.
+// boundaries carry no state here — this is a no-op kept for RowSampler
+// interface parity.
 func (s *GeometricSampler) BeginItem() {}
 
 // IsExact reports whether the sampler admits every update (p == 1.0).

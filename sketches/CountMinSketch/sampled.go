@@ -30,9 +30,9 @@ const maxSampledRowsCMS = 64
 // envelope therefore stays "exact" (wireSampleP()==0) and downstream does NOT
 // double-correct. A nil / full-rate (p>=1) sampler degenerates to InsertWithHash.
 //
-// The sampler is any common.RowSampler: *common.GeometricSampler (NitroSketch
-// skip-sampling, stateful) or *common.ConsistentSampler (stateless hash
-// decision — location-independent, see design §3.1 single-location sampling).
+// The sampler is any common.RowSampler — currently *common.GeometricSampler
+// (NitroSketch skip-sampling, stateful). Admission is decided exactly once,
+// upstream of serialization, so no downstream stage re-derives it.
 func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler common.RowSampler) {
 	if sampler == nil || sampler.P() >= 1.0 || s.Rows > maxSampledRowsCMS {
 		s.InsertWithHash(hash)
