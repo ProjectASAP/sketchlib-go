@@ -224,6 +224,13 @@ func NewFromState(state *ddpb.DDSketchState) (*DDSketch, error) {
 		sum: 0,
 		min: minVal,
 		max: maxVal,
+		// gosPopulated: this constructor is used by the BACKEND's decode path
+		// and by cross-peer merge, not by an edge-side GOS-enabled series, but
+		// initialise it correctly anyway (one more O(span) pass over a
+		// reconstruction that is already O(span)) so a sketch built this way
+		// behaves correctly if it is ever subsequently driven through
+		// UpdateGOS (e.g. in a test).
+		gosPopulated: populatedBucketCount(&buckets),
 	}, nil
 }
 
