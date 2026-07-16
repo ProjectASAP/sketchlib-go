@@ -79,3 +79,51 @@ func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler common
 		s.L2[r] += curr*curr - prev*prev
 	}
 }
+
+// InsertWithHashAtRows applies a PRE-DECIDED per-row admission insert: the
+// caller (typically an OTel SDK that already ran NitroSketch admission
+// upstream of serialization) supplies admittedRows as a bitmask (bit r set
+// ⇒ row r admits this occurrence) and value (the occurrence's raw
+// magnitude — 1.0 for pure frequency counting, matching
+// InsertWithHashSampledPerRow's implicit weight), and this updates exactly
+// those rows with the value/p inverse-probability weight — the same
+// column-derivation and cell update as InsertWithHashSampledPerRow's step
+// 2, but the admission decision is GIVEN rather than made here: there is
+// no sampler call in this method at all.
+//
+// admittedRows == 0 is a no-op (the caller is expected to have already
+// dropped R(x)=∅ occurrences). p<=0 or p>=1 skips the rescale (weight =
+// value). Matches InsertWithHashSampledPerRow's "exact envelope, no
+// double-correct" contract: the weight is baked into the cell here, so
+// downstream must NOT also stamp/consume a wire sample_p for this sketch.
+func (s *CountMinSketch) InsertWithHashAtRows(hash uint64, value float64, admittedRows uint64, p float64) {
+	if admittedRows == 0 || s.Rows > maxSampledRowsCMS {
+		return
+	}
+	w := value
+	if p > 0 && p < 1.0 {
+		w = value / p
+	}
+	for r := 0; r < s.Rows; r++ {
+		if admittedRows&(1<<uint(r)) == 0 {
+			continue
+		}
+		c := int((hash >> (uint(r) * s.bitsPerRow)) & s.mask)
+		if c >= s.Cols {
+			c %= s.Cols
+		}
+
+		countRow := s.countStore.RowSlice(r)
+		sumRow := s.sumStore.RowSlice(r)
+		sum2Row := s.sum2Store.RowSlice(r)
+
+		prev := countRow[c]
+		curr := prev + w
+		countRow[c] = curr
+		sumRow[c] += w
+		sum2Row[c] += w
+
+		s.L1[r] += w
+		s.L2[r] += curr*curr - prev*prev
+	}
+}
