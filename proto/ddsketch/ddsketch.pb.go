@@ -39,16 +39,42 @@ const (
 // carried on the wire: count is recoverable by summing store_counts, and
 // min/max/quantiles are derived from the bucket distribution within the
 // relative-accuracy guarantee. sum is not recoverable and is not transmitted.
+//
+// Bucket encoding (sketchlib-go#72): a producer emits buckets in exactly
+// ONE of two shapes, never both:
+//   - dense (store_counts + store_offset): the legacy contiguous-array
+//     form, positional from store_offset. Cheapest when the populated
+//     buckets are reasonably dense within their span.
+//   - sparse (buckets, field 16): index+count pairs, one per POPULATED
+//     bucket only, omitting every zero position. Cheapest — and, above
+//     a sparsity threshold, mandatory — when a single outlier bucket
+//     index would otherwise force a dense array to span an enormous,
+//     mostly-empty range (see DDSketch.go/portable.go for the producer's
+//     selection heuristic). A consumer MUST check `buckets` first and
+//     fall back to `store_counts`/`store_offset` only when `buckets` is
+//     empty, since a sparse-encoded message leaves the legacy fields at
+//     their zero value.
 type DDSketchState struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Relative accuracy guarantee. Required. Must satisfy 0 < alpha < 1.
 	Alpha float64 `protobuf:"fixed64,1,opt,name=alpha,proto3" json:"alpha,omitempty"`
 	// Bucket count array in index order (ascending absolute bucket index).
 	// Absolute index of store_counts[i] is i + store_offset.
+	// LEGACY dense encoding — see the sparse `buckets` field (16) above.
+	// Left empty when the producer chose the sparse encoding.
 	StoreCounts []uint64 `protobuf:"varint,2,rep,packed,name=store_counts,json=storeCounts,proto3" json:"store_counts,omitempty"`
 	// Absolute bucket index corresponding to store_counts[0].
 	// May be negative (values < 1.0 map to negative bucket indices).
-	StoreOffset   int32 `protobuf:"zigzag32,3,opt,name=store_offset,json=storeOffset,proto3" json:"store_offset,omitempty"`
+	// Meaningless when store_counts is empty (sparse encoding in use).
+	StoreOffset int32 `protobuf:"zigzag32,3,opt,name=store_offset,json=storeOffset,proto3" json:"store_offset,omitempty"`
+	// Sparse bucket encoding: one entry per POPULATED bucket, index+count.
+	// Populated exactly when the producer chose sparse over dense (see
+	// above); empty (unset) when the dense fields are in use. New in the
+	// sketchlib-go#72 fix — consumers that pre-date this field simply never
+	// see it populated for old-shape (dense) messages, and see an
+	// empty/absent legacy pair for new-shape (sparse) messages instead of a
+	// (potentially enormous) dense array.
+	Buckets       []*DDSketchBucketCount `protobuf:"bytes,16,rep,name=buckets,proto3" json:"buckets,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -104,6 +130,67 @@ func (x *DDSketchState) GetStoreOffset() int32 {
 	return 0
 }
 
+func (x *DDSketchState) GetBuckets() []*DDSketchBucketCount {
+	if x != nil {
+		return x.Buckets
+	}
+	return nil
+}
+
+// DDSketchBucketCount is one (index, absolute count) pair used by
+// DDSketchState's sparse bucket encoding.
+type DDSketchBucketCount struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Index         int32                  `protobuf:"zigzag32,1,opt,name=index,proto3" json:"index,omitempty"` // signed bucket index (negative for values < 1)
+	Count         uint64                 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`   // absolute (not delta) bucket count; always > 0
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DDSketchBucketCount) Reset() {
+	*x = DDSketchBucketCount{}
+	mi := &file_ddsketch_ddsketch_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DDSketchBucketCount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DDSketchBucketCount) ProtoMessage() {}
+
+func (x *DDSketchBucketCount) ProtoReflect() protoreflect.Message {
+	mi := &file_ddsketch_ddsketch_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DDSketchBucketCount.ProtoReflect.Descriptor instead.
+func (*DDSketchBucketCount) Descriptor() ([]byte, []int) {
+	return file_ddsketch_ddsketch_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *DDSketchBucketCount) GetIndex() int32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *DDSketchBucketCount) GetCount() uint64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
 // DDSketchDelta carries only the buckets that changed above threshold T.
 //
 // DataPoint-level metric scalars (d_count/d_sum/new_min/new_max/min_changed/
@@ -119,7 +206,7 @@ type DDSketchDelta struct {
 
 func (x *DDSketchDelta) Reset() {
 	*x = DDSketchDelta{}
-	mi := &file_ddsketch_ddsketch_proto_msgTypes[1]
+	mi := &file_ddsketch_ddsketch_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -131,7 +218,7 @@ func (x *DDSketchDelta) String() string {
 func (*DDSketchDelta) ProtoMessage() {}
 
 func (x *DDSketchDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_ddsketch_ddsketch_proto_msgTypes[1]
+	mi := &file_ddsketch_ddsketch_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -144,7 +231,7 @@ func (x *DDSketchDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DDSketchDelta.ProtoReflect.Descriptor instead.
 func (*DDSketchDelta) Descriptor() ([]byte, []int) {
-	return file_ddsketch_ddsketch_proto_rawDescGZIP(), []int{1}
+	return file_ddsketch_ddsketch_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *DDSketchDelta) GetBuckets() []*DDSketchBucketDelta {
@@ -165,7 +252,7 @@ type DDSketchBucketDelta struct {
 
 func (x *DDSketchBucketDelta) Reset() {
 	*x = DDSketchBucketDelta{}
-	mi := &file_ddsketch_ddsketch_proto_msgTypes[2]
+	mi := &file_ddsketch_ddsketch_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -177,7 +264,7 @@ func (x *DDSketchBucketDelta) String() string {
 func (*DDSketchBucketDelta) ProtoMessage() {}
 
 func (x *DDSketchBucketDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_ddsketch_ddsketch_proto_msgTypes[2]
+	mi := &file_ddsketch_ddsketch_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -190,7 +277,7 @@ func (x *DDSketchBucketDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DDSketchBucketDelta.ProtoReflect.Descriptor instead.
 func (*DDSketchBucketDelta) Descriptor() ([]byte, []int) {
-	return file_ddsketch_ddsketch_proto_rawDescGZIP(), []int{2}
+	return file_ddsketch_ddsketch_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *DDSketchBucketDelta) GetIndex() int32 {
@@ -211,11 +298,15 @@ var File_ddsketch_ddsketch_proto protoreflect.FileDescriptor
 
 const file_ddsketch_ddsketch_proto_rawDesc = "" +
 	"\n" +
-	"\x17ddsketch/ddsketch.proto\x12\fsketchlib.v1\"\x8d\x01\n" +
+	"\x17ddsketch/ddsketch.proto\x12\fsketchlib.v1\"\xca\x01\n" +
 	"\rDDSketchState\x12\x14\n" +
 	"\x05alpha\x18\x01 \x01(\x01R\x05alpha\x12%\n" +
 	"\fstore_counts\x18\x02 \x03(\x04B\x02\x10\x01R\vstoreCounts\x12!\n" +
-	"\fstore_offset\x18\x03 \x01(\x11R\vstoreOffsetJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\x10\"p\n" +
+	"\fstore_offset\x18\x03 \x01(\x11R\vstoreOffset\x12;\n" +
+	"\abuckets\x18\x10 \x03(\v2!.sketchlib.v1.DDSketchBucketCountR\abucketsJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\bJ\x04\b\b\x10\x10\"A\n" +
+	"\x13DDSketchBucketCount\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x11R\x05index\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\x04R\x05count\"p\n" +
 	"\rDDSketchDelta\x12;\n" +
 	"\abuckets\x18\x01 \x03(\v2!.sketchlib.v1.DDSketchBucketDeltaR\abucketsJ\x04\b\x02\x10\x03J\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\b\"D\n" +
 	"\x13DDSketchBucketDelta\x12\x14\n" +
@@ -234,19 +325,21 @@ func file_ddsketch_ddsketch_proto_rawDescGZIP() []byte {
 	return file_ddsketch_ddsketch_proto_rawDescData
 }
 
-var file_ddsketch_ddsketch_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_ddsketch_ddsketch_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_ddsketch_ddsketch_proto_goTypes = []any{
 	(*DDSketchState)(nil),       // 0: sketchlib.v1.DDSketchState
-	(*DDSketchDelta)(nil),       // 1: sketchlib.v1.DDSketchDelta
-	(*DDSketchBucketDelta)(nil), // 2: sketchlib.v1.DDSketchBucketDelta
+	(*DDSketchBucketCount)(nil), // 1: sketchlib.v1.DDSketchBucketCount
+	(*DDSketchDelta)(nil),       // 2: sketchlib.v1.DDSketchDelta
+	(*DDSketchBucketDelta)(nil), // 3: sketchlib.v1.DDSketchBucketDelta
 }
 var file_ddsketch_ddsketch_proto_depIdxs = []int32{
-	2, // 0: sketchlib.v1.DDSketchDelta.buckets:type_name -> sketchlib.v1.DDSketchBucketDelta
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	1, // 0: sketchlib.v1.DDSketchState.buckets:type_name -> sketchlib.v1.DDSketchBucketCount
+	3, // 1: sketchlib.v1.DDSketchDelta.buckets:type_name -> sketchlib.v1.DDSketchBucketDelta
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_ddsketch_ddsketch_proto_init() }
@@ -260,7 +353,7 @@ func file_ddsketch_ddsketch_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ddsketch_ddsketch_proto_rawDesc), len(file_ddsketch_ddsketch_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
