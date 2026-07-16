@@ -303,6 +303,84 @@ func (s *CountMinSketch) FastInsertWeightWithHashValue(hash uint64, many float64
 	if !s.admit() {
 		return
 	}
+	s.insertHashRaw(hash, many)
+}
+
+// GOSCellUpdate is one matrix cell that crossed the insert-time GOS
+// threshold and was reset to zero in place (ASAPCollector's
+// design-gos-unified-edge-telemetry.md §11: "check at insert time whether
+// the accumulated-since-last-sync delta crosses the threshold; if it does,
+// send it and reset"). Delta is the cell's magnitude immediately before the
+// reset — since every cell starts at 0 right after its own last reset, this
+// value already equals "the change since that cell was last sent," so no
+// separate per-cell accumulator is needed on top of the matrix itself.
+// Mirrors CountSketch's GOSCellUpdate (same shape); CMS counters are
+// non-negative so Delta is never signed.
+type GOSCellUpdate struct {
+	Row, Col uint32
+	Delta    float64
+}
+
+// InsertWithHashGOS applies the same per-row hashed update as
+// FastInsertWeightWithHashValue (weighted, admission-sampled), then
+// immediately checks EACH row's just-touched cell against threshold: a cell
+// whose (non-negative) magnitude now reaches threshold is reset to 0 in
+// place — L1/L2 are decremented to match, so the sketch's own current-mass
+// accumulators (CM_L1/CM_L2) stay correct for the cells that remain live —
+// and reported in the returned slice. threshold<=0 disables the check
+// entirely and behaves exactly like FastInsertWeightWithHashValue (no cells
+// returned), so callers can toggle GOS mode without a second insert path.
+//
+// Unlike CountSketch's UpdateStringGOS, no math.Abs is needed: CMS counters
+// only ever increase between resets (many is a non-negative weight), so
+// curr is always >= 0.
+func (s *CountMinSketch) InsertWithHashGOS(hash uint64, many float64, threshold float64) []GOSCellUpdate {
+	if many == 0 {
+		return nil
+	}
+	if !s.admit() {
+		return nil
+	}
+	if threshold <= 0 {
+		s.insertHashRaw(hash, many)
+		return nil
+	}
+	var dirty []GOSCellUpdate
+	shift := uint(0)
+	for r := 0; r < s.Rows; r++ {
+		c := int((hash >> shift) & s.mask)
+		if c >= s.Cols {
+			c %= s.Cols
+		}
+		shift += s.bitsPerRow
+
+		countRow := s.countStore.RowSlice(r)
+		sumRow := s.sumStore.RowSlice(r)
+		sum2Row := s.sum2Store.RowSlice(r)
+
+		prev := countRow[c]
+		curr := prev + many
+		countRow[c] = curr
+		sumRow[c] += many
+		sum2Row[c] += many
+
+		s.L1[r] += many
+		s.L2[r] += curr*curr - prev*prev
+
+		if curr >= threshold {
+			dirty = append(dirty, GOSCellUpdate{Row: uint32(r), Col: uint32(c), Delta: curr})
+			countRow[c] = 0
+			s.L1[r] -= curr
+			s.L2[r] -= curr * curr
+		}
+	}
+	return dirty
+}
+
+// insertHashRaw is the shared unweighted-hash insert loop (no GOS check),
+// factored out of FastInsertWeightWithHashValue so InsertWithHashGOS's
+// threshold<=0 fast path shares it instead of duplicating the loop body.
+func (s *CountMinSketch) insertHashRaw(hash uint64, many float64) {
 	shift := uint(0)
 	for r := 0; r < s.Rows; r++ {
 		c := int((hash >> shift) & s.mask)
