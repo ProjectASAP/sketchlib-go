@@ -1,34 +1,37 @@
 package hll
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/wire/asapmsgpack"
 )
 
+// TestSerializeMsgpackRoundTripViaAsapmsgpack round-trips the sketch through the
+// ASAPv1-aligned wire format: the variant is carried in the 2-byte kind_id
+// (Datafusion -> Ertl-MLE, 0x01 0x02), the precision in the metadata, and the
+// registers as a msgpack `bin` payload.
 func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	sketch := NewHyperLogLog()
-	// Insert a few distinct values so at least a handful of registers
-	// end up non-zero.
 	for i := 0; i < 1000; i++ {
 		sketch.UpdateValue(float64(i))
 	}
 
-	bytes, err := sketch.SerializeMsgpack()
+	buf, err := sketch.SerializeMsgpack()
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
 
-	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
-	kindID, payload, err := asapmsgpack.DecodeWrapper(bytes)
+	// The envelope kind_id is the 2-byte Ertl-MLE ("Datafusion") id.
+	kindID, _, err := asapmsgpack.DecodeWrapper(buf)
 	if err != nil {
 		t.Fatalf("DecodeWrapper: %v", err)
 	}
-	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicHLL {
-		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicHLL, kindID)
+	if !bytes.Equal(kindID, asapmsgpack.HLLKindErtlMLE) {
+		t.Fatalf("expected kind_id %x, got %x", asapmsgpack.HLLKindErtlMLE, kindID)
 	}
 
-	state, err := asapmsgpack.UnmarshalHLLSketch(payload)
+	state, err := asapmsgpack.UnmarshalHLLSketch(buf)
 	if err != nil {
 		t.Fatalf("UnmarshalHLLSketch: %v", err)
 	}
@@ -42,8 +45,6 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	if len(state.Registers) != expectedRegisters {
 		t.Errorf("register count: got %d, want %d", len(state.Registers), expectedRegisters)
 	}
-	// After 1000 inserts we should see at least a few non-zero
-	// registers (pins that the bytes weren't lost in transit).
 	var nonZero int
 	for _, r := range state.Registers {
 		if r != 0 {
@@ -53,25 +54,33 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	if nonZero == 0 {
 		t.Error("expected some non-zero registers after 1000 inserts; got all zero")
 	}
+
+	// Full round-trip back into a sketch preserves the registers.
+	decoded, err := DeserializeMsgpack(buf)
+	if err != nil {
+		t.Fatalf("DeserializeMsgpack: %v", err)
+	}
+	if !bytes.Equal(decoded.RegisterSlice(), sketch.RegisterSlice()) {
+		t.Error("registers changed across round trip")
+	}
 }
 
 func TestSerializeMsgpackEmptyRegisters(t *testing.T) {
 	sketch := NewHyperLogLog()
-	bytes, err := sketch.SerializeMsgpack()
+	buf, err := sketch.SerializeMsgpack()
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
 
-	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
-	kindID, payload, err := asapmsgpack.DecodeWrapper(bytes)
+	kindID, _, err := asapmsgpack.DecodeWrapper(buf)
 	if err != nil {
 		t.Fatalf("DecodeWrapper: %v", err)
 	}
-	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicHLL {
-		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicHLL, kindID)
+	if !bytes.Equal(kindID, asapmsgpack.HLLKindErtlMLE) {
+		t.Fatalf("expected kind_id %x, got %x", asapmsgpack.HLLKindErtlMLE, kindID)
 	}
 
-	state, err := asapmsgpack.UnmarshalHLLSketch(payload)
+	state, err := asapmsgpack.UnmarshalHLLSketch(buf)
 	if err != nil {
 		t.Fatalf("UnmarshalHLLSketch: %v", err)
 	}
@@ -81,7 +90,6 @@ func TestSerializeMsgpackEmptyRegisters(t *testing.T) {
 	if len(state.Registers) != 1<<HLLPrecision {
 		t.Errorf("register count: got %d, want %d", len(state.Registers), 1<<HLLPrecision)
 	}
-	// Every register should be zero on a fresh HLL.
 	for i, r := range state.Registers {
 		if r != 0 {
 			t.Errorf("register %d: got %d, want 0", i, r)

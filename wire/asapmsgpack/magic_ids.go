@@ -39,3 +39,21 @@ const (
 	// MagicDeltaResult is the magic-ID prefix for delta-set aggregator results.
 	MagicDeltaResult byte = 0x09
 )
+
+// ASAPv1 two-byte kind_id values `[family, variant]`
+// (asap_sketchlib/docs/asapv1_wire_format.md §1). kind_id names the sketch's
+// *algorithm identity* only — structural params (HLL precision, CMS counter
+// type / mode) live in the metadata. These are the mirrored, single-source-of-
+// truth ids for the ASAPv1-aligned HLL and Count-Min payloads; the family byte
+// matches the 1-byte Magic* constants above, with the variant byte added.
+var (
+	// HLLKindClassic is HLL with the Classic ("Regular") estimator.
+	HLLKindClassic = []byte{MagicHLL, 0x01}
+	// HLLKindErtlMLE is HLL with the Ertl-MLE ("Datafusion") estimator.
+	HLLKindErtlMLE = []byte{MagicHLL, 0x02}
+	// HLLKindHIP is HLL with the HIP estimator.
+	HLLKindHIP = []byte{MagicHLL, 0x03}
+
+	// CMSKind is the single Count-Min kind_id (counter type + mode are metadata).
+	CMSKind = []byte{MagicCountMinSketch, 0x00}
+)

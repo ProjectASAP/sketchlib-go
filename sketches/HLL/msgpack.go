@@ -33,15 +33,14 @@ func (h *HyperLogLog) SerializeMsgpack() ([]byte, error) {
 	registers := make([]byte, len(src))
 	copy(registers, src)
 
-	payload, err := asapmsgpack.MarshalHLLSketch(asapmsgpack.HLLSketchState{
+	// MarshalHLLSketch returns the complete ASAPv1 envelope (kind_id derived
+	// from the variant, metadata from the precision, payload from the
+	// registers), so no separate EncodeWrapper call is needed.
+	return asapmsgpack.MarshalHLLSketch(asapmsgpack.HLLSketchState{
 		Variant:   asapmsgpack.HLLVariantDatafusion,
 		Precision: uint32(HLLPrecision),
 		Registers: registers,
 	})
-	if err != nil {
-		return nil, err
-	}
-	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicHLL}, payload), nil
 }
 
 // DeserializeMsgpack rebuilds a HyperLogLog from the cross-language
@@ -49,11 +48,7 @@ func (h *HyperLogLog) SerializeMsgpack() ([]byte, error) {
 // `sketch_core::hll_sketch::HllSketch::serialize_msgpack`). Mirrors
 // Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
 func DeserializeMsgpack(buf []byte) (*HyperLogLog, error) {
-	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicHLL)
-	if err != nil {
-		return nil, fmt.Errorf("hll: %w", err)
-	}
-	state, err := asapmsgpack.UnmarshalHLLSketch(payload)
+	state, err := asapmsgpack.UnmarshalHLLSketch(buf)
 	if err != nil {
 		return nil, fmt.Errorf("hll: msgpack decode: %w", err)
 	}

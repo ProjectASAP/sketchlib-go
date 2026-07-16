@@ -1,28 +1,24 @@
 package countminsketch
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/wire/asapmsgpack"
 )
 
-// TestSerializeMsgpackRoundTripViaAsapmsgpack pins the sketch's
-// SerializeMsgpack output to what `wire/asapmsgpack.UnmarshalCountMinSketch`
-// decodes. Indirectly pins it to ASAPQuery-backend's
-// `sketch_core::count_min::CountMinSketch::deserialize_msgpack` via the
-// golden-fixture tests in the wire package.
+// TestSerializeMsgpackRoundTripViaAsapmsgpack pins the sketch's SerializeMsgpack
+// output to the ASAPv1-aligned wire format: a single Count-Min kind_id
+// (0x02 0x00), counter_type=f64 / mode=fast in the metadata, and a positional
+// [rows, cols, counts] payload with counts packed row-major.
 func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
-	// CountMinSketch requires power-of-two `cols` for its fast
-	// bit-mask hash layout; pick cols=4 (2^2) so the constructor
-	// accepts it.
+	// CountMinSketch requires power-of-two `cols` for its fast bit-mask hash
+	// layout; pick cols=4 (2^2) so the constructor accepts it.
 	sketch, err := NewCountMinSketch(2, 4)
 	if err != nil {
 		t.Fatalf("NewCountMinSketch: %v", err)
 	}
-	// Populate the count matrix directly. `Count` is a []][]float64
-	// view of the internal storage, so writing through it mutates
-	// the same bytes the SerializeMsgpack path reads.
 	for i, v := range []float64{1.0, 2.0, 3.0, 4.0} {
 		sketch.Count[0][i] = v
 	}
@@ -30,19 +26,20 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 		sketch.Count[1][i] = v
 	}
 
-	bytes, err := sketch.SerializeMsgpack()
+	buf, err := sketch.SerializeMsgpack()
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
-	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
-	kindID, payload, err := asapmsgpack.DecodeWrapper(bytes)
+
+	kindID, _, err := asapmsgpack.DecodeWrapper(buf)
 	if err != nil {
 		t.Fatalf("DecodeWrapper: %v", err)
 	}
-	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketch {
-		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicCountMinSketch, kindID)
+	if !bytes.Equal(kindID, asapmsgpack.CMSKind) {
+		t.Fatalf("expected kind_id %x, got %x", asapmsgpack.CMSKind, kindID)
 	}
-	matrix, rowNum, colNum, err := asapmsgpack.UnmarshalCountMinSketch(payload)
+
+	matrix, rowNum, colNum, err := asapmsgpack.UnmarshalCountMinSketch(buf)
 	if err != nil {
 		t.Fatalf("UnmarshalCountMinSketch: %v", err)
 	}
@@ -55,5 +52,14 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	}
 	if !reflect.DeepEqual(matrix, want) {
 		t.Errorf("matrix mismatch\n  got  %v\n  want %v", matrix, want)
+	}
+
+	// Full round-trip back into a sketch preserves the count matrix.
+	decoded, err := DeserializeMsgpack(buf)
+	if err != nil {
+		t.Fatalf("DeserializeMsgpack: %v", err)
+	}
+	if !reflect.DeepEqual(decoded.Count, want) {
+		t.Errorf("count matrix changed across round trip: %v", decoded.Count)
 	}
 }

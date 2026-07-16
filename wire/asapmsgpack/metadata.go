@@ -2,231 +2,309 @@ package asapmsgpack
 
 import (
 	"fmt"
-	"reflect"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
+// ASAPv1 metadata (asap_sketchlib/docs/asapv1_wire_format.md §2). The metadata
+// block is a MessagePack **map keyed by field name** (rmp_serde `to_vec_named`)
+// carrying the hash spec (how keys were hashed) plus the per-sketch structural
+// params needed to interpret the payload. Two consequences drive this code:
+//
+//   - **Canonical key order** — encoders MUST write keys in the order the Rust
+//     metadata structs declare them (which is what `to_vec_named` emits and what
+//     §2/§5 fix). The order is mirrored exactly below.
+//   - **Fail closed / deny unknown fields** — decoders reject any key outside the
+//     fixed set for the sketch, any duplicate, and any hash-spec value that does
+//     not match the standard ProjectASAP profile Go is prepared to reproduce.
 const (
+	// HashProfileProjectASAPXXH3V1 is the stable global id of the standard
+	// ProjectASAP hash profile.
 	HashProfileProjectASAPXXH3V1 = "projectasap.xxh3.seedlist.v1"
-	HashAlgorithmXXH364128       = "xxh3_64_128"
-	HashSeedDerivationIndexWrap  = "seed_list_index_wrap"
-	HashInputEncodingASAPV1      = "projectasap.input.v1"
+	// HashAlgorithmXXH364128 identifies the XXH3 64/128 hash algorithm.
+	HashAlgorithmXXH364128 = "xxh3_64_128"
+	// HashSeedDerivationIndexWrap identifies the seed-index-wrap derivation.
+	HashSeedDerivationIndexWrap = "seed_list_index_wrap"
+	// HashInputEncodingASAPV1 identifies the ProjectASAP input encoding.
+	HashInputEncodingASAPV1 = "projectasap.input.v1"
 
-	matrixBaseSeedIndex         uint32 = 0
-	hydraSeedIndex              uint32 = 6
-	univmonBottomLayerSeedIndex uint32 = 19
-	metadataFieldCount                 = 11
-	nativeHydra                 byte   = 0x8d
-	nativeUnivMon               byte   = 0x8e
-	hasherDefaultXX             byte   = 0x01
-	hasherUnknown               byte   = 0xff
+	matrixSeedIndex uint32 = 0
+
+	// Metadata field-name keys (canonical order within each sketch's map).
+	keyMetadataVersion    = "metadata_version"
+	keyHashProfileID      = "hash_profile_id"
+	keyHashAlgorithm      = "hash_algorithm"
+	keySeedDerivation     = "seed_derivation"
+	keyInputEncoding      = "input_encoding"
+	keySeedList           = "seed_list"
+	keyCanonicalSeedIndex = "canonical_seed_index"
+	keyMatrixSeedIndex    = "matrix_seed_index"
+	keyRows               = "rows"
+	keyCols               = "cols"
+	keyPrecision          = "precision"
+	keyCounterType        = "counter_type"
+	keyMode               = "mode"
+
+	metadataVersionV1 = 1
 )
 
-// WrapperMetadata is the compact MessagePack metadata block carried by the
-// ASAPv1 wrapper between kind_id and the sketch payload.
-type WrapperMetadata struct {
-	MetadataVersion             uint8
-	HashSpecPresent             bool
-	HashProfileID               string
-	HashAlgorithm               string
-	SeedList                    []uint64
-	CanonicalSeedIndex          uint32
-	MatrixSeedIndex             uint32
-	HydraSeedIndex              uint32
-	UnivmonBottomLayerSeedIndex uint32
-	SeedDerivation              string
-	InputEncoding               string
-}
-
-// StandardHashMetadata returns the registered ProjectASAP xxh3 seed-list
-// profile used by portable sketches and native DefaultXxHasher sketches.
-func StandardHashMetadata() WrapperMetadata {
-	return WrapperMetadata{
-		MetadataVersion:             1,
-		HashSpecPresent:             true,
-		HashProfileID:               HashProfileProjectASAPXXH3V1,
-		HashAlgorithm:               HashAlgorithmXXH364128,
-		SeedList:                    common.SeedList(),
-		CanonicalSeedIndex:          uint32(common.CanonicalHashSeed),
-		MatrixSeedIndex:             matrixBaseSeedIndex,
-		HydraSeedIndex:              hydraSeedIndex,
-		UnivmonBottomLayerSeedIndex: univmonBottomLayerSeedIndex,
-		SeedDerivation:              HashSeedDerivationIndexWrap,
-		InputEncoding:               HashInputEncodingASAPV1,
-	}
-}
-
-func noHashMetadata() WrapperMetadata {
-	return WrapperMetadata{
-		MetadataVersion: 1,
-		SeedList:        []uint64{},
-	}
-}
-
-func metadataForKindID(kindID []byte) WrapperMetadata {
-	switch {
-	case len(kindID) == 1 && kindID[0] >= MagicHLL && kindID[0] <= MagicDeltaResult:
-		return StandardHashMetadata()
-	case len(kindID) == 2 && kindID[1] == hasherDefaultXX:
-		return StandardHashMetadata()
-	case len(kindID) == 2 &&
-		(kindID[0] == nativeHydra || kindID[0] == nativeUnivMon) &&
-		kindID[1] == hasherUnknown:
-		return StandardHashMetadata()
-	default:
-		return noHashMetadata()
-	}
-}
-
-func encodeMetadata(metadata WrapperMetadata) []byte {
-	enc := newEncoder()
-	enc.writeArrayLen(metadataFieldCount)
-	enc.writeUint(uint64(metadata.MetadataVersion))
-	enc.writeBool(metadata.HashSpecPresent)
-	enc.writeString(metadata.HashProfileID)
-	enc.writeString(metadata.HashAlgorithm)
-	enc.writeArrayLen(len(metadata.SeedList))
-	for _, seed := range metadata.SeedList {
+// writeHashSpecPairs writes the six shared hash-spec key/value pairs, in
+// canonical order, into enc. Every ASAPv1 sketch metadata map opens with these.
+func writeHashSpecPairs(enc *encoder) {
+	enc.writeString(keyMetadataVersion)
+	enc.writeUint(metadataVersionV1)
+	enc.writeString(keyHashProfileID)
+	enc.writeString(HashProfileProjectASAPXXH3V1)
+	enc.writeString(keyHashAlgorithm)
+	enc.writeString(HashAlgorithmXXH364128)
+	enc.writeString(keySeedDerivation)
+	enc.writeString(HashSeedDerivationIndexWrap)
+	enc.writeString(keyInputEncoding)
+	enc.writeString(HashInputEncodingASAPV1)
+	enc.writeString(keySeedList)
+	seeds := common.SeedList()
+	enc.writeArrayLen(len(seeds))
+	for _, seed := range seeds {
 		enc.writeUint(seed)
 	}
-	enc.writeUint(uint64(metadata.CanonicalSeedIndex))
-	enc.writeUint(uint64(metadata.MatrixSeedIndex))
-	enc.writeUint(uint64(metadata.HydraSeedIndex))
-	enc.writeUint(uint64(metadata.UnivmonBottomLayerSeedIndex))
-	enc.writeString(metadata.SeedDerivation)
-	enc.writeString(metadata.InputEncoding)
+}
+
+// encodeHLLMetadata builds the HLL descriptor metadata map (§2): the shared
+// hash spec plus the HLL-specific `canonical_seed_index` and `precision`.
+// Mirrors Rust `HllMetadata` field order (8 keys).
+func encodeHLLMetadata(precision uint32) []byte {
+	enc := newEncoder()
+	enc.writeMapLen(8)
+	writeHashSpecPairs(enc)
+	enc.writeString(keyCanonicalSeedIndex)
+	enc.writeUint(uint64(common.CanonicalHashSeed))
+	enc.writeString(keyPrecision)
+	enc.writeUint(uint64(precision))
 	return enc.bytes()
 }
 
-func decodeMetadata(buf []byte) (WrapperMetadata, error) {
+// encodeCMSMetadata builds the Count-Min descriptor metadata map (§2): the
+// shared hash spec plus `matrix_seed_index`, the structural matrix dimensions
+// `rows`/`cols`, `counter_type` and `mode`. Mirrors Rust `CmsMetadata` field
+// order (11 keys). The matrix dimensions are configuration (like HLL's
+// `precision`) and so live in the metadata, not the payload.
+func encodeCMSMetadata(rows, cols uint32, counterType, mode string) []byte {
+	enc := newEncoder()
+	enc.writeMapLen(11)
+	writeHashSpecPairs(enc)
+	enc.writeString(keyMatrixSeedIndex)
+	enc.writeUint(uint64(matrixSeedIndex))
+	enc.writeString(keyRows)
+	enc.writeUint(uint64(rows))
+	enc.writeString(keyCols)
+	enc.writeUint(uint64(cols))
+	enc.writeString(keyCounterType)
+	enc.writeString(counterType)
+	enc.writeString(keyMode)
+	enc.writeString(mode)
+	return enc.bytes()
+}
+
+// encodeHashSpecMetadata builds a hash-spec-only metadata map (the six shared
+// keys, no structural params). Used by the portable sketches that have not yet
+// had ASAPv1 payloads / structural params designed, so their envelope is still
+// well-formed and self-describing.
+func encodeHashSpecMetadata() []byte {
+	enc := newEncoder()
+	enc.writeMapLen(6)
+	writeHashSpecPairs(enc)
+	return enc.bytes()
+}
+
+// StandardHashMetadata returns the encoded hash-spec-only metadata map (the six
+// shared keys). Portable sketches that have not yet had ASAPv1 structural params
+// designed embed this so their envelope stays well-formed and self-describing.
+func StandardHashMetadata() []byte { return encodeHashSpecMetadata() }
+
+// parsedMetadata holds the decoded key/value pairs of a metadata map along with
+// per-key presence, so validation can be order-independent and fail closed.
+type parsedMetadata struct {
+	seen map[string]bool
+
+	metadataVersion    uint64
+	hashProfileID      string
+	hashAlgorithm      string
+	seedDerivation     string
+	inputEncoding      string
+	seedList           []uint64
+	canonicalSeedIndex uint64
+	matrixSeedIndex    uint64
+	rows               uint64
+	cols               uint64
+	precision          uint64
+	counterType        string
+	mode               string
+}
+
+// decodeMetadataMap reads the metadata map, dispatching each key to the correct
+// typed reader. allowed lists the keys valid for this sketch; any key outside it
+// (or any duplicate) is rejected (deny_unknown_fields / fail closed).
+func decodeMetadataMap(buf []byte, allowed map[string]bool) (parsedMetadata, error) {
 	dec := newDecoder(buf)
-	fields, err := dec.readArrayLen()
+	n, err := dec.readMapLen()
 	if err != nil {
-		return WrapperMetadata{}, err
+		return parsedMetadata{}, err
 	}
-	if fields != metadataFieldCount {
-		return WrapperMetadata{}, fmt.Errorf(
-			"asapmsgpack: wrapper metadata has %d fields, want %d",
-			fields, metadataFieldCount)
-	}
-
-	version, err := dec.readUint()
-	if err != nil {
-		return WrapperMetadata{}, fmt.Errorf("asapmsgpack: metadata_version: %w", err)
-	}
-	if version > 0xff {
-		return WrapperMetadata{}, fmt.Errorf(
-			"asapmsgpack: metadata_version %d out of u8 range", version)
-	}
-	hashSpecPresent, err := dec.readBool()
-	if err != nil {
-		return WrapperMetadata{}, fmt.Errorf("asapmsgpack: hash_spec_present: %w", err)
-	}
-	hashProfileID, err := dec.readString()
-	if err != nil {
-		return WrapperMetadata{}, fmt.Errorf("asapmsgpack: hash_profile_id: %w", err)
-	}
-	hashAlgorithm, err := dec.readString()
-	if err != nil {
-		return WrapperMetadata{}, fmt.Errorf("asapmsgpack: hash_algorithm: %w", err)
-	}
-
-	seedCount, err := dec.readArrayLen()
-	if err != nil {
-		return WrapperMetadata{}, fmt.Errorf("asapmsgpack: seed_list: %w", err)
-	}
-	standardSeedCount := len(common.SeedList())
-	if seedCount != 0 && seedCount != standardSeedCount {
-		return WrapperMetadata{}, fmt.Errorf(
-			"asapmsgpack: seed_list has %d entries, want 0 or %d",
-			seedCount, standardSeedCount)
-	}
-	seedList := make([]uint64, seedCount)
-	for i := range seedList {
-		seed, err := dec.readUint()
+	m := parsedMetadata{seen: make(map[string]bool, n)}
+	for i := 0; i < n; i++ {
+		key, err := dec.readString()
 		if err != nil {
-			return WrapperMetadata{}, fmt.Errorf("asapmsgpack: seed_list[%d]: %w", i, err)
+			return parsedMetadata{}, fmt.Errorf("asapmsgpack: metadata key: %w", err)
 		}
-		seedList[i] = seed
-	}
+		if !allowed[key] {
+			return parsedMetadata{}, fmt.Errorf("asapmsgpack: unexpected metadata key %q", key)
+		}
+		if m.seen[key] {
+			return parsedMetadata{}, fmt.Errorf("asapmsgpack: duplicate metadata key %q", key)
+		}
+		m.seen[key] = true
 
-	canonicalSeedIndex, err := readU32MetadataField(dec, "canonical_seed_index")
-	if err != nil {
-		return WrapperMetadata{}, err
-	}
-	matrixSeedIndex, err := readU32MetadataField(dec, "matrix_seed_index")
-	if err != nil {
-		return WrapperMetadata{}, err
-	}
-	hydraSeedIndex, err := readU32MetadataField(dec, "hydra_seed_index")
-	if err != nil {
-		return WrapperMetadata{}, err
-	}
-	univmonBottomLayerSeedIndex, err := readU32MetadataField(dec, "univmon_bottom_layer_seed_index")
-	if err != nil {
-		return WrapperMetadata{}, err
-	}
-
-	seedDerivation, err := dec.readString()
-	if err != nil {
-		return WrapperMetadata{}, fmt.Errorf("asapmsgpack: seed_derivation: %w", err)
-	}
-	inputEncoding, err := dec.readString()
-	if err != nil {
-		return WrapperMetadata{}, fmt.Errorf("asapmsgpack: input_encoding: %w", err)
+		switch key {
+		case keyMetadataVersion:
+			m.metadataVersion, err = dec.readUint()
+		case keyHashProfileID:
+			m.hashProfileID, err = dec.readString()
+		case keyHashAlgorithm:
+			m.hashAlgorithm, err = dec.readString()
+		case keySeedDerivation:
+			m.seedDerivation, err = dec.readString()
+		case keyInputEncoding:
+			m.inputEncoding, err = dec.readString()
+		case keySeedList:
+			m.seedList, err = readSeedList(dec)
+		case keyCanonicalSeedIndex:
+			m.canonicalSeedIndex, err = dec.readUint()
+		case keyMatrixSeedIndex:
+			m.matrixSeedIndex, err = dec.readUint()
+		case keyRows:
+			m.rows, err = dec.readUint()
+		case keyCols:
+			m.cols, err = dec.readUint()
+		case keyPrecision:
+			m.precision, err = dec.readUint()
+		case keyCounterType:
+			m.counterType, err = dec.readString()
+		case keyMode:
+			m.mode, err = dec.readString()
+		default:
+			// Unreachable: allowed keys are a subset of the cases above.
+			err = fmt.Errorf("asapmsgpack: unhandled metadata key %q", key)
+		}
+		if err != nil {
+			return parsedMetadata{}, fmt.Errorf("asapmsgpack: metadata %q: %w", key, err)
+		}
 	}
 	if err := dec.done(); err != nil {
-		return WrapperMetadata{}, err
+		return parsedMetadata{}, err
 	}
-
-	metadata := WrapperMetadata{
-		MetadataVersion:             uint8(version),
-		HashSpecPresent:             hashSpecPresent,
-		HashProfileID:               hashProfileID,
-		HashAlgorithm:               hashAlgorithm,
-		SeedList:                    seedList,
-		CanonicalSeedIndex:          canonicalSeedIndex,
-		MatrixSeedIndex:             matrixSeedIndex,
-		HydraSeedIndex:              hydraSeedIndex,
-		UnivmonBottomLayerSeedIndex: univmonBottomLayerSeedIndex,
-		SeedDerivation:              seedDerivation,
-		InputEncoding:               inputEncoding,
-	}
-	return metadata, metadata.validate()
+	return m, nil
 }
 
-func readU32MetadataField(dec *decoder, name string) (uint32, error) {
-	value, err := dec.readUint()
+func readSeedList(dec *decoder) ([]uint64, error) {
+	n, err := dec.readArrayLen()
 	if err != nil {
-		return 0, fmt.Errorf("asapmsgpack: %s: %w", name, err)
+		return nil, err
 	}
-	if value > 0xffffffff {
-		return 0, fmt.Errorf("asapmsgpack: %s %d out of u32 range", name, value)
-	}
-	return uint32(value), nil
-}
-
-func (m WrapperMetadata) validate() error {
-	if m.MetadataVersion != 1 {
-		return fmt.Errorf(
-			"asapmsgpack: unsupported wrapper metadata_version %d", m.MetadataVersion)
-	}
-	if !m.HashSpecPresent {
-		if !reflect.DeepEqual(m, noHashMetadata()) {
-			return fmt.Errorf("asapmsgpack: no-hash wrapper metadata mismatch")
+	out := make([]uint64, n)
+	for i := range out {
+		if out[i], err = dec.readUint(); err != nil {
+			return nil, fmt.Errorf("seed[%d]: %w", i, err)
 		}
-		return nil
 	}
-	if !reflect.DeepEqual(m, StandardHashMetadata()) {
-		return fmt.Errorf("asapmsgpack: hash wrapper metadata mismatch")
+	return out, nil
+}
+
+// validateHashSpec fails closed unless every hash-spec field equals the standard
+// ProjectASAP profile Go is prepared to reproduce (§2 validation, cross-language
+// contract). A sketch is only mergeable/queryable if its hash spec matches.
+func (m parsedMetadata) validateHashSpec(required ...string) error {
+	for _, key := range append([]string{
+		keyMetadataVersion, keyHashProfileID, keyHashAlgorithm,
+		keySeedDerivation, keyInputEncoding, keySeedList,
+	}, required...) {
+		if !m.seen[key] {
+			return fmt.Errorf("asapmsgpack: metadata missing required key %q", key)
+		}
+	}
+	if m.metadataVersion != metadataVersionV1 {
+		return fmt.Errorf("asapmsgpack: unsupported metadata_version %d", m.metadataVersion)
+	}
+	if m.hashProfileID != HashProfileProjectASAPXXH3V1 {
+		return fmt.Errorf("asapmsgpack: unexpected hash_profile_id %q", m.hashProfileID)
+	}
+	if m.hashAlgorithm != HashAlgorithmXXH364128 {
+		return fmt.Errorf("asapmsgpack: unexpected hash_algorithm %q", m.hashAlgorithm)
+	}
+	if m.seedDerivation != HashSeedDerivationIndexWrap {
+		return fmt.Errorf("asapmsgpack: unexpected seed_derivation %q", m.seedDerivation)
+	}
+	if m.inputEncoding != HashInputEncodingASAPV1 {
+		return fmt.Errorf("asapmsgpack: unexpected input_encoding %q", m.inputEncoding)
+	}
+	want := common.SeedList()
+	if len(m.seedList) != len(want) {
+		return fmt.Errorf("asapmsgpack: seed_list has %d entries, want %d", len(m.seedList), len(want))
+	}
+	for i := range want {
+		if m.seedList[i] != want[i] {
+			return fmt.Errorf("asapmsgpack: seed_list[%d]=%#x, want %#x", i, m.seedList[i], want[i])
+		}
 	}
 	return nil
 }
 
-func validateMetadataMatchesKindID(kindID []byte, metadata WrapperMetadata) error {
-	if !reflect.DeepEqual(metadata, metadataForKindID(kindID)) {
-		return fmt.Errorf("asapmsgpack: wrapper metadata does not match kind_id %x", kindID)
+// decodeHLLMetadata validates the hash spec and returns the HLL precision.
+func decodeHLLMetadata(buf []byte) (precision uint32, err error) {
+	m, err := decodeMetadataMap(buf, map[string]bool{
+		keyMetadataVersion: true, keyHashProfileID: true, keyHashAlgorithm: true,
+		keySeedDerivation: true, keyInputEncoding: true, keySeedList: true,
+		keyCanonicalSeedIndex: true, keyPrecision: true,
+	})
+	if err != nil {
+		return 0, err
 	}
-	return nil
+	if err := m.validateHashSpec(keyCanonicalSeedIndex, keyPrecision); err != nil {
+		return 0, err
+	}
+	if m.canonicalSeedIndex != uint64(common.CanonicalHashSeed) {
+		return 0, fmt.Errorf("asapmsgpack: unexpected canonical_seed_index %d", m.canonicalSeedIndex)
+	}
+	if m.precision > 0xffffffff {
+		return 0, fmt.Errorf("asapmsgpack: precision %d out of u32 range", m.precision)
+	}
+	return uint32(m.precision), nil
+}
+
+// decodeCMSMetadata validates the hash spec and returns the Count-Min structural
+// params: the matrix dimensions (rows/cols), counter type and column-derivation
+// mode. The dimensions are structural (the matrix is dynamically sized), so they
+// are read out of the metadata rather than validated against a fixed expectation.
+func decodeCMSMetadata(buf []byte) (rows, cols uint32, counterType, mode string, err error) {
+	m, err := decodeMetadataMap(buf, map[string]bool{
+		keyMetadataVersion: true, keyHashProfileID: true, keyHashAlgorithm: true,
+		keySeedDerivation: true, keyInputEncoding: true, keySeedList: true,
+		keyMatrixSeedIndex: true, keyRows: true, keyCols: true,
+		keyCounterType: true, keyMode: true,
+	})
+	if err != nil {
+		return 0, 0, "", "", err
+	}
+	if err := m.validateHashSpec(keyMatrixSeedIndex, keyRows, keyCols, keyCounterType, keyMode); err != nil {
+		return 0, 0, "", "", err
+	}
+	if m.matrixSeedIndex != uint64(matrixSeedIndex) {
+		return 0, 0, "", "", fmt.Errorf("asapmsgpack: unexpected matrix_seed_index %d", m.matrixSeedIndex)
+	}
+	if m.rows > 0xffffffff {
+		return 0, 0, "", "", fmt.Errorf("asapmsgpack: rows %d out of u32 range", m.rows)
+	}
+	if m.cols > 0xffffffff {
+		return 0, 0, "", "", fmt.Errorf("asapmsgpack: cols %d out of u32 range", m.cols)
+	}
+	return uint32(m.rows), uint32(m.cols), m.counterType, m.mode, nil
 }

@@ -39,9 +39,10 @@ import (
 )
 
 // encoder is a tiny byte-exact MessagePack writer that emits the subset
-// of the format rmp_serde uses in compact mode. It intentionally does
-// not handle maps, ext types, or bin — sketch-core's wire formats don't
-// use any of those.
+// of the format rmp_serde uses in compact mode. It supports arrays,
+// maps, bin, strings, the integer families (minimal width), float64 and
+// bool — the exact set the ASAPv1 wire format (see
+// asap_sketchlib/docs/asapv1_wire_format.md §5) uses.
 type encoder struct {
 	buf []byte
 }
@@ -59,6 +60,40 @@ func (e *encoder) writeArrayLen(n int) {
 		e.buf = append(e.buf, 0xdd,
 			byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
 	}
+}
+
+// writeMapLen emits a fixmap / map16 / map32 header. n is the number of
+// key/value pairs. Matches rmp_serde's `to_vec_named`, which serializes a
+// Rust struct as a msgpack map keyed by field name.
+func (e *encoder) writeMapLen(n int) {
+	switch {
+	case n <= 15:
+		e.buf = append(e.buf, 0x80|byte(n))
+	case n <= 0xffff:
+		e.buf = append(e.buf, 0xde, byte(n>>8), byte(n))
+	default:
+		e.buf = append(e.buf, 0xdf,
+			byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	}
+}
+
+// writeBin emits the smallest MessagePack bin form (bin8 / bin16 / bin32).
+// This matches rmp_serde's serialization of a `Vec<u8>` annotated with
+// `#[serde(with = "serde_bytes")]` — the encoding the ASAPv1 HLL payload
+// uses for its register block. (Plain rmp_serde `Vec<u8>` is array-of-int,
+// which is a DIFFERENT encoding — see writeU8Array.)
+func (e *encoder) writeBin(bs []byte) {
+	n := len(bs)
+	switch {
+	case n <= 0xff:
+		e.buf = append(e.buf, 0xc4, byte(n))
+	case n <= 0xffff:
+		e.buf = append(e.buf, 0xc5, byte(n>>8), byte(n))
+	default:
+		e.buf = append(e.buf, 0xc6,
+			byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	}
+	e.buf = append(e.buf, bs...)
 }
 
 // writeUint emits the smallest unsigned integer form (positive fixint /

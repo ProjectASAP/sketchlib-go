@@ -49,7 +49,7 @@ func (s *CountSketch) SerializeMsgpack() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountSketch}, payload), nil
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountSketch}, asapmsgpack.StandardHashMetadata(), payload), nil
 }
 
 // SerializeMsgpackWithHeap emits the heap-bearing MessagePack wire
@@ -87,7 +87,7 @@ func (s *CountSketch) SerializeMsgpackWithHeap(heapSize int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, payload), nil
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, asapmsgpack.StandardHashMetadata(), payload), nil
 }
 
 // SerializeMsgpackWithHeapDelta emits the DELTA-HEAP MessagePack wire form
@@ -158,7 +158,7 @@ func (s *CountSketch) SerializeMsgpackWithHeapDelta(
 	if err != nil {
 		return nil, err
 	}
-	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, payload), nil
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, asapmsgpack.StandardHashMetadata(), payload), nil
 }
 
 // buildWireHeap returns up to heapSize (key, estimatedCount) pairs for the

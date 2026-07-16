@@ -1,104 +1,163 @@
 package asapmsgpack
 
-import "fmt"
+import (
+	"bytes"
+	"fmt"
+)
 
-// HLLVariant mirrors the Rust `sketch_core::hll_sketch::HllVariant`
-// enum. Values are serialized as MessagePack strings matching the
-// Rust variant names — rmp_serde's default for unit enums.
+// HLLVariant selects the HLL estimator. Under ASAPv1 the variant is the sketch's
+// algorithm identity and is carried in the envelope `kind_id`
+// (asap_sketchlib/docs/asapv1_wire_format.md §1), NOT in the payload.
 type HLLVariant string
 
 const (
+	// HLLVariantUnspecified is the reserved/unset variant (not serializable).
 	HLLVariantUnspecified HLLVariant = "Unspecified"
-	HLLVariantRegular     HLLVariant = "Regular"
-	HLLVariantDatafusion  HLLVariant = "Datafusion"
-	HLLVariantHip         HLLVariant = "Hip"
+	// HLLVariantRegular is the Classic estimator (kind_id 0x01 0x01).
+	HLLVariantRegular HLLVariant = "Regular"
+	// HLLVariantDatafusion is the Ertl-MLE estimator (kind_id 0x01 0x02).
+	HLLVariantDatafusion HLLVariant = "Datafusion"
+	// HLLVariantHip is the HIP estimator (kind_id 0x01 0x03).
+	HLLVariantHip HLLVariant = "Hip"
 )
 
-// HLLSketchState mirrors the Rust `sketch_core::hll_sketch::HllSketch`
-// struct field-for-field. Field order is load-bearing.
+// HLLSketchState is the decoded state of an HLL sketch. Variant maps to the
+// kind_id, Precision to the metadata, and the register/HIP fields to the
+// payload.
 type HLLSketchState struct {
 	Variant   HLLVariant
 	Precision uint32
-	// Registers length MUST equal 1 << Precision; the receiver rejects
-	// mismatched sizes.
+	// Registers length MUST equal 1 << Precision.
 	Registers []byte
-	HipKxq0   float64
-	HipKxq1   float64
-	HipEst    float64
+	// HipKxq0/HipKxq1/HipEst are only present for Variant == HLLVariantHip.
+	HipKxq0 float64
+	HipKxq1 float64
+	HipEst  float64
 }
 
-// MarshalHLLSketch emits the MessagePack payload that the Rust
-// consumer's `sketch_core::hll_sketch::HllSketch::deserialize_msgpack`
-// accepts when the modified-OTLP `HLLSketchDataPoint.encoding` is set
-// to `HLL_SKETCH_ENCODING_MSGPACK = 3`.
+// variantKindID maps a variant to its ASAPv1 kind_id.
+func variantKindID(v HLLVariant) ([]byte, error) {
+	switch v {
+	case HLLVariantRegular:
+		return HLLKindClassic, nil
+	case HLLVariantDatafusion:
+		return HLLKindErtlMLE, nil
+	case HLLVariantHip:
+		return HLLKindHIP, nil
+	case HLLVariantUnspecified, "":
+		return nil, fmt.Errorf("asapmsgpack: HLL variant must be set (not %q)", v)
+	default:
+		return nil, fmt.Errorf("asapmsgpack: unknown HLL variant %q", v)
+	}
+}
+
+// kindIDVariant is the inverse of variantKindID.
+func kindIDVariant(kindID []byte) (HLLVariant, error) {
+	switch {
+	case bytes.Equal(kindID, HLLKindClassic):
+		return HLLVariantRegular, nil
+	case bytes.Equal(kindID, HLLKindErtlMLE):
+		return HLLVariantDatafusion, nil
+	case bytes.Equal(kindID, HLLKindHIP):
+		return HLLVariantHip, nil
+	default:
+		return "", fmt.Errorf("asapmsgpack: kind_id %x is not an HLL variant", kindID)
+	}
+}
+
+// MarshalHLLSketch encodes an HLL sketch into a complete ASAPv1 envelope
+// (asap_sketchlib/docs/asapv1_wire_format.md §1/§2/§3.1). The layout is:
 //
-// Wire format (rmp_serde compact mode on Rust `HllSketch`):
+//	envelope[ kind_id = variant | metadata = { …hash spec…, canonical_seed_index,
+//	          precision } | payload ]
 //
-//	[
-//	  variant    : string         // "Regular" / "Datafusion" / "Hip" / "Unspecified"
-//	  precision  : uint32
-//	  registers  : []uint8        // NOTE: array-of-u8, not msgpack `bin`
-//	  hip_kxq0   : float64
-//	  hip_kxq1   : float64
-//	  hip_est    : float64
-//	]
+// where the payload is a positional MessagePack array:
 //
-// Register count must be 1 << precision. HIP fields are only meaningful
-// when Variant == HLLVariantHip; other variants should leave them at 0.
+//	Classic / Ertl-MLE:  [ registers:bin ]
+//	HIP:                 [ registers:bin, hip_kxq0:f64, hip_kxq1:f64, hip_est:f64 ]
+//
+// `registers` is MessagePack **bin** (one byte per register), matching Rust's
+// serde_bytes encoding — NOT an array-of-int.
 func MarshalHLLSketch(s HLLSketchState) ([]byte, error) {
+	kindID, err := variantKindID(s.Variant)
+	if err != nil {
+		return nil, err
+	}
 	expected := 1 << s.Precision
 	if len(s.Registers) != expected {
 		return nil, fmt.Errorf(
 			"asapmsgpack: HLLSketch has %d registers, expected 2^precision = %d",
 			len(s.Registers), expected)
 	}
-	if s.Variant == "" {
-		return nil, fmt.Errorf(
-			"asapmsgpack: HLLSketch Variant must be set explicitly")
-	}
+
 	e := newEncoder()
-	e.writeArrayLen(6)
-	e.writeString(string(s.Variant))
-	e.writeUint(uint64(s.Precision))
-	e.writeU8Array(s.Registers)
-	e.writeFloat64(s.HipKxq0)
-	e.writeFloat64(s.HipKxq1)
-	e.writeFloat64(s.HipEst)
-	return e.bytes(), nil
+	if s.Variant == HLLVariantHip {
+		e.writeArrayLen(4)
+		e.writeBin(s.Registers)
+		e.writeFloat64(s.HipKxq0)
+		e.writeFloat64(s.HipKxq1)
+		e.writeFloat64(s.HipEst)
+	} else {
+		e.writeArrayLen(1)
+		e.writeBin(s.Registers)
+	}
+
+	metadata := encodeHLLMetadata(s.Precision)
+	return EncodeWrapper(kindID, metadata, e.bytes()), nil
 }
 
-// UnmarshalHLLSketch is the inverse of MarshalHLLSketch.
+// UnmarshalHLLSketch is the inverse of MarshalHLLSketch: it takes a complete
+// ASAPv1 envelope and returns the decoded state, failing closed on any envelope,
+// metadata (hash-spec) or payload inconsistency.
 func UnmarshalHLLSketch(buf []byte) (HLLSketchState, error) {
 	var s HLLSketchState
-	d := newDecoder(buf)
+
+	kindID, metadata, payload, err := SplitWrapper(buf)
+	if err != nil {
+		return s, err
+	}
+	variant, err := kindIDVariant(kindID)
+	if err != nil {
+		return s, err
+	}
+	s.Variant = variant
+
+	precision, err := decodeHLLMetadata(metadata)
+	if err != nil {
+		return s, err
+	}
+	s.Precision = precision
+
+	d := newDecoder(payload)
 	n, err := d.readArrayLen()
 	if err != nil {
 		return s, err
 	}
-	if n != 6 {
-		return s, errWrongLen("HLLSketch", 6, n)
+	wantLen := 1
+	if variant == HLLVariantHip {
+		wantLen = 4
 	}
-	variant, err := d.readString()
-	if err != nil {
+	if n != wantLen {
+		return s, errWrongLen("HLLSketch", wantLen, n)
+	}
+	if s.Registers, err = d.readBin(); err != nil {
 		return s, err
 	}
-	s.Variant = HLLVariant(variant)
-	prec, err := d.readUint()
-	if err != nil {
-		return s, err
+	if expected := 1 << s.Precision; len(s.Registers) != expected {
+		return s, fmt.Errorf(
+			"asapmsgpack: HLLSketch has %d registers, expected 2^precision = %d",
+			len(s.Registers), expected)
 	}
-	s.Precision = uint32(prec)
-	if s.Registers, err = d.readU8Array(); err != nil {
-		return s, err
-	}
-	if s.HipKxq0, err = d.readFloat64(); err != nil {
-		return s, err
-	}
-	if s.HipKxq1, err = d.readFloat64(); err != nil {
-		return s, err
-	}
-	if s.HipEst, err = d.readFloat64(); err != nil {
-		return s, err
+	if variant == HLLVariantHip {
+		if s.HipKxq0, err = d.readFloat64(); err != nil {
+			return s, err
+		}
+		if s.HipKxq1, err = d.readFloat64(); err != nil {
+			return s, err
+		}
+		if s.HipEst, err = d.readFloat64(); err != nil {
+			return s, err
+		}
 	}
 	if err := d.done(); err != nil {
 		return s, err

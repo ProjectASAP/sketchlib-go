@@ -109,13 +109,14 @@ func TestDDSketchMatchesRustGolden(t *testing.T) {
 
 // ─── HLLSketch ───────────────────────────────────────────────────────
 
-func TestHLLSketchRegularMatchesRustGolden(t *testing.T) {
-	// Rust:
-	//   HllSketch::from_raw(HllVariant::Regular, 2, vec![1, 2, 3, 4],
-	//     0.0, 0.0, 0.0).serialize_msgpack()
-	golden := mustHex(t,
-		"96a7526567756c6172029401020304cb0000000000000000cb0000000000000000cb0000000000000000")
-
+// NOTE: the pre-alignment HLL golden fixtures pinned the OLD payload-only
+// format (a 6-element array [variant, precision, registers-as-u8-array, hip×3]
+// with no envelope). That format is gone: the ASAPv1-aligned MarshalHLLSketch
+// now emits a full envelope with the variant in the kind_id, the precision in
+// the metadata, and registers as msgpack `bin`. Byte-level parity for the new
+// format is pinned by TestHLLClassicP12Bytes (wrapper_test.go); these tests are
+// now round-trips. Cross-language golden vectors are a follow-up (see PR body).
+func TestHLLSketchRegularRoundTrip(t *testing.T) {
 	state := HLLSketchState{
 		Variant:   HLLVariantRegular,
 		Precision: 2,
@@ -125,29 +126,20 @@ func TestHLLSketchRegularMatchesRustGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalHLLSketch: %v", err)
 	}
-	if !reflect.DeepEqual(got, golden) {
-		t.Fatalf(
-			"HLLSketch Regular wire mismatch\n  got    %x\n  golden %x",
-			got, golden)
+	// kind_id carries the variant: Regular -> Classic (0x01 0x01).
+	if !reflect.DeepEqual(got[8:10], []byte{0x01, 0x01}) {
+		t.Fatalf("kind_id: got %x, want 0101", got[8:10])
 	}
-
 	decoded, err := UnmarshalHLLSketch(got)
 	if err != nil {
 		t.Fatalf("UnmarshalHLLSketch: %v", err)
 	}
 	if !reflect.DeepEqual(decoded, state) {
-		t.Errorf("round-trip mismatch\n  got  %+v\n  want %+v",
-			decoded, state)
+		t.Errorf("round-trip mismatch\n  got  %+v\n  want %+v", decoded, state)
 	}
 }
 
-func TestHLLSketchHipMatchesRustGolden(t *testing.T) {
-	// Rust:
-	//   HllSketch::from_raw(HllVariant::Hip, 2, vec![0, 0, 0, 0],
-	//     1.5, 2.5, 42.0).serialize_msgpack()
-	golden := mustHex(t,
-		"96a3486970029400000000cb3ff8000000000000cb4004000000000000cb4045000000000000")
-
+func TestHLLSketchHipRoundTrip(t *testing.T) {
 	state := HLLSketchState{
 		Variant:   HLLVariantHip,
 		Precision: 2,
@@ -160,10 +152,16 @@ func TestHLLSketchHipMatchesRustGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalHLLSketch: %v", err)
 	}
-	if !reflect.DeepEqual(got, golden) {
-		t.Fatalf(
-			"HLLSketch Hip wire mismatch\n  got    %x\n  golden %x",
-			got, golden)
+	// kind_id carries the variant: Hip -> 0x01 0x03.
+	if !reflect.DeepEqual(got[8:10], []byte{0x01, 0x03}) {
+		t.Fatalf("kind_id: got %x, want 0103", got[8:10])
+	}
+	decoded, err := UnmarshalHLLSketch(got)
+	if err != nil {
+		t.Fatalf("UnmarshalHLLSketch: %v", err)
+	}
+	if !reflect.DeepEqual(decoded, state) {
+		t.Errorf("round-trip mismatch\n  got  %+v\n  want %+v", decoded, state)
 	}
 }
 
@@ -180,16 +178,13 @@ func TestHLLSketchRejectsWrongRegisterCount(t *testing.T) {
 
 // ─── CountMinSketch ──────────────────────────────────────────────────
 
-func TestCountMinSketchMatchesRustGolden(t *testing.T) {
-	// Rust:
-	//   let cms = CountMinSketch::new(2, 3);
-	//   cms.serialize_msgpack()
-	//
-	// Empty 2x3 matrix (zeros). Note the field order differs from
-	// CountSketch: matrix first, then row_num, then col_num.
-	golden := mustHex(t,
-		"939293cb0000000000000000cb0000000000000000cb000000000000000093cb0000000000000000cb0000000000000000cb00000000000000000203")
-
+// NOTE: the pre-alignment Count-Min golden pinned the OLD payload-only format
+// ([ matrix:[][]f64, row_num, col_num ], no envelope). The ASAPv1-aligned
+// MarshalCountMinSketch now emits a full envelope (kind_id 0x02 0x00, with
+// rows/cols/counter_type/mode in the metadata) and the payload [ counts ] where
+// counts is a flat row-major array. This is a structural + round-trip test;
+// cross-language byte parity is pinned by the golden tests (golden_test.go).
+func TestCountMinSketchNewFormatRoundTrip(t *testing.T) {
 	matrix := [][]float64{
 		{0, 0, 0},
 		{0, 0, 0},
@@ -198,10 +193,28 @@ func TestCountMinSketchMatchesRustGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalCountMinSketch: %v", err)
 	}
-	if !reflect.DeepEqual(got, golden) {
-		t.Fatalf(
-			"CountMinSketch wire mismatch\n  got    %x\n  golden %x",
-			got, golden)
+	// kind_id must be the single Count-Min id 0x02 0x00.
+	if !reflect.DeepEqual(got[8:10], []byte{0x02, 0x00}) {
+		t.Fatalf("kind_id: got %x, want 0200", got[8:10])
+	}
+	// Metadata must carry rows=2, cols=3, counter_type=f64 and mode=fast.
+	_, meta, payload, err := SplitWrapper(got)
+	if err != nil {
+		t.Fatalf("SplitWrapper: %v", err)
+	}
+	rows, cols, counterType, mode, err := decodeCMSMetadata(meta)
+	if err != nil {
+		t.Fatalf("decodeCMSMetadata: %v", err)
+	}
+	if rows != 2 || cols != 3 {
+		t.Fatalf("metadata dims: got %dx%d, want 2x3", rows, cols)
+	}
+	if counterType != CMSCounterF64 || mode != CMSModeFast {
+		t.Fatalf("metadata: got %q/%q, want f64/fast", counterType, mode)
+	}
+	// Payload is a positional array [counts]; header 0x91.
+	if payload[0] != 0x91 {
+		t.Fatalf("payload header: 0x%02x, want 0x91 (array1)", payload[0])
 	}
 
 	gotMatrix, rowNum, colNum, err := UnmarshalCountMinSketch(got)
