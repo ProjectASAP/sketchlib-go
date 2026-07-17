@@ -5,9 +5,9 @@ import (
 )
 
 // applyGosCellAtRowCMS is the shared per-row body of the GOS-aware sampled
-// inserts: increment row r's hashed cell by w, keep the L1/L2 (and sum/sum2)
+// inserts: increment row r's hashed cell by w, keep the L1 (and sum/sum2)
 // sidecars in step, and if the new value reaches threshold, reset the COUNT
-// cell to 0 (decrementing L1/L2 to match, mirroring InsertWithHashGOS) and
+// cell to 0 (decrementing L1 to match, mirroring InsertWithHashGOS) and
 // return the crossing. sum/sum2 are intentionally NOT reset — same as
 // InsertWithHashGOS, they track a separate accumulator not carried in the GOS
 // delta. No math.Abs (CMS counters are non-negative). A non-admitted row is
@@ -28,12 +28,10 @@ func (s *CountMinSketch) applyGosCellAtRowCMS(r int, hash uint64, w, threshold f
 	sumRow[c] += w
 	sum2Row[c] += w
 	s.L1[r] += w
-	s.L2[r] += curr*curr - prev*prev
 
 	if curr >= threshold {
 		countRow[c] = 0
 		s.L1[r] -= curr
-		s.L2[r] -= curr * curr
 		return GOSCellUpdate{Row: uint32(r), Col: uint32(c), Delta: curr}, true
 	}
 	return GOSCellUpdate{}, false
