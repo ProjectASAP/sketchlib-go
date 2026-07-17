@@ -32,9 +32,8 @@ func TestInsertWithHashGOS_Disabled(t *testing.T) {
 // TestInsertWithHashGOS_CrossesAndResets drives a single-row sketch (so the
 // touched column is deterministic across inserts) until the cell crosses a
 // fixed threshold, and verifies: the crossing is reported with the correct
-// (non-negative) magnitude, the cell is reset to 0 in place, and L1/L2
-// reflect the reset (a single-row, single-key sketch has no other
-// contribution).
+// (non-negative) magnitude, the cell is reset to 0 in place, and L1 reflects
+// the reset (a single-row, single-key sketch has no other contribution).
 func TestInsertWithHashGOS_CrossesAndResets(t *testing.T) {
 	s, err := NewCountMinSketch(1, 64)
 	if err != nil {
@@ -71,13 +70,10 @@ func TestInsertWithHashGOS_CrossesAndResets(t *testing.T) {
 	if cell := s.GetCell(0, col); cell != 0 {
 		t.Fatalf("GetCell after crossing: got %v, want 0", cell)
 	}
-	// Single-row, single-key sketch: L1/L2 must also be exactly 0 after the
+	// Single-row, single-key sketch: L1 must also be exactly 0 after the
 	// reset (no other cell contributes).
 	if s.L1[0] != 0 {
 		t.Fatalf("L1[0] after crossing+reset: got %v, want 0", s.L1[0])
-	}
-	if s.L2[0] != 0 {
-		t.Fatalf("L2[0] after crossing+reset: got %v, want 0", s.L2[0])
 	}
 }
 

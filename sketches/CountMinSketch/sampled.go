@@ -76,7 +76,6 @@ func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler common
 		sum2Row[c] += w
 
 		s.L1[r] += w
-		s.L2[r] += curr*curr - prev*prev
 	}
 }
 
@@ -124,6 +123,5 @@ func (s *CountMinSketch) InsertWithHashAtRows(hash uint64, value float64, admitt
 		sum2Row[c] += w
 
 		s.L1[r] += w
-		s.L2[r] += curr*curr - prev*prev
 	}
 }
