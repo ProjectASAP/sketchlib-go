@@ -39,7 +39,6 @@ func SerializeDelta(d *Delta) ([]byte, error) {
 		CellRows: cellRows,
 		CellCols: cellCols,
 		L1:       d.L1,
-		L2:       d.L2,
 		HhKeys:   d.HHKeys,
 	}
 	if allInt {
@@ -102,7 +101,6 @@ func DeserializeDelta(data []byte) (*Delta, error) {
 		Cols:  msg.Cols,
 		Cells: cells,
 		L1:    msg.L1,
-		L2:    msg.L2,
 	}
 	if keys := msg.GetHhKeys(); len(keys) > 0 {
 		d.HHKeys = keys

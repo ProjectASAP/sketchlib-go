@@ -15,8 +15,8 @@ import (
 // values; a matrix with ANY fractional cell (weighted values, or the per-row
 // 1/p sampling weight) is encoded LOSSLESSLY as packed float64 (counts_float +
 // CounterType FLOAT64) — truncating to int64 would bias every cell toward zero
-// and desync the float64 L1/L2 sidecars.
-// All three counter matrices (Count, Sum, Sum2) and both norm vectors are included.
+// and desync the float64 L1 sidecar.
+// All three counter matrices (Count, Sum, Sum2) and the L1 norm vector are included.
 func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	n := s.Rows * s.Cols
 	countsInt, countsFloat := flattenCMSCounts(s.Count, s.Rows, s.Cols)
@@ -33,7 +33,6 @@ func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 		SumCounts:  sumFlat,
 		Sum2Counts: sum2Flat,
 		L1:         append([]float64(nil), s.L1...),
-		L2:         append([]float64(nil), s.L2...),
 	}
 	if countsFloat != nil {
 		state.CounterType = commonpb.CounterType_COUNTER_TYPE_FLOAT64
@@ -70,7 +69,6 @@ func (s *CountMinSketch) SerializePortableFO() (*envpb.SketchEnvelope, error) {
 		// for the per-row 1/p sampled path (all three arrays get the same
 		// weight increments).
 		L1: append([]float64(nil), s.L1...),
-		L2: append([]float64(nil), s.L2...),
 	}
 	// Lossless float wire when any cell is fractional (see SerializePortable).
 	if countsFloat != nil {
@@ -166,7 +164,6 @@ func DeserializeCountMinSketchFromProtoBytes(data []byte) (*CountMinSketch, erro
 		Sum:   sumC,
 		Sum2:  sum2C,
 		L1:    append([]float64(nil), st.GetL1()...),
-		L2:    append([]float64(nil), st.GetL2()...),
 	}
 	if err := s.rehydrateStorage(); err != nil {
 		return nil, err
