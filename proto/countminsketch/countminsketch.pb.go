@@ -30,7 +30,7 @@ const (
 //
 //	element [r][c] is at index r * cols + c.
 //
-// The Go implementation tracks auxiliary sum/L1/L2 arrays that the Rust
+// The Go implementation tracks auxiliary sum/L1 arrays that the Rust
 // implementation does not produce. These fields are optional; consumers
 // that need them must recompute from raw insertions if absent.
 type CountMinState struct {
@@ -54,9 +54,7 @@ type CountMinState struct {
 	// Sum-of-squares counter matrix, length = rows * cols.
 	Sum2Counts []float64 `protobuf:"fixed64,7,rep,packed,name=sum2_counts,json=sum2Counts,proto3" json:"sum2_counts,omitempty"`
 	// Per-row L1 norms, length = rows.
-	L1 []float64 `protobuf:"fixed64,8,rep,packed,name=l1,proto3" json:"l1,omitempty"`
-	// Per-row L2 norms, length = rows. Recompute if absent.
-	L2            []float64 `protobuf:"fixed64,9,rep,packed,name=l2,proto3" json:"l2,omitempty"`
+	L1            []float64 `protobuf:"fixed64,8,rep,packed,name=l1,proto3" json:"l1,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -147,16 +145,9 @@ func (x *CountMinState) GetL1() []float64 {
 	return nil
 }
 
-func (x *CountMinState) GetL2() []float64 {
-	if x != nil {
-		return x.L2
-	}
-	return nil
-}
-
 // CountMinDelta carries only the cells where at least one counter changed
 // by at least the configured threshold T.
-// L1 and L2 row vectors are always transmitted in full (one float64 per row).
+// L1 row deltas are always transmitted in full (one float64 per row).
 //
 // Encoding (Opt-1+2, Stage 2):
 //
@@ -178,7 +169,6 @@ type CountMinDelta struct {
 	// Kept for backward-compat deserialization from old producers.
 	CellsLegacy []*CountMinCell `protobuf:"bytes,3,rep,name=cells_legacy,json=cellsLegacy,proto3" json:"cells_legacy,omitempty"`
 	L1          []float64       `protobuf:"fixed64,4,rep,packed,name=l1,proto3" json:"l1,omitempty"`
-	L2          []float64       `protobuf:"fixed64,5,rep,packed,name=l2,proto3" json:"l2,omitempty"`
 	// Heavy-hitter candidate keys from an upstream tracker, mirroring
 	// CountSketchDelta.hh_keys (same field number 6, same wire shape).
 	// Downstream queries the merged CMS matrix for each key to (re)build its
@@ -247,13 +237,6 @@ func (x *CountMinDelta) GetCellsLegacy() []*CountMinCell {
 func (x *CountMinDelta) GetL1() []float64 {
 	if x != nil {
 		return x.L1
-	}
-	return nil
-}
-
-func (x *CountMinDelta) GetL2() []float64 {
-	if x != nil {
-		return x.L2
 	}
 	return nil
 }
@@ -368,7 +351,7 @@ var File_countminsketch_countminsketch_proto protoreflect.FileDescriptor
 
 const file_countminsketch_countminsketch_proto_rawDesc = "" +
 	"\n" +
-	"#countminsketch/countminsketch.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\"\xb5\x02\n" +
+	"#countminsketch/countminsketch.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\"\xa7\x02\n" +
 	"\rCountMinState\x12\x12\n" +
 	"\x04rows\x18\x01 \x01(\rR\x04rows\x12\x12\n" +
 	"\x04cols\x18\x02 \x01(\rR\x04cols\x12<\n" +
@@ -380,20 +363,19 @@ const file_countminsketch_countminsketch_proto_rawDesc = "" +
 	"sum_counts\x18\x06 \x03(\x01B\x02\x10\x01R\tsumCounts\x12#\n" +
 	"\vsum2_counts\x18\a \x03(\x01B\x02\x10\x01R\n" +
 	"sum2Counts\x12\x12\n" +
-	"\x02l1\x18\b \x03(\x01B\x02\x10\x01R\x02l1\x12\x12\n" +
-	"\x02l2\x18\t \x03(\x01B\x02\x10\x01R\x02l2J\x04\b\n" +
-	"\x10\x10\"\x98\x02\n" +
+	"\x02l1\x18\b \x03(\x01B\x02\x10\x01R\x02l1J\x04\b\t\x10\n" +
+	"J\x04\b\n" +
+	"\x10\x10\"\x8a\x02\n" +
 	"\rCountMinDelta\x12\x12\n" +
 	"\x04rows\x18\x01 \x01(\rR\x04rows\x12\x12\n" +
 	"\x04cols\x18\x02 \x01(\rR\x04cols\x12=\n" +
 	"\fcells_legacy\x18\x03 \x03(\v2\x1a.sketchlib.v1.CountMinCellR\vcellsLegacy\x12\x12\n" +
-	"\x02l1\x18\x04 \x03(\x01B\x02\x10\x01R\x02l1\x12\x12\n" +
-	"\x02l2\x18\x05 \x03(\x01B\x02\x10\x01R\x02l2\x12\x17\n" +
+	"\x02l1\x18\x04 \x03(\x01B\x02\x10\x01R\x02l1\x12\x17\n" +
 	"\ahh_keys\x18\x06 \x03(\tR\x06hhKeys\x12\x1f\n" +
 	"\tcell_rows\x18\t \x03(\rB\x02\x10\x01R\bcellRows\x12\x1f\n" +
 	"\tcell_cols\x18\n" +
 	" \x03(\rB\x02\x10\x01R\bcellCols\x12\x1d\n" +
-	"\bd_counts\x18\v \x03(\x12B\x02\x10\x01R\adCounts\"w\n" +
+	"\bd_counts\x18\v \x03(\x12B\x02\x10\x01R\adCountsJ\x04\b\x05\x10\x06\"w\n" +
 	"\fCountMinCell\x12\x10\n" +
 	"\x03row\x18\x01 \x01(\rR\x03row\x12\x10\n" +
 	"\x03col\x18\x02 \x01(\rR\x03col\x12\x17\n" +

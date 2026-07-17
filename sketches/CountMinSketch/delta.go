@@ -48,7 +48,7 @@ type CellDelta struct {
 type Delta struct {
 	Rows, Cols uint32
 	Cells      []CellDelta // only cells where |ΔCount| ≥ threshold
-	L1, L2     []float64   // full per-row norm deltas (one entry per row)
+	L1         []float64   // full per-row L1 norm deltas (one entry per row)
 	// HHKeys contains heavy-hitter candidate keys from an upstream tracker
 	// (e.g. a Space-Saving sketch), mirroring CountSketch's Delta.HHKeys.
 	// Empty when heavy-hitter tracking is not enabled. Downstream queries the
@@ -67,7 +67,7 @@ type HeavyHitterSource interface {
 
 // ComputeDelta computes a sparse delta between snapshot and current.
 // A cell is included when |ΔCount| ≥ threshold.
-// L1/L2 row deltas are always included in full (negligible size).
+// L1 row deltas are always included in full (negligible size).
 // Heavy-hitter keys are not emitted (HHKeys stays empty); use
 // ComputeDeltaWithHH to forward candidates from an upstream tracker.
 // Returns an error if the two sketches have different dimensions.
@@ -78,7 +78,7 @@ func ComputeDelta(snapshot, current *CountMinSketch, threshold float64) (*Delta,
 // ComputeDeltaWithHH computes a sparse delta between snapshot and current and
 // conditionally forwards heavy-hitter candidate keys.
 //
-// A cell is included when |ΔCount| ≥ threshold; L1/L2 row deltas are always
+// A cell is included when |ΔCount| ≥ threshold; L1 row deltas are always
 // included in full. When hh is non-nil and reports candidates, those keys are
 // copied into Delta.HHKeys (mirroring CountSketch's ComputeDelta, which reads
 // current.SS.Candidates()). When hh is nil — the default for a plain CMS with
@@ -98,7 +98,6 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 		Cols:  uint32(cols),
 		Cells: make([]CellDelta, 0, rows*cols/20), // ~5% fill hint
 		L1:    make([]float64, rows),
-		L2:    make([]float64, rows),
 	}
 
 	for r := 0; r < rows; r++ {
@@ -126,7 +125,6 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
 		}
 		d.L1[r] = current.L1[r] - snapshot.L1[r]
-		d.L2[r] = current.L2[r] - snapshot.L2[r]
 	}
 
 	// Control-plane-gated heavy-hitter emission. Only populated when a source
@@ -151,7 +149,7 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 // The result is byte-identical to ComputeDelta(zeroSketch, current, threshold)
 // for a freshly-constructed zeroSketch of current's dimensions: the same
 // threshold test, the same integral-cell rejection, the same cell ordering
-// (row-major), and L1/L2 carried in full (== current's, since the base is
+// (row-major), and L1 carried in full (== current's, since the base is
 // zero). Callers SerializeDelta the result exactly as for ComputeDelta.
 func ComputeDeltaAgainstEmpty(current *CountMinSketch, threshold float64) (*Delta, error) {
 	rows, cols := current.Rows, current.Cols
@@ -160,7 +158,6 @@ func ComputeDeltaAgainstEmpty(current *CountMinSketch, threshold float64) (*Delt
 		Cols:  uint32(cols),
 		Cells: make([]CellDelta, 0, rows*cols/20), // ~5% fill hint
 		L1:    make([]float64, rows),
-		L2:    make([]float64, rows),
 	}
 	for r := 0; r < rows; r++ {
 		curCount := current.Count[r]
@@ -178,7 +175,6 @@ func ComputeDeltaAgainstEmpty(current *CountMinSketch, threshold float64) (*Delt
 			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
 		}
 		d.L1[r] = current.L1[r] // snapshot.L1[r] == 0
-		d.L2[r] = current.L2[r] // snapshot.L2[r] == 0
 	}
 	return d, nil
 }
@@ -222,11 +218,6 @@ func ApplyDeltaWithHH(target *CountMinSketch, d *Delta, sink HeavyHitterSink) {
 	for r, v := range d.L1 {
 		if r < target.Rows {
 			target.L1[r] += v
-		}
-	}
-	for r, v := range d.L2 {
-		if r < target.Rows {
-			target.L2[r] += v
 		}
 	}
 	// Rebuild heavy hitters from hh_keys using the updated (merged) CMS matrix.

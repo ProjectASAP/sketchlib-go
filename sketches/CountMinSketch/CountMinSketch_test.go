@@ -120,20 +120,16 @@ func TestCMS_MergeCorrectness(t *testing.T) {
 	}
 }
 
-// TestCMS_L1L2 validates internal consistency (norms).
-func TestCMS_L1L2(t *testing.T) {
+// TestCMS_L1 validates internal consistency (the L1 norm).
+func TestCMS_L1(t *testing.T) {
 	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 	N := 300
 	for i := 0; i < N; i++ {
 		s.InsertWithHash(common.FromString(fmt.Sprintf("k%d", i%10)).Hash)
 	}
 	l1 := s.CM_L1()
-	l2 := s.CM_L2()
 	if math.Abs(l1-float64(N)) > 1e-9 {
 		t.Fatalf("L1 incorrect")
-	}
-	if l2 < math.Sqrt(float64(N)) || l2 > float64(N) {
-		t.Fatalf("L2 out of bounds")
 	}
 }
 
@@ -304,7 +300,7 @@ func TestCMS_RealWorld_CAIDA_Accuracy(t *testing.T) {
 // ==============================================================================
 
 // TestCMS_Reset_ClearsState verifies that Reset() returns zero for all queries
-// and zeros L1/L2, matching a freshly constructed sketch.
+// and zeros L1, matching a freshly constructed sketch.
 func TestCMS_Reset_ClearsState(t *testing.T) {
 	s, _ := NewCountMinSketch(CM_ROW_NO, CM_COL_NO)
 	h := common.FromString("key").Hash
@@ -319,9 +315,6 @@ func TestCMS_Reset_ClearsState(t *testing.T) {
 	}
 	if l1 := s.CM_L1(); l1 != 0 {
 		t.Fatalf("CM_L1 = %.0f after Reset, want 0", l1)
-	}
-	if l2 := s.CM_L2(); l2 != 0 {
-		t.Fatalf("CM_L2 = %.0f after Reset, want 0", l2)
 	}
 }
 

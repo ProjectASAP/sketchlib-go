@@ -189,7 +189,6 @@ func (t *CountMinTarget) UpdateRow(row int, hashed common.Hash128, delta uint64)
 	sumRow[col] += float64(delta)
 	sum2Row[col] += float64(delta)
 	t.Sketch.L1[row] += float64(delta)
-	t.Sketch.L2[row] += curr*curr - prev*prev
 }
 
 func (t *CountMinTarget) Merge(other *CountMinTarget) error {

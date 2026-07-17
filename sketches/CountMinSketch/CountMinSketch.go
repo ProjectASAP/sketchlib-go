@@ -24,7 +24,6 @@ type CountMinSketch struct {
 	Sum2  [][]float64
 
 	L1 []float64
-	L2 []float64
 
 	bitsPerRow uint
 	mask       uint64
@@ -61,8 +60,8 @@ func (s *CountMinSketch) rehydrateStorage() error {
 			return errors.New("invalid snapshot matrix col count")
 		}
 	}
-	if len(s.L1) != s.Rows || len(s.L2) != s.Rows {
-		return errors.New("invalid snapshot l1/l2 size")
+	if len(s.L1) != s.Rows {
+		return errors.New("invalid snapshot l1 size")
 	}
 
 	countStore, err := storage.NewFlatVector2DFrom2D(s.Count)
@@ -130,7 +129,6 @@ func NewCountMinSketch(row, col int) (*CountMinSketch, error) {
 		Sum:        sumStore.As2D(),
 		Sum2:       sum2Store.As2D(),
 		L1:         make([]float64, row),
-		L2:         make([]float64, row),
 		bitsPerRow: bitsPerRow,
 		mask:       mask,
 	}, nil
@@ -242,7 +240,6 @@ func (s *CountMinSketch) InsertWithHash(hash uint64) {
 		sum2Row[c] += 1.0
 
 		s.L1[r] += 1.0
-		s.L2[r] += curr*curr - prev*prev
 	}
 }
 
@@ -322,7 +319,6 @@ func (s *CountMinSketch) FastInsertWeightWithHashValue(hash uint64, many float64
 		sum2Row[c] += many
 
 		s.L1[r] += many
-		s.L2[r] += curr*curr - prev*prev
 	}
 }
 
@@ -344,7 +340,6 @@ func (s *CountMinSketch) insertMatrixHash(hashed storage.MatrixHashType, many fl
 		sum2Row[c] += many
 
 		s.L1[r] += many
-		s.L2[r] += curr*curr - prev*prev
 	}
 }
 
@@ -461,19 +456,6 @@ func (s *CountMinSketch) CM_L1() float64 {
 	return res
 }
 
-func (s *CountMinSketch) CM_L2() float64 {
-	res := math.MaxFloat64
-	for i := 0; i < s.Rows; i++ {
-		if s.L2[i] < res {
-			res = s.L2[i]
-		}
-	}
-	if res == math.MaxFloat64 {
-		return 0
-	}
-	return math.Sqrt(res)
-}
-
 // Reset clears all counters and norms, returning the sketch to its zero state.
 func (s *CountMinSketch) Reset() {
 	for i := range s.Count {
@@ -482,7 +464,6 @@ func (s *CountMinSketch) Reset() {
 		clear(s.Sum2[i])
 	}
 	clear(s.L1)
-	clear(s.L2)
 }
 
 func (s *CountMinSketch) TypeName() string {
@@ -502,7 +483,6 @@ func (s *CountMinSketch) Merge(other common.Sketch) error {
 
 	for r := 0; r < s.Rows; r++ {
 		s.L1[r] += o.L1[r]
-		s.L2[r] += o.L2[r]
 		sCountRow := s.countStore.RowSlice(r)
 		sSumRow := s.sumStore.RowSlice(r)
 		sSum2Row := s.sum2Store.RowSlice(r)
@@ -524,7 +504,7 @@ func (s *CountMinSketch) Merge(other common.Sketch) error {
 // that the CountMinOcto adapter (sketch_framework/OctoSketch) can delegate all
 // storage and hash logic here instead of duplicating it.
 //
-// They operate only on countStore; L1/L2 norms and sumStore/sum2Store are
+// They operate only on countStore; L1 norms and sumStore/sum2Store are
 // whole-stream statistics that are irrelevant to the per-cell OctoSketch loop.
 
 // ColForRow derives the column index for row r from input's pre-computed hash,
@@ -539,7 +519,7 @@ func (s *CountMinSketch) GetCell(row, col int) float64 {
 }
 
 // IncrCell increments countStore[row][col] by delta and returns the new value.
-// L1/L2 norms are NOT updated; use Insert for whole-stream accounting.
+// L1 norms are NOT updated; use Insert for whole-stream accounting.
 func (s *CountMinSketch) IncrCell(row, col int, delta float64) float64 {
 	row_ := s.countStore.RowSlice(row)
 	row_[col] += delta

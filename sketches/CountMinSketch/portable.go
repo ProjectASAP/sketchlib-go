@@ -12,7 +12,7 @@ import (
 // SerializePortable serializes the CountMinSketch into a portable protobuf
 // SketchEnvelope. Counts are encoded as packed sint64 (zigzag varint) giving
 // 4–8× size reduction over float64 for typical small-integer counter values.
-// All three counter matrices (Count, Sum, Sum2) and both norm vectors are included.
+// All three counter matrices (Count, Sum, Sum2) and the L1 norm vector are included.
 func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	n := s.Rows * s.Cols
 	countsInt := make([]int64, 0, n)
@@ -34,7 +34,6 @@ func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 		SumCounts:   sumFlat,
 		Sum2Counts:  sum2Flat,
 		L1:          append([]float64(nil), s.L1...),
-		L2:          append([]float64(nil), s.L2...),
 	}
 
 	return &envpb.SketchEnvelope{
@@ -70,7 +69,6 @@ func (s *CountMinSketch) SerializePortableFO() (*envpb.SketchEnvelope, error) {
 		// SumCounts and Sum2Counts deliberately omitted.
 		// Receiver sets Sum = Sum2 = Count (valid for unweighted streams).
 		L1: append([]float64(nil), s.L1...),
-		L2: append([]float64(nil), s.L2...),
 	}
 
 	return &envpb.SketchEnvelope{
@@ -158,7 +156,6 @@ func DeserializeCountMinSketchFromProtoBytes(data []byte) (*CountMinSketch, erro
 		Sum:   sumC,
 		Sum2:  sum2C,
 		L1:    append([]float64(nil), st.GetL1()...),
-		L2:    append([]float64(nil), st.GetL2()...),
 	}
 	if err := s.rehydrateStorage(); err != nil {
 		return nil, err
