@@ -17,7 +17,7 @@ option go_package = "github.com/ProjectASAP/sketchlib-go/proto/countminsketch;co
 // The counter matrix is stored flat in row-major order:
 //   element [r][c] is at index r * cols + c.
 //
-// The Go implementation tracks auxiliary sum/L1/L2 arrays that the Rust
+// The Go implementation tracks auxiliary sum/L1 arrays that the Rust
 // implementation does not produce. These fields are optional; consumers
 // that need them must recompute from raw insertions if absent.
 message CountMinState {
@@ -52,10 +52,13 @@ message CountMinState {
   // Per-row L1 norms, length = rows.
   repeated double l1 = 8 [packed = true];
 
-  // Per-row L2 norms, length = rows. Recompute if absent.
-  repeated double l2 = 9 [packed = true];
-
-  reserved 10 to 15;
+  // field 9 was l2 (per-row L2/sum-of-squares norms). Removed: CMS's
+  // min-across-rows point estimator has no unbiased-F2-via-median argument
+  // the way CountSketch's SIGNED median-of-rows does — min-of-sum-of-squares
+  // over non-negative counters isn't a valid F2 estimator, so the field was
+  // carrying a value nothing could correctly consume. Rust producers never
+  // populated it (see the file header). Reserved, not reused.
+  reserved 9, 10 to 15;
 }
 
 // ============================================================================
@@ -64,7 +67,7 @@ message CountMinState {
 
 // CountMinDelta carries only the cells where at least one counter changed
 // by at least the configured threshold T.
-// L1 and L2 row vectors are always transmitted in full (one float64 per row).
+// L1 row deltas are always transmitted in full (one float64 per row).
 //
 // Encoding (Opt-1+2, Stage 2):
 //   cell_rows[i], cell_cols[i], d_counts[i] describe the i-th changed cell.
@@ -84,7 +87,9 @@ message CountMinDelta {
   // Kept for backward-compat deserialization from old producers.
   repeated CountMinCell     cells_legacy  = 3;
   repeated double           l1            = 4 [packed = true];
-  repeated double           l2            = 5 [packed = true];
+  // field 5 was l2 (per-row L2 norm deltas). Removed alongside
+  // CountMinState.l2 — see that field's comment. Reserved, not reused.
+  reserved 5;
   // Heavy-hitter candidate keys from an upstream tracker, mirroring
   // CountSketchDelta.hh_keys (same field number 6, same wire shape).
   // Downstream queries the merged CMS matrix for each key to (re)build its
