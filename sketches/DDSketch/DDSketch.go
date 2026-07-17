@@ -11,6 +11,14 @@ import (
 
 const GrowChunk = 128
 
+// minNormalFloat64 is the smallest positive normal float64 (2^-1022); expOverflow
+// is just under ln(math.MaxFloat64) so math.Exp(expOverflow) stays finite. Both
+// mirror DataDog's logarithmic_mapping.go and bound the indexable value range.
+const (
+	minNormalFloat64 = 0x1p-1022
+	expOverflow      = 709.0
+)
+
 // ---------------- Index Mapping ----------------
 
 type IndexMapping struct {
@@ -35,12 +43,54 @@ func (m IndexMapping) Equals(other IndexMapping) bool {
 	return math.Abs(m.gamma-other.gamma) < 1e-15
 }
 
+// RelativeAccuracy recovers α from γ without a stored field:
+// γ=(1+α)/(1-α) ⇒ α = (γ-1)/(γ+1) = 1 - 2/(1+γ). Matches DataDog's
+// LogarithmicMapping.RelativeAccuracy().
+func (m IndexMapping) RelativeAccuracy() float64 {
+	return 1 - 2/(1+m.gamma)
+}
+
 func (m IndexMapping) Index(v float64) int32 {
 	return int32(math.Floor(math.Log(v) * m.invLogGamma))
 }
 
+// Value returns the representative of bucket k. It is the bucket's LOWER bound
+// γ^k scaled by (1+α), matching DataDog's
+// logarithmic_mapping.go `Value = LowerBound(index) * (1 + RelativeAccuracy())`.
+// This choice makes the relative error EXACTLY α at both bucket edges — the
+// log-midpoint γ^(k+0.5) used previously gave edge error √γ−1 (≈ α + α²/2 > α),
+// silently violating the sketch's advertised α-accuracy guarantee near a
+// bucket edge (sketchlib-go#73 / asap_sketchlib#70 item 1).
 func (m IndexMapping) Value(k int32) float64 {
-	return math.Pow(m.gamma, float64(k)+0.5)
+	return m.LowerBound(k) * (1 + m.RelativeAccuracy())
+}
+
+// LowerBound returns the lower edge γ^k of bucket k.
+func (m IndexMapping) LowerBound(k int32) float64 {
+	return math.Pow(m.gamma, float64(k))
+}
+
+// MinIndexableValue / MaxIndexableValue bound the finite positive values whose
+// bucket index is representable without overflow (index in int32 range) or
+// math.Exp/Pow overflow, mirroring DataDog's
+// logarithmic_mapping.go bounds. A value outside [min,max] would otherwise map
+// to an arbitrarily distant index and force the dense bucket store to grow
+// across the whole gap (sketchlib-go#72's single-outlier memory blowup).
+func (m IndexMapping) MinIndexableValue() float64 {
+	// index >= MinInt32: γ^index >= γ^MinInt32, plus the smallest normal that
+	// keeps γ·v from underflowing.
+	return math.Max(
+		math.Exp((math.MinInt32)/m.invLogGamma+1),
+		minNormalFloat64*m.gamma,
+	)
+}
+
+func (m IndexMapping) MaxIndexableValue() float64 {
+	// index <= MaxInt32 and math.Exp/Pow does not overflow.
+	return math.Min(
+		math.Exp((math.MaxInt32)/m.invLogGamma-1),
+		math.Exp(expOverflow)/(2*m.gamma)*(m.gamma+1),
+	)
 }
 
 // ---------------- Buckets ----------------
@@ -219,9 +269,20 @@ func (d *DDSketch) TypeName() string {
 // Update inserts a float64 value directly. Mirrors Rust's `update`
 // (sketches/ddsketch.rs) in the unified API.
 // Strictly positive values only.
+//
+// Values outside [MinIndexableValue, MaxIndexableValue] are dropped rather than
+// mapped to an arbitrarily distant bucket index — that guards the dense store
+// against a single finite-but-extreme outlier forcing an allocation spanning
+// the whole index gap (sketchlib-go#72). (The public API is error-free by
+// contract, so this is a silent drop like the non-positive case above, not
+// DataDog's typed ErrUntrackableTooHigh/TooLow — matching this type's existing
+// no-error Update surface.)
 func (d *DDSketch) Update(v float64) {
 	if !(v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)) {
 		return // ignore invalid or non-positive
+	}
+	if v < d.mapping.MinIndexableValue() || v > d.mapping.MaxIndexableValue() {
+		return // untrackable extreme: would blow up the dense bucket span
 	}
 	// Geometric skip-sampling: when sampling is on, skip the whole record
 	// (mapping + store grow + increment) for non-admitted values.
@@ -456,8 +517,9 @@ func (d *DDSketch) BucketIndex(v float64) int32 {
 	return d.mapping.Index(v)
 }
 
-// BucketValue returns the representative float64 for bucket index k: γ^(k+0.5).
-// Pure function, no state change.
+// BucketValue returns the representative float64 for bucket index k: the
+// lower bound γ^k scaled by (1+α) (see IndexMapping.Value). Pure function, no
+// state change.
 func (d *DDSketch) BucketValue(k int32) float64 {
 	return d.mapping.Value(k)
 }

@@ -161,12 +161,12 @@ func TestSerializeStateProtoBytes_QuantilesAfterScalarRemoval(t *testing.T) {
 	// Each reconstructed quantile must honour the DDSketch relative-accuracy
 	// guarantee against ground truth. min/max are re-derived from the bucket
 	// distribution on the reconstructed side (no stored scalars), so q=0 and
-	// q=1 are now bucket-representative values (gamma^(k+0.5)) rather than the
-	// exact observed extremes the stored scalars used to carry. A value at the
-	// bottom edge of a bucket (e.g. 1.0 == gamma^0) has representative error up
-	// to gamma^0.5-1, marginally above alpha=(gamma-1)/(gamma+1); allow 2*alpha
-	// so the bucket-representative extremes are covered.
-	const tol = 2 * alpha
+	// q=1 are now bucket-representative values. With the DataDog representative
+	// gamma^k*(1+alpha) the edge error is EXACTLY alpha (a value at the bottom
+	// edge, e.g. 1.0 == gamma^0, has representative 1+alpha), so alpha is the
+	// correct tolerance — the old 2*alpha slack was only needed for the
+	// midpoint gamma^(k+0.5) representative (edge error sqrt(gamma)-1 > alpha).
+	const tol = alpha + 1e-9
 	for _, q := range []float64{0.0, 0.25, 0.5, 0.9, 0.99, 1.0} {
 		recQ, ok := rec.Quantile(q)
 		if !ok {
@@ -217,9 +217,10 @@ func TestComputeApplyDelta_QuantilesAfterScalarRemoval(t *testing.T) {
 	// Quantiles after applying the bucket-only delta must honour the
 	// relative-accuracy guarantee against ground truth (count and min/max are
 	// re-derived from the applied bucket counts alone). q=1 is now the
-	// bucket-representative top value; allow 2*alpha to cover bucket-edge
-	// representative error (see the proto round-trip test for the rationale).
-	const tol = 2 * alpha
+	// bucket-representative top value; with the DataDog representative
+	// gamma^k*(1+alpha) the bucket-edge error is exactly alpha (see the proto
+	// round-trip test for the rationale).
+	const tol = alpha + 1e-9
 	for _, q := range []float64{0.5, 0.9, 0.99, 1.0} {
 		got, _ := recv.Quantile(q)
 		exact := trueQuantile(truth, q)
