@@ -35,6 +35,13 @@ var seedList = [...]uint64{
 
 const CanonicalHashSeed = 5
 
+// SeedList returns a copy of the shared hash seed table.
+func SeedList() []uint64 {
+	out := make([]uint64, len(seedList))
+	copy(out, seedList[:])
+	return out
+}
+
 type Hash128 struct {
 	Lo uint64
 	Hi uint64

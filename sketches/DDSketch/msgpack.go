@@ -42,11 +42,15 @@ func (d *DDSketch) SerializeMsgpack() ([]byte, error) {
 		storeOffset = d.store.offset
 	}
 
-	return asapmsgpack.MarshalDDSketch(asapmsgpack.DDSketchState{
+	payload, err := asapmsgpack.MarshalDDSketch(asapmsgpack.DDSketchState{
 		Alpha:       alpha,
 		StoreCounts: storeCounts,
 		StoreOffset: storeOffset,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicDDSketch}, payload), nil
 }
 
 // DeserializeMsgpack rebuilds a DDSketch from the cross-language
@@ -54,7 +58,11 @@ func (d *DDSketch) SerializeMsgpack() ([]byte, error) {
 // `sketch_core::dd_sketch::DdSketch::serialize_msgpack`). Mirrors
 // Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
 func DeserializeMsgpack(buf []byte) (*DDSketch, error) {
-	state, err := asapmsgpack.UnmarshalDDSketch(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicDDSketch)
+	if err != nil {
+		return nil, fmt.Errorf("ddsketch: %w", err)
+	}
+	state, err := asapmsgpack.UnmarshalDDSketch(payload)
 	if err != nil {
 		return nil, fmt.Errorf("ddsketch: msgpack decode: %w", err)
 	}

@@ -33,11 +33,15 @@ func (h *HyperLogLog) SerializeMsgpack() ([]byte, error) {
 	registers := make([]byte, len(src))
 	copy(registers, src)
 
-	return asapmsgpack.MarshalHLLSketch(asapmsgpack.HLLSketchState{
+	payload, err := asapmsgpack.MarshalHLLSketch(asapmsgpack.HLLSketchState{
 		Variant:   asapmsgpack.HLLVariantDatafusion,
 		Precision: uint32(HLLPrecision),
 		Registers: registers,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicHLL}, payload), nil
 }
 
 // DeserializeMsgpack rebuilds a HyperLogLog from the cross-language
@@ -45,7 +49,11 @@ func (h *HyperLogLog) SerializeMsgpack() ([]byte, error) {
 // `sketch_core::hll_sketch::HllSketch::serialize_msgpack`). Mirrors
 // Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
 func DeserializeMsgpack(buf []byte) (*HyperLogLog, error) {
-	state, err := asapmsgpack.UnmarshalHLLSketch(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicHLL)
+	if err != nil {
+		return nil, fmt.Errorf("hll: %w", err)
+	}
+	state, err := asapmsgpack.UnmarshalHLLSketch(payload)
 	if err != nil {
 		return nil, fmt.Errorf("hll: msgpack decode: %w", err)
 	}

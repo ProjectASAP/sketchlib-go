@@ -19,8 +19,15 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
-
-	state, err := asapmsgpack.UnmarshalDDSketch(bytes)
+	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
+	kindID, payload, err := asapmsgpack.DecodeWrapper(bytes)
+	if err != nil {
+		t.Fatalf("DecodeWrapper: %v", err)
+	}
+	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicDDSketch {
+		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicDDSketch, kindID)
+	}
+	state, err := asapmsgpack.UnmarshalDDSketch(payload)
 	if err != nil {
 		t.Fatalf("UnmarshalDDSketch: %v", err)
 	}
@@ -47,7 +54,15 @@ func TestSerializeMsgpackEmptySketch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
-	state, err := asapmsgpack.UnmarshalDDSketch(bytes)
+	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
+	kindID2, payload2, err := asapmsgpack.DecodeWrapper(bytes)
+	if err != nil {
+		t.Fatalf("DecodeWrapper: %v", err)
+	}
+	if len(kindID2) != 1 || kindID2[0] != asapmsgpack.MagicDDSketch {
+		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicDDSketch, kindID2)
+	}
+	state, err := asapmsgpack.UnmarshalDDSketch(payload2)
 	if err != nil {
 		t.Fatalf("UnmarshalDDSketch: %v", err)
 	}

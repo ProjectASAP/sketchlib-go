@@ -22,11 +22,15 @@ import (
 // Sum2 semantics should keep using `SerializeProtoBytes`, which routes
 // through the sketchlib `CountMinState` proto that does carry them.
 func (s *CountMinSketch) SerializeMsgpack() ([]byte, error) {
-	return asapmsgpack.MarshalCountMinSketch(
+	payload, err := asapmsgpack.MarshalCountMinSketch(
 		uint64(s.Rows),
 		uint64(s.Cols),
 		s.Count,
 	)
+	if err != nil {
+		return nil, err
+	}
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketch}, payload), nil
 }
 
 // DeserializeMsgpack rebuilds a CountMinSketch from the cross-language
@@ -38,7 +42,11 @@ func (s *CountMinSketch) SerializeMsgpack() ([]byte, error) {
 // not part of the msgpack wire shape; use SerializeProtoBytes if those
 // must be preserved).
 func DeserializeMsgpack(buf []byte) (*CountMinSketch, error) {
-	matrix, rowNum, colNum, err := asapmsgpack.UnmarshalCountMinSketch(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountMinSketch)
+	if err != nil {
+		return nil, fmt.Errorf("countminsketch: %w", err)
+	}
+	matrix, rowNum, colNum, err := asapmsgpack.UnmarshalCountMinSketch(payload)
 	if err != nil {
 		return nil, fmt.Errorf("countminsketch: msgpack decode: %w", err)
 	}

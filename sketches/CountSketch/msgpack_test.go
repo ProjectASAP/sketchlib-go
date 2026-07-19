@@ -25,8 +25,15 @@ func TestSerializeMsgpackRoundTripViaAsapmsgpack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SerializeMsgpack: %v", err)
 	}
-
-	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(bytes)
+	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
+	kindID, payload, err := asapmsgpack.DecodeWrapper(bytes)
+	if err != nil {
+		t.Fatalf("DecodeWrapper: %v", err)
+	}
+	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountSketch {
+		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicCountSketch, kindID)
+	}
+	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(payload)
 	if err != nil {
 		t.Fatalf("UnmarshalCountSketch: %v", err)
 	}
