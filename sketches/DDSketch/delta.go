@@ -62,11 +62,17 @@ func ApplyDelta(target *DDSketch, data []byte) error {
 	}
 
 	for _, b := range delta.Buckets {
-		target.store.ensure(b.Index)
-		target.store.counts.AsMutSlice()[int(b.Index-target.store.offset)] += b.DCount
+		// ensure() returns the actual write index — b.Index's own bucket,
+		// unless target.store is maxBins-capped and b.Index falls below the
+		// collapsed floor (not the case for an unbounded backend-side
+		// target, but AddToBucket/addOne route through the same call, so
+		// this stays correct if a capped target is ever used here too).
+		idx := target.store.ensure(b.Index)
+		target.store.counts.AsMutSlice()[idx] += b.DCount
 		target.count += b.DCount
-		// Derive min/max from the touched bucket's representative value.
-		rep := target.mapping.Value(b.Index)
+		// Derive min/max from the representative of the bucket ACTUALLY
+		// written to (see AddToBucket).
+		rep := target.mapping.Value(target.store.offset + int32(idx))
 		if rep < target.min {
 			target.min = rep
 		}

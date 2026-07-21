@@ -98,6 +98,21 @@ func (m IndexMapping) MaxIndexableValue() float64 {
 type Buckets struct {
 	counts *storage.Vector1D[uint64]
 	offset int32
+
+	// maxBins caps the number of bins this store will ever hold. 0 (the
+	// zero value, and what plain NewDDSketch uses) means unbounded — the
+	// pre-existing behavior, unchanged. When >0, ensure() COLLAPSES the
+	// LOWEST bins (folding their mass into the new floor bucket) instead of
+	// growing past maxBins bins total, bounding the contiguous allocation a
+	// single finite-but-extreme outlier can force (sketchlib-go#72).
+	// Mirrors DataDog's CollapsingLowestDenseStore: precision is lost only
+	// at the low end (a growing range of small values becomes
+	// indistinguishable, all attributed to the floor bucket's
+	// representative); the high end (and hence high-quantile accuracy,
+	// e.g. p99 latency) is never affected — new insertions above the
+	// current range simply slide the window up, collapsing away whatever
+	// now falls off the bottom.
+	maxBins int32
 }
 
 func (b *Buckets) IsEmpty() bool {
@@ -114,64 +129,147 @@ func (b *Buckets) Range() (int32, int32, bool) {
 	return left, right, true
 }
 
-func (b *Buckets) ensure(k int32) {
+// ensure grows (or, when maxBins caps the store, collapses) the bucket array
+// so that index k's contribution can be recorded, and returns the ARRAY INDEX
+// to write that contribution to. Ordinarily that is k-offset (k gets its own
+// bucket); once maxBins caps the store and k falls below the collapsed
+// floor, it is 0 (the floor bucket) — callers must write to the RETURNED
+// index, not blindly recompute k-offset, since the two can differ once
+// collapsing has occurred.
+func (b *Buckets) ensure(k int32) int {
 	if b.IsEmpty() {
+		initLen := int32(GrowChunk)
+		if b.maxBins > 0 && initLen > b.maxBins {
+			initLen = b.maxBins
+		}
+		if initLen < 1 {
+			initLen = 1
+		}
 		// Reuse a retained-but-emptied backing array (the pooled /
 		// Clear()'d path) instead of allocating a fresh one.
 		if b.counts != nil {
-			b.counts.GrowZeroed(GrowChunk)
+			b.counts.GrowZeroed(int(initLen))
 		} else {
-			filled, _ := storage.FilledVector1D[uint64](GrowChunk, 0)
+			filled, _ := storage.FilledVector1D[uint64](int(initLen), 0)
 			b.counts = filled
 		}
-		b.offset = k - int32(GrowChunk/2)
-		return
+		b.offset = k - initLen/2
+		return int(k - b.offset)
+	}
+
+	left, right, _ := b.Range()
+	if k >= left && k <= right {
+		return int(k - b.offset)
+	}
+
+	// The TRUE minimal range needed to cover k alongside the existing data —
+	// used (not the buffered grow target below) to decide whether a collapse
+	// is unavoidable, so a small necessary extension never triggers one.
+	trueLeft, trueRight := left, right
+	if k < left {
+		trueLeft = k
+	} else {
+		trueRight = k
+	}
+	if b.maxBins > 0 && trueRight-trueLeft+1 > b.maxBins {
+		newLeft := trueRight - b.maxBins + 1
+		return b.collapseTo(newLeft, trueRight, k)
 	}
 
 	counts := b.counts.AsSlice()
-	left, right, _ := b.Range()
-
 	if k < left {
 		needed := int(left - k)
 		grow := maxInt(needed, GrowChunk)
+		newLeft := left - int32(grow)
+		if b.maxBins > 0 && right-newLeft+1 > b.maxBins {
+			newLeft = right - b.maxBins + 1 // clamp the overshoot buffer to the cap
+		}
+		grow = int(left - newLeft)
 
 		newCounts := make([]uint64, grow+len(counts))
 		copy(newCounts[grow:], counts)
 		b.counts = storage.Vector1DFromVec(newCounts)
-		b.offset -= int32(grow)
-
-	} else if k > right {
-		needed := int(k - right)
-		grow := maxInt(needed, GrowChunk)
-		// GrowZeroed reuses spare capacity and avoids the throwaway
-		// make([]uint64, grow) the previous ExtendFromSlice allocated.
-		b.counts.GrowZeroed(len(counts) + grow)
+		b.offset = newLeft
+		return int(k - b.offset)
 	}
+
+	// k > right
+	needed := int(k - right)
+	grow := maxInt(needed, GrowChunk)
+	newRight := right + int32(grow)
+	if b.maxBins > 0 && newRight-left+1 > b.maxBins {
+		newRight = left + b.maxBins - 1 // clamp the overshoot buffer to the cap
+	}
+	// GrowZeroed reuses spare capacity and avoids the throwaway
+	// make([]uint64, grow) the previous ExtendFromSlice allocated.
+	b.counts.GrowZeroed(int(newRight-left) + 1)
+	return int(k - b.offset)
+}
+
+// collapseTo rebuilds the store to exactly cover [newLeft, newRight] (a span
+// of at most maxBins bins), folding the count of every existing bucket below
+// newLeft into the new floor bucket (index newLeft) rather than discarding
+// it — the sketch's total count is always conserved across a collapse, only
+// the LOW-end bucket resolution degrades. Returns the array index to write
+// k's own contribution to: the floor bucket if k itself falls below newLeft
+// (k may be collapsed away too, on the very insert that triggered this),
+// otherwise k's own bucket.
+func (b *Buckets) collapseTo(newLeft, newRight, k int32) int {
+	newLen := int(newRight-newLeft) + 1
+	newCounts := make([]uint64, newLen)
+
+	if !b.IsEmpty() {
+		old := b.counts.AsSlice()
+		oldOffset := b.offset
+		var carry uint64
+		for i, c := range old {
+			if c == 0 {
+				continue
+			}
+			idx := oldOffset + int32(i)
+			if idx < newLeft {
+				carry += c
+			} else {
+				// idx is always <= newRight here: newRight is always the
+				// max of the old right edge and k, so no existing data can
+				// exceed it.
+				newCounts[idx-newLeft] += c
+			}
+		}
+		newCounts[0] += carry
+	}
+
+	b.counts = storage.Vector1DFromVec(newCounts)
+	b.offset = newLeft
+
+	if k < newLeft {
+		return 0
+	}
+	return int(k - newLeft)
 }
 
 func (b *Buckets) addOne(k int32) {
-	if b.IsEmpty() {
-		b.ensure(k)
-	}
-	counts := b.counts.AsMutSlice()
-	idx := k - b.offset
-	if idx >= 0 {
-		i := int(idx)
-		if i < len(counts) {
-			counts[i]++
+	if !b.IsEmpty() {
+		counts := b.counts.AsMutSlice()
+		idx := k - b.offset
+		if idx >= 0 && int(idx) < len(counts) {
+			counts[int(idx)]++
 			return
 		}
 	}
-	b.ensure(k)
-	b.counts.AsMutSlice()[int(k-b.offset)]++
+	// Growth (and, when capped, collapsing) needed: ensure() returns the
+	// actual write index, which may differ from k-offset once maxBins has
+	// folded k into the collapsed floor bucket.
+	writeIdx := b.ensure(k)
+	b.counts.AsMutSlice()[writeIdx]++
 }
 
 func (b Buckets) Clone() Buckets {
 	if b.IsEmpty() {
-		return Buckets{offset: b.offset}
+		return Buckets{offset: b.offset, maxBins: b.maxBins}
 	}
 	cp := append([]uint64(nil), b.counts.AsSlice()...)
-	return Buckets{counts: storage.Vector1DFromVec(cp), offset: b.offset}
+	return Buckets{counts: storage.Vector1DFromVec(cp), offset: b.offset, maxBins: b.maxBins}
 }
 
 // ---------------- DDSketch ----------------
@@ -240,6 +338,31 @@ func NewDDSketch(alpha float64) *DDSketch {
 // New mirrors the Rust constructor naming.
 func New(alpha float64) *DDSketch {
 	return NewDDSketch(alpha)
+}
+
+// NewDDSketchWithMaxBins is NewDDSketch with the bucket store capped at
+// maxBins bins, matching DataDog's LogCollapsingLowestDenseDDSketch: once
+// growth would need more than maxBins bins, the LOWEST bins collapse
+// (folding their mass into the new floor bucket) instead of growing
+// further, bounding the memory a single finite-but-extreme outlier can
+// force (sketchlib-go#72). Opt-in — plain NewDDSketch/New stay unbounded
+// (maxBins=0), matching today's behavior exactly. maxBins must be positive.
+//
+// The cap is a purely LOCAL, in-memory bound: it is not carried on the
+// wire (SerializePortable/SerializeToBytes emit exactly the buckets
+// present, capped or not) and a decoded/reconstructed sketch
+// (NewFromState, DeserializeDDSketchFromBytes) is always unbounded — only
+// the live, actively-inserted-into edge sketch needs the cap.
+func NewDDSketchWithMaxBins(alpha float64, maxBins int32) *DDSketch {
+	if maxBins <= 0 {
+		panic("maxBins must be positive")
+	}
+	return &DDSketch{
+		mapping: NewIndexMapping(alpha),
+		store:   Buckets{maxBins: maxBins},
+		min:     math.Inf(1),
+		max:     math.Inf(-1),
+	}
 }
 
 // Clear resets the sketch to empty IN PLACE, preserving the bucket
@@ -336,6 +459,14 @@ func (d *DDSketch) Max() (float64, bool) {
 // ---------------- Safe Merge ----------------
 
 // Merge implements common.Sketch.
+//
+// NOTE: does not enforce d's maxBins cap (sketchlib-go#72 collapsing store,
+// see NewDDSketchWithMaxBins) on the merged result — the result's span can
+// exceed maxBins if the two operands' ranges are far apart. Merging is a
+// bulk, already-bounded-input operation (unlike Update's single untrusted
+// sample), so it doesn't carry the same single-outlier memory-blowup risk;
+// enforcing the cap here is tracked separately if it turns out to matter in
+// practice.
 func (d *DDSketch) Merge(other common.Sketch) error {
 	o, ok := other.(*DDSketch)
 	if !ok {
@@ -538,18 +669,22 @@ func (d *DDSketch) BucketCount(k int32) uint64 {
 }
 
 // AddToBucket increments bucket k's count by delta, adjusts d.count, updates
-// d.min/d.max, and returns the new bucket count. Grows the bucket store if k is
-// outside the current range.
+// d.min/d.max, and returns the new bucket count. Grows the bucket store if k
+// is outside the current range (or, when the store is maxBins-capped,
+// collapses the lowest bins — in which case k's delta lands in the
+// collapsed floor bucket, not a bucket of its own).
 func (d *DDSketch) AddToBucket(k int32, delta uint64) uint64 {
 	if delta == 0 {
 		return d.BucketCount(k)
 	}
-	d.store.ensure(k)
-	idx := int(k - d.store.offset)
+	idx := d.store.ensure(k)
 	counts := d.store.counts.AsMutSlice()
 	counts[idx] += delta
 	d.count += delta
-	rep := d.mapping.Value(k)
+	// Use the representative of the bucket ACTUALLY written to (which may be
+	// the collapsed floor bucket, not k's own), so min/max stay consistent
+	// with what Quantile() can resolve post-collapse.
+	rep := d.mapping.Value(d.store.offset + int32(idx))
 	if rep < d.min {
 		d.min = rep
 	}
