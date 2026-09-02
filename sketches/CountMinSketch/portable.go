@@ -10,30 +10,36 @@ import (
 )
 
 // SerializePortable serializes the CountMinSketch into a portable protobuf
-// SketchEnvelope. Counts are encoded as packed sint64 (zigzag varint) giving
-// 4–8× size reduction over float64 for typical small-integer counter values.
+// SketchEnvelope. An all-integral Count matrix is encoded as packed sint64
+// (zigzag varint), 4–8× smaller than float64 for typical small-integer counter
+// values; a matrix with ANY fractional cell (weighted values, or the per-row
+// 1/p sampling weight) is encoded LOSSLESSLY as packed float64 (counts_float +
+// CounterType FLOAT64) — truncating to int64 would bias every cell toward zero
+// and desync the float64 L1 sidecar.
 // All three counter matrices (Count, Sum, Sum2) and the L1 norm vector are included.
 func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	n := s.Rows * s.Cols
-	countsInt := make([]int64, 0, n)
+	countsInt, countsFloat := flattenCMSCounts(s.Count, s.Rows, s.Cols)
 	sumFlat := make([]float64, 0, n)
 	sum2Flat := make([]float64, 0, n)
 	for r := 0; r < s.Rows; r++ {
-		for _, v := range s.Count[r] {
-			countsInt = append(countsInt, int64(v))
-		}
 		sumFlat = append(sumFlat, s.Sum[r]...)
 		sum2Flat = append(sum2Flat, s.Sum2[r]...)
 	}
 
 	state := &cmpb.CountMinState{
-		Rows:        uint32(s.Rows),
-		Cols:        uint32(s.Cols),
-		CounterType: commonpb.CounterType_COUNTER_TYPE_INT64,
-		CountsInt:   countsInt,
-		SumCounts:   sumFlat,
-		Sum2Counts:  sum2Flat,
-		L1:          append([]float64(nil), s.L1...),
+		Rows:       uint32(s.Rows),
+		Cols:       uint32(s.Cols),
+		SumCounts:  sumFlat,
+		Sum2Counts: sum2Flat,
+		L1:         append([]float64(nil), s.L1...),
+	}
+	if countsFloat != nil {
+		state.CounterType = commonpb.CounterType_COUNTER_TYPE_FLOAT64
+		state.CountsFloat = countsFloat
+	} else {
+		state.CounterType = commonpb.CounterType_COUNTER_TYPE_INT64
+		state.CountsInt = countsInt
 	}
 
 	return &envpb.SketchEnvelope{
@@ -53,22 +59,24 @@ func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 // Reduces CMS payload by ~3× vs full serialization, compounded with the
 // sint64 savings for a combined ~10–15× reduction over the legacy float64 format.
 func (s *CountMinSketch) SerializePortableFO() (*envpb.SketchEnvelope, error) {
-	n := s.Rows * s.Cols
-	countsInt := make([]int64, 0, n)
-	for r := 0; r < s.Rows; r++ {
-		for _, v := range s.Count[r] {
-			countsInt = append(countsInt, int64(v))
-		}
-	}
+	countsInt, countsFloat := flattenCMSCounts(s.Count, s.Rows, s.Cols)
 
 	state := &cmpb.CountMinState{
-		Rows:        uint32(s.Rows),
-		Cols:        uint32(s.Cols),
-		CounterType: commonpb.CounterType_COUNTER_TYPE_INT64,
-		CountsInt:   countsInt,
+		Rows: uint32(s.Rows),
+		Cols: uint32(s.Cols),
 		// SumCounts and Sum2Counts deliberately omitted.
-		// Receiver sets Sum = Sum2 = Count (valid for unweighted streams).
+		// Receiver sets Sum = Sum2 = Count — valid for unweighted streams AND
+		// for the per-row 1/p sampled path (all three arrays get the same
+		// weight increments).
 		L1: append([]float64(nil), s.L1...),
+	}
+	// Lossless float wire when any cell is fractional (see SerializePortable).
+	if countsFloat != nil {
+		state.CounterType = commonpb.CounterType_COUNTER_TYPE_FLOAT64
+		state.CountsFloat = countsFloat
+	} else {
+		state.CounterType = commonpb.CounterType_COUNTER_TYPE_INT64
+		state.CountsInt = countsInt
 	}
 
 	return &envpb.SketchEnvelope{
@@ -200,4 +208,26 @@ func portableHashSpec() *commonpb.HashSpec {
 		},
 		SeedDerivation: commonpb.SeedDerivation_SEED_DERIVATION_PACKED,
 	}
+}
+
+// flattenCMSCounts flattens the Count matrix for the wire. If every cell is
+// integral it returns (ints, nil) — the compact sint64 encoding. If any cell is
+// fractional it returns (nil, floats) — the lossless float64 encoding.
+func flattenCMSCounts(count [][]float64, rows, cols int) ([]int64, []float64) {
+	n := rows * cols
+	ints := make([]int64, 0, n)
+	for r := 0; r < rows; r++ {
+		for _, v := range count[r] {
+			iv, ok := integralCellDelta(v)
+			if !ok {
+				floats := make([]float64, 0, n)
+				for r2 := 0; r2 < rows; r2++ {
+					floats = append(floats, count[r2]...)
+				}
+				return nil, floats
+			}
+			ints = append(ints, iv)
+		}
+	}
+	return ints, nil
 }

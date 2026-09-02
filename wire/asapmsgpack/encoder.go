@@ -29,8 +29,10 @@
 //     `_ENCODING_PROTO` path for KLL, which decodes via lossy statistical
 //     reconstruction on the Rust side).
 //
-//   - Delta transmission (`*_ENCODING_MSGPACK_DELTA = 4`): deferred until
-//     sketch-core grows an `apply_delta` API.
+//   - Delta transmission (`*_ENCODING_MSGPACK_DELTA = 4`): supported for the
+//     four delta-capable sketches via the `*_delta.go` / `cell_delta.go`
+//     Marshal*Delta functions, byte-matched to asap_sketchlib's
+//     `compute_delta_msgpack`. KLL has no delta form (full-only).
 package asapmsgpack
 
 import (

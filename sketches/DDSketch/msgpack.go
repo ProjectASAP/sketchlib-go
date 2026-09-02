@@ -74,11 +74,12 @@ func DeserializeMsgpack(buf []byte) (*DDSketch, error) {
 	// the bucket distribution. sum is unrecoverable and is left at zero.
 	count, minVal, maxVal := deriveScalarsFromBuckets(&buckets, mapping)
 	return &DDSketch{
-		mapping: mapping,
-		store:   buckets,
-		count:   count,
-		sum:     0,
-		min:     minVal,
-		max:     maxVal,
+		mapping:      mapping,
+		store:        buckets,
+		count:        count,
+		sum:          0,
+		min:          minVal,
+		max:          maxVal,
+		gosPopulated: populatedBucketCount(&buckets),
 	}, nil
 }

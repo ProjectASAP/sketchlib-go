@@ -7,14 +7,11 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
-// integralCellDelta converts a float64 cell delta to its exact int64 value,
-// returning ok=false when the delta is fractional or out of i64 range. The
-// CMS sparse delta wire carries cells as i64 (proto d_counts is sint64), while
-// the full-frame counters are f64; a fractional/weighted cell cannot be
-// represented losslessly on the delta wire, so the caller rejects the delta
-// and falls back to the lossless full frame rather than truncating (which
-// would make a window-1 full frame and a window-2 delta-against-empty
-// reconstruct to different matrices, and silently vanish |Δ|<1 cells).
+// integralCellDelta converts a float64 value to its exact int64, returning
+// ok=false when it is fractional or out of i64 range. Used by the codec to
+// pick the wire encoding: all-integral deltas ride the compact packed-sint64
+// d_counts field; any fractional (weighted / per-row 1/p sampled) delta moves
+// the whole cell list to the lossless packed-float64 d_counts_float field.
 func integralCellDelta(df float64) (int64, bool) {
 	if math.IsNaN(df) || math.IsInf(df, 0) {
 		return 0, false
@@ -30,11 +27,14 @@ func integralCellDelta(df float64) (int64, bool) {
 }
 
 // CellDelta holds the additive delta for a single (row, col) cell.
-// DSum and DSum2 are dropped: the receiver reconstructs Sum and Sum2
-// from DCount for unweighted (unit-weight) streams (Sum=Sum2=Count).
+// DSum and DSum2 are dropped: the receiver reconstructs Sum and Sum2 from
+// DValue — exact for unit-weight streams AND for the per-row 1/p sampled path
+// (which increments all three arrays by the same weight). DValue is float64 so
+// fractional (weighted/sampled) cells are carried losslessly; the codec still
+// emits the compact sint64 wire when every delta is integral.
 type CellDelta struct {
 	Row, Col uint32
-	DCount   int64
+	DValue   float64
 }
 
 // Delta is the native Go representation of a sparse CountMinSketch delta.
@@ -112,17 +112,10 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 			if df == 0 || math.Abs(df) < threshold {
 				continue
 			}
-			dc, ok := integralCellDelta(df)
-			if !ok {
-				// i64 cell wire (proto d_counts sint64) cannot carry a
-				// fractional/weighted delta losslessly; reject so the caller
-				// emits the lossless full frame instead of truncating.
-				return nil, fmt.Errorf(
-					"countminsketch: ComputeDelta: cell (%d,%d) delta %v is non-integral; "+
-						"the sparse delta wire is integer-only (use the full frame for "+
-						"weighted/fractional sketches)", r, c, df)
-			}
-			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
+			// Fractional deltas are carried as-is; the codec picks the float
+			// wire (d_counts_float) when needed and keeps the compact sint64
+			// wire when every delta is integral.
+			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DValue: df})
 		}
 		d.L1[r] = current.L1[r] - snapshot.L1[r]
 	}
@@ -148,9 +141,9 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 //
 // The result is byte-identical to ComputeDelta(zeroSketch, current, threshold)
 // for a freshly-constructed zeroSketch of current's dimensions: the same
-// threshold test, the same integral-cell rejection, the same cell ordering
-// (row-major), and L1 carried in full (== current's, since the base is
-// zero). Callers SerializeDelta the result exactly as for ComputeDelta.
+// threshold test, the same cell ordering (row-major), and L1 carried in full
+// (== current's, since the base is zero). Callers SerializeDelta the result
+// exactly as for ComputeDelta.
 func ComputeDeltaAgainstEmpty(current *CountMinSketch, threshold float64) (*Delta, error) {
 	rows, cols := current.Rows, current.Cols
 	d := &Delta{
@@ -166,13 +159,7 @@ func ComputeDeltaAgainstEmpty(current *CountMinSketch, threshold float64) (*Delt
 			if df == 0 || math.Abs(df) < threshold {
 				continue
 			}
-			dc, ok := integralCellDelta(df)
-			if !ok {
-				return nil, fmt.Errorf(
-					"countminsketch: ComputeDeltaAgainstEmpty: cell (%d,%d) delta %v is "+
-						"non-integral; the sparse delta wire is integer-only", r, c, df)
-			}
-			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
+			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DValue: df})
 		}
 		d.L1[r] = current.L1[r] // snapshot.L1[r] == 0
 	}
@@ -189,7 +176,7 @@ type HeavyHitterSink interface {
 
 // ApplyDelta applies d to target using += semantics.
 // For unweighted streams, Sum and Sum2 equal Count, so all three arrays
-// are incremented by DCount (identical to the FO full-payload behaviour).
+// are incremented by DValue (identical to the FO full-payload behaviour).
 // Cells outside target's dimensions are silently skipped.
 // HHKeys are not consumed here (a plain CMS has no Top-K sink); use
 // ApplyDeltaWithHH to rebuild heavy hitters from them.
@@ -211,9 +198,9 @@ func ApplyDeltaWithHH(target *CountMinSketch, d *Delta, sink HeavyHitterSink) {
 		if r >= target.Rows || col >= target.Cols {
 			continue
 		}
-		target.Count[r][col] += float64(c.DCount)
-		target.Sum[r][col] += float64(c.DCount)
-		target.Sum2[r][col] += float64(c.DCount)
+		target.Count[r][col] += c.DValue
+		target.Sum[r][col] += c.DValue
+		target.Sum2[r][col] += c.DValue
 	}
 	for r, v := range d.L1 {
 		if r < target.Rows {

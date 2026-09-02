@@ -284,6 +284,22 @@ type DDSketch struct {
 	min   float64
 	max   float64
 
+	// gosPopulated is B — the number of currently-populated (nonzero-count)
+	// buckets — tracked incrementally by UpdateGOS for the insert-time GOS
+	// threshold T=ε·N/(k·B) (docs/sampling-cdm-gos-derivations.md §8.4).
+	// Maintained ONLY by UpdateGOS (incremented on a bucket's first touch,
+	// decremented when UpdateGOS resets a crossed bucket back to 0); plain
+	// Update/AddToBucket/ResetBucket/DrainBuckets (the OctoSketch worker
+	// path) do not touch it, mirroring the wrapper contract that a
+	// GOS-enabled series routes every insert through UpdateGOS exclusively
+	// and never mixes it with the plain insert path. See PopulatedBuckets.
+	gosPopulated uint32
+
+	// wireP is the EXTERNAL-sampling probability stamped on the wire envelope
+	// when admission is decided outside the sketch (SetWireSampleP); 0 = exact.
+	// Ignored while an internal sampler is installed (sampler.P() wins).
+	wireP float64
+
 	// sampler implements optional NitroSketch geometric skip-sampling. When nil
 	// (the default) every value is recorded and the sketch is byte-identical to
 	// an unsampled one. When set with p<1, a Geometric(p)-distributed run of
@@ -309,11 +325,26 @@ func (d *DDSketch) WithSampleP(p float64, seed int64) *DDSketch {
 	return d
 }
 
+// SetWireSampleP stamps a sampling probability on the wire envelope WITHOUT
+// installing an internal sampler. Used when admission is decided EXTERNALLY
+// (e.g. consistent per-item sampling at the collector wrapper or the wire
+// filter, design §3.1.1): the sketch stores the raw admitted counts, the
+// external stage owns the drop decision, and the consumer still learns p for
+// its ×1/p rescale. p >= 1 or <= 0 clears the override (exact).
+func (d *DDSketch) SetWireSampleP(p float64) {
+	if p >= 1.0 || p <= 0 || math.IsNaN(p) {
+		d.wireP = 0
+		return
+	}
+	d.wireP = p
+}
+
 // wireSampleP returns the sampling probability to stamp on the envelope (0.0
-// when unsampled = exact).
+// when unsampled = exact). An internal sampler wins; otherwise the external
+// SetWireSampleP override applies.
 func (d *DDSketch) wireSampleP() float64 {
 	if d.sampler == nil {
-		return 0.0
+		return d.wireP
 	}
 	return d.sampler.P()
 }
@@ -382,6 +413,7 @@ func (d *DDSketch) Clear() {
 	d.sum = 0
 	d.min = math.Inf(1)
 	d.max = math.Inf(-1)
+	d.gosPopulated = 0
 }
 
 // TypeName returns the name of the sketch.
@@ -487,6 +519,7 @@ func (d *DDSketch) Merge(other common.Sketch) error {
 		d.min = o.min
 		d.max = o.max
 		d.store = o.store.Clone()
+		d.gosPopulated = o.gosPopulated
 		// Mapping is already equal
 		return nil
 	}
@@ -502,8 +535,31 @@ func (d *DDSketch) Merge(other common.Sketch) error {
 	}
 
 	d.mergeBuckets(&d.store, &o.store)
+	// Merge is not the per-insert hot path (already O(merged span) via
+	// mergeBuckets above), so recompute gosPopulated exactly by scanning the
+	// merged result rather than trying to reconcile the two operands'
+	// incrementally-tracked counts (their populated sets can overlap).
+	d.gosPopulated = populatedBucketCount(&d.store)
 
 	return nil
+}
+
+// populatedBucketCount scans a Buckets store's existing backing slice (no
+// copy) and counts nonzero entries. Used where an exact recount is cheap
+// relative to the caller's own cost (Merge, wire reconstruction) — the
+// insert-time path (UpdateGOS) never calls this; it maintains gosPopulated
+// incrementally instead.
+func populatedBucketCount(b *Buckets) uint32 {
+	if b.IsEmpty() {
+		return 0
+	}
+	var n uint32
+	for _, c := range b.counts.AsSlice() {
+		if c != 0 {
+			n++
+		}
+	}
+	return n
 }
 
 func (d *DDSketch) mergeBuckets(a *Buckets, b *Buckets) {
@@ -627,13 +683,127 @@ func (d *DDSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, erro
 
 func (d *DDSketch) Clone() *DDSketch {
 	return &DDSketch{
-		mapping: d.mapping,
-		store:   d.store.Clone(),
-		count:   d.count,
-		sum:     d.sum,
-		min:     d.min,
-		max:     d.max,
+		mapping:      d.mapping,
+		store:        d.store.Clone(),
+		count:        d.count,
+		sum:          d.sum,
+		min:          d.min,
+		max:          d.max,
+		gosPopulated: d.gosPopulated,
 	}
+}
+
+// ---------------- Insert-time GOS (design-gos-unified-edge-telemetry.md §11) ----------------
+
+// DDSketchGOSUpdate is one bucket that crossed the insert-time GOS threshold
+// and was reset to zero in place. Count is the bucket's magnitude
+// immediately before the reset — since every bucket starts at 0 right after
+// its own last reset, this value already equals "the change since that
+// bucket was last sent," so no separate per-bucket accumulator is needed on
+// top of the store itself (mirrors CountSketch.GOSCellUpdate).
+type DDSketchGOSUpdate struct {
+	Index int32
+	Count uint64
+}
+
+// PopulatedBuckets returns B — the number of currently-populated
+// (nonzero-count) buckets — tracked incrementally by UpdateGOS. This is the
+// denominator sampling-cdm-gos-derivations.md §8.4's CDM isotropic threshold
+// (T=ε·N/(k·B)) requires to be a genuine, always-current count: an assumed
+// or stale-low B does not merely loosen the staleness guarantee, it silently
+// VIOLATES it (staleness scales as ε·N·(B_actual/B_assumed), only bounded
+// when B_assumed >= B_actual). Zero on a sketch that has never used
+// UpdateGOS (or has just been Clear()'d).
+func (d *DDSketch) PopulatedBuckets() uint32 { return d.gosPopulated }
+
+// addOneGOS is UpdateGOS's bucket touch: a grow-avoiding fast path (falls
+// back to the general ensure()+increment for a new/out-of-range bucket)
+// that also reports whether this was the bucket's first-ever touch
+// (prev==0 -> nonzero) in the SAME lookup, so the caller can maintain
+// d.gosPopulated in O(1) without a second bucket read. Unlike addOneFast,
+// this does NOT touch d.min/d.max — UpdateGOS already updates those from the
+// raw inserted value (mirroring Update's semantics) before calling this, so
+// doing it again here from the bucket's representative value would just be
+// redundant work on every first-touch bucket.
+func (d *DDSketch) addOneGOS(k int32) (newCount uint64, firstTouch bool) {
+	if !d.store.IsEmpty() {
+		idx := int(k - d.store.offset)
+		counts := d.store.counts.AsMutSlice()
+		if uint(idx) < uint(len(counts)) {
+			prev := counts[idx]
+			counts[idx]++
+			d.count++
+			return counts[idx], prev == 0
+		}
+	}
+	d.store.ensure(k)
+	counts := d.store.counts.AsMutSlice()
+	idx := int(k - d.store.offset)
+	counts[idx]++
+	d.count++
+	return counts[idx], counts[idx] == 1
+}
+
+// UpdateGOS applies the same value insert as Update, then immediately checks
+// the just-touched bucket's new count against threshold: once it reaches
+// threshold, the bucket is reset to 0 in place (d.count/d.gosPopulated
+// adjusted to match — the local edge-side copy now reflects "accumulated
+// since this bucket was last sent", exactly like Update's running d.count
+// already does across resets) and the crossing is reported via
+// DDSketchGOSUpdate. threshold==0 disables the check entirely and behaves
+// exactly like Update (no gosPopulated bookkeeping either — mirrors
+// CountSketch.UpdateStringGOS's threshold<=0 escape hatch), so callers can
+// toggle GOS mode without a second insert path.
+//
+// Callers recompute threshold from the CURRENT PopulatedBuckets()/Count() via
+// the GOS closed form (T=ε·N/(k·B), derivations §8.4) once per call, before
+// calling UpdateGOS — the same convention CountSketch.UpdateStringGOS uses
+// (threshold reflects state as of just before this insert; the check is
+// applied to the value just after it). Invalid/non-positive/sampled-out
+// values are ignored exactly like Update, reporting no crossing.
+func (d *DDSketch) UpdateGOS(v float64, threshold uint64) (crossed bool, update DDSketchGOSUpdate) {
+	if !(v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0)) {
+		return false, DDSketchGOSUpdate{}
+	}
+	if !d.admit() {
+		return false, DDSketchGOSUpdate{}
+	}
+
+	d.sum += v
+	if v < d.min {
+		d.min = v
+	}
+	if v > d.max {
+		d.max = v
+	}
+
+	if threshold == 0 {
+		// GOS disabled: plain insert, no gosPopulated tracking.
+		k := d.mapping.Index(v)
+		d.store.addOne(k)
+		d.count++
+		return false, DDSketchGOSUpdate{}
+	}
+
+	k := d.mapping.Index(v)
+	newCount, firstTouch := d.addOneGOS(k)
+	if firstTouch {
+		d.gosPopulated++
+	}
+
+	if newCount < threshold {
+		return false, DDSketchGOSUpdate{}
+	}
+
+	// Crossed: capture the magnitude, then reset the bucket in place.
+	d.store.counts.AsMutSlice()[int(k-d.store.offset)] = 0
+	if d.count >= newCount {
+		d.count -= newCount
+	} else {
+		d.count = 0
+	}
+	d.gosPopulated--
+	return true, DDSketchGOSUpdate{Index: k, Count: newCount}
 }
 
 // ---------------- OctoSketch bucket-level accessors ----------------
@@ -998,18 +1168,20 @@ func DeserializeDDSketchFromBytes(data []byte) (*DDSketch, error) {
 		return nil, errors.New("invalid snapshot mapping")
 	}
 
+	store := Buckets{
+		counts: storage.Vector1DFromVec(snap.StoreCounts),
+		offset: snap.StoreOffset,
+	}
 	return &DDSketch{
 		mapping: IndexMapping{
 			gamma:       snap.MappingGamma,
 			invLogGamma: snap.MappingInvLogGamma,
 		},
-		store: Buckets{
-			counts: storage.Vector1DFromVec(snap.StoreCounts),
-			offset: snap.StoreOffset,
-		},
-		count: snap.Count,
-		sum:   snap.Sum,
-		min:   snap.Min,
-		max:   snap.Max,
+		store:        store,
+		count:        snap.Count,
+		sum:          snap.Sum,
+		min:          snap.Min,
+		max:          snap.Max,
+		gosPopulated: populatedBucketCount(&store),
 	}, nil
 }

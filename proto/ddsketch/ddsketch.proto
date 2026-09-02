@@ -25,22 +25,56 @@ option go_package = "github.com/ProjectASAP/sketchlib-go/proto/ddsketch;ddsketch
 // carried on the wire: count is recoverable by summing store_counts, and
 // min/max/quantiles are derived from the bucket distribution within the
 // relative-accuracy guarantee. sum is not recoverable and is not transmitted.
+//
+// Bucket encoding (sketchlib-go#72): a producer emits buckets in exactly
+// ONE of two shapes, never both:
+//   - dense (store_counts + store_offset): the legacy contiguous-array
+//     form, positional from store_offset. Cheapest when the populated
+//     buckets are reasonably dense within their span.
+//   - sparse (buckets, field 16): index+count pairs, one per POPULATED
+//     bucket only, omitting every zero position. Cheapest — and, above
+//     a sparsity threshold, mandatory — when a single outlier bucket
+//     index would otherwise force a dense array to span an enormous,
+//     mostly-empty range (see DDSketch.go/portable.go for the producer's
+//     selection heuristic). A consumer MUST check `buckets` first and
+//     fall back to `store_counts`/`store_offset` only when `buckets` is
+//     empty, since a sparse-encoded message leaves the legacy fields at
+//     their zero value.
 message DDSketchState {
   // Relative accuracy guarantee. Required. Must satisfy 0 < alpha < 1.
   double alpha = 1;
 
   // Bucket count array in index order (ascending absolute bucket index).
   // Absolute index of store_counts[i] is i + store_offset.
+  // LEGACY dense encoding — see the sparse `buckets` field (16) above.
+  // Left empty when the producer chose the sparse encoding.
   repeated uint64 store_counts = 2 [packed = true];
 
   // Absolute bucket index corresponding to store_counts[0].
   // May be negative (values < 1.0 map to negative bucket indices).
+  // Meaningless when store_counts is empty (sparse encoding in use).
   sint32 store_offset = 3;
 
   // Fields 4-7 (count/sum/min/max) removed: DataPoint-level metric scalars
   // are no longer carried on the wire.
   reserved 4, 5, 6, 7;
   reserved 8 to 15;
+
+  // Sparse bucket encoding: one entry per POPULATED bucket, index+count.
+  // Populated exactly when the producer chose sparse over dense (see
+  // above); empty (unset) when the dense fields are in use. New in the
+  // sketchlib-go#72 fix — consumers that pre-date this field simply never
+  // see it populated for old-shape (dense) messages, and see an
+  // empty/absent legacy pair for new-shape (sparse) messages instead of a
+  // (potentially enormous) dense array.
+  repeated DDSketchBucketCount buckets = 16;
+}
+
+// DDSketchBucketCount is one (index, absolute count) pair used by
+// DDSketchState's sparse bucket encoding.
+message DDSketchBucketCount {
+  sint32 index = 1;  // signed bucket index (negative for values < 1)
+  uint64 count = 2;  // absolute (not delta) bucket count; always > 0
 }
 
 // ============================================================================

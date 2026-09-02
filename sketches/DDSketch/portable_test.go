@@ -184,6 +184,78 @@ func TestSerializeStateProtoBytes_QuantilesAfterScalarRemoval(t *testing.T) {
 	}
 }
 
+// TestSerializeStateProtoBytes_SparseOutlier is the regression test for
+// sketchlib-go#72: a single far-outlier value must no longer force the
+// full-snapshot wire format to carry a dense array spanning millions of
+// mostly-empty bucket positions. It compares the wire size of a sketch with
+// one huge outlier against the same sketch without it, and asserts the
+// with-outlier payload stays small (proportional to the number of populated
+// buckets, not the span) — proving bucketWireForm actually switched to the
+// sparse `buckets` encoding rather than paying for the dense array. It also
+// round-trips the sparse-encoded bytes back through NewFromStateProtoBytes
+// to confirm the outlier's bucket count is not lost.
+func TestSerializeStateProtoBytes_SparseOutlier(t *testing.T) {
+	const alpha = 0.01
+
+	compact := NewDDSketch(alpha)
+	for _, v := range []float64{1.0, 2.0, 3.0, 5.0, 10.0} {
+		compact.Update(v)
+	}
+	compactBytes, err := compact.SerializeStateProtoBytes()
+	if err != nil {
+		t.Fatalf("SerializeStateProtoBytes(compact): %v", err)
+	}
+
+	withOutlier := NewDDSketch(alpha)
+	for _, v := range []float64{1.0, 2.0, 3.0, 5.0, 10.0} {
+		withOutlier.Update(v)
+	}
+	withOutlier.Update(1e18) // forces an enormous bucket-index span
+	outlierBytes, err := withOutlier.SerializeStateProtoBytes()
+	if err != nil {
+		t.Fatalf("SerializeStateProtoBytes(withOutlier): %v", err)
+	}
+
+	// A dense encoding of this span would be tens of millions of uint64
+	// entries (many megabytes even varint-packed). The sparse encoding
+	// should add only a handful of bytes over the compact sketch's payload
+	// (one more (index,count) pair).
+	const maxGrowth = 64 // bytes; generous slack over one extra sparse entry
+	if grew := len(outlierBytes) - len(compactBytes); grew > maxGrowth {
+		t.Fatalf("outlier payload grew by %d bytes (outlier=%d, compact=%d); "+
+			"want <= %d — dense positional array leaked onto the wire",
+			grew, len(outlierBytes), len(compactBytes), maxGrowth)
+	}
+	if len(outlierBytes) >= 1024 {
+		t.Fatalf("outlier payload is %d bytes; want a small, sparse-encoded payload", len(outlierBytes))
+	}
+
+	// Directly confirm the sparse field (not store_counts) carried the data.
+	var state ddpb.DDSketchState
+	if err := proto.Unmarshal(outlierBytes, &state); err != nil {
+		t.Fatalf("proto.Unmarshal: %v", err)
+	}
+	if len(state.GetStoreCounts()) != 0 {
+		t.Errorf("expected empty StoreCounts (sparse path), got %d entries", len(state.GetStoreCounts()))
+	}
+	if len(state.GetBuckets()) != 6 {
+		t.Errorf("expected 6 sparse bucket entries, got %d", len(state.GetBuckets()))
+	}
+
+	// Round-trip must still recover every insert, including the outlier.
+	reconstructed, err := NewFromStateProtoBytes(outlierBytes)
+	if err != nil {
+		t.Fatalf("NewFromStateProtoBytes: %v", err)
+	}
+	if reconstructed.Count() != withOutlier.Count() {
+		t.Errorf("count: got %d, want %d", reconstructed.Count(), withOutlier.Count())
+	}
+	recMax, _ := reconstructed.Max()
+	if recMax < 1e17 {
+		t.Errorf("outlier bucket lost on round-trip: reconstructed max=%v", recMax)
+	}
+}
+
 // TestComputeApplyDelta_QuantilesAfterScalarRemoval guards the delta path:
 // a delta carries only bucket counts now, and ApplyDelta must rebuild count
 // and min/max from those buckets. Quantiles after applying the delta must

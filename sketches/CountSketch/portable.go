@@ -11,18 +11,16 @@ import (
 )
 
 // SerializePortable serializes the CountSketch into a portable protobuf SketchEnvelope.
-// Opt-2: counter matrix is encoded as packed sint64 (zigzag varint), giving 4–8×
-// size reduction over float64 for typical small-integer counter values.
+// Opt-2: an all-integral counter matrix is encoded as packed sint64 (zigzag
+// varint), giving 4–8× size reduction over float64 for typical small-integer
+// counter values. A matrix with ANY fractional cell (weighted values, or the
+// per-row 1/p sampling weight) is encoded LOSSLESSLY as packed float64
+// (counts_float + CounterType FLOAT64) instead — truncating to int64 would bias
+// every cell toward zero and desync the float64 L2 sidecar.
 // Opt-4: heavy-hitter candidates are serialized as plain string keys from the
 // Space-Saving tracker; downstream queries the merged CS for accurate counts.
 func (s *CountSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
-	// Opt-2: sint64 packed varint instead of float64.
-	countsInt := make([]int64, 0, s.Rows*s.Cols)
-	for r := 0; r < s.Rows; r++ {
-		for _, v := range s.Count[r] {
-			countsInt = append(countsInt, int64(v))
-		}
-	}
+	countsInt, countsFloat := flattenCounts(s.Count, s.Rows, s.Cols)
 
 	l2 := append([]float64(nil), s.L2...)
 
@@ -34,13 +32,18 @@ func (s *CountSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	}
 
 	state := &cspb.CountSketchState{
-		Rows:        uint32(s.Rows),
-		Cols:        uint32(s.Cols),
-		CounterType: commonpb.CounterType_COUNTER_TYPE_INT64,
-		CountsInt:   countsInt,
-		L2:          l2,
-		HhKeys:      hhKeys,
+		Rows:   uint32(s.Rows),
+		Cols:   uint32(s.Cols),
+		L2:     l2,
+		HhKeys: hhKeys,
 		// Topk intentionally omitted (stale upstream-local counts replaced by hh_keys).
+	}
+	if countsFloat != nil {
+		state.CounterType = commonpb.CounterType_COUNTER_TYPE_FLOAT64
+		state.CountsFloat = countsFloat
+	} else {
+		state.CounterType = commonpb.CounterType_COUNTER_TYPE_INT64
+		state.CountsInt = countsInt
 	}
 
 	return &envpb.SketchEnvelope{
@@ -54,6 +57,29 @@ func (s *CountSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 			CountSketch: state,
 		},
 	}, nil
+}
+
+// flattenCounts flattens a rows×cols count matrix for the wire. If every cell
+// is integral it returns (ints, nil) — the compact sint64 encoding. If any cell
+// is fractional it returns (nil, floats) — the lossless float64 encoding.
+func flattenCounts(count [][]float64, rows, cols int) ([]int64, []float64) {
+	n := rows * cols
+	ints := make([]int64, 0, n)
+	for r := 0; r < rows; r++ {
+		for _, v := range count[r] {
+			iv, ok := integralCellDelta(v)
+			if !ok {
+				// Fractional cell → restart as float64 (rare path, one rescan).
+				floats := make([]float64, 0, n)
+				for r2 := 0; r2 < rows; r2++ {
+					floats = append(floats, count[r2]...)
+				}
+				return nil, floats
+			}
+			ints = append(ints, iv)
+		}
+	}
+	return ints, nil
 }
 
 // SerializeProtoBytes serializes the CountSketch as a proto-encoded SketchEnvelope.
