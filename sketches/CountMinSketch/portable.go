@@ -16,7 +16,7 @@ import (
 // 1/p sampling weight) is encoded LOSSLESSLY as packed float64 (counts_float +
 // CounterType FLOAT64) — truncating to int64 would bias every cell toward zero
 // and desync the float64 L1 sidecar.
-// All three counter matrices (Count, Sum, Sum2) and the L1 norm are included.
+// All three counter matrices (Count, Sum, Sum2) and the L1 norm vector are included.
 func (s *CountMinSketch) SerializePortable() (*envpb.SketchEnvelope, error) {
 	n := s.Rows * s.Cols
 	countsInt, countsFloat := flattenCMSCounts(s.Count, s.Rows, s.Cols)

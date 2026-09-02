@@ -141,9 +141,9 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 //
 // The result is byte-identical to ComputeDelta(zeroSketch, current, threshold)
 // for a freshly-constructed zeroSketch of current's dimensions: the same
-// threshold test, the same cell ordering
-// (row-major), and L1 carried in full (== current's, since the base is
-// zero). Callers SerializeDelta the result exactly as for ComputeDelta.
+// threshold test, the same cell ordering (row-major), and L1 carried in full
+// (== current's, since the base is zero). Callers SerializeDelta the result
+// exactly as for ComputeDelta.
 func ComputeDeltaAgainstEmpty(current *CountMinSketch, threshold float64) (*Delta, error) {
 	rows, cols := current.Rows, current.Cols
 	d := &Delta{
