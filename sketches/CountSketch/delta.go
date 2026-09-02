@@ -8,9 +8,12 @@ import (
 )
 
 // CellDelta holds the signed additive delta for a single (row, col) cell.
+// DValue is float64 so weighted/sampled (1/p) cells are carried losslessly;
+// the codec still emits the compact sint64 wire when every delta is integral
+// (see SerializeDelta).
 type CellDelta struct {
 	Row, Col uint32
-	DCount   int64 // signed integer delta
+	DValue   float64 // signed delta (fractional allowed)
 }
 
 // Delta is the native Go representation of a sparse CountSketch delta.
@@ -31,6 +34,28 @@ type Delta struct {
 // HHKeys contains the Space-Saving candidates from current.SS.
 // Returns an error if the two sketches have different dimensions.
 func ComputeDelta(snapshot, current *CountSketch, threshold float64) (*Delta, error) {
+	return computeDelta(snapshot, current, func(int, int) float64 { return threshold })
+}
+
+// ComputeDeltaPerCell is ComputeDelta with a PER-CELL threshold matrix
+// (`thresholds[r][c]`) — the GOS anisotropic gate (design §7): each cell is
+// included when `|ΔCount| ≥ thresholds[r][c]`, so a gradient-weighted threshold
+// vector can send heavy/sensitive cells at a tighter threshold than light ones.
+// The wire format is identical to ComputeDelta (a sparse cell list), so
+// ApplyDelta and the backend are unchanged — only the cell selection differs.
+// A nil/short row falls back to threshold 0 (lossless) for missing cells.
+func ComputeDeltaPerCell(snapshot, current *CountSketch, thresholds [][]float64) (*Delta, error) {
+	return computeDelta(snapshot, current, func(r, c int) float64 {
+		if r < len(thresholds) && c < len(thresholds[r]) {
+			return thresholds[r][c]
+		}
+		return 0
+	})
+}
+
+// computeDelta is the shared core: `thr(r,c)` returns the inclusion threshold
+// for cell (r,c) (constant for ComputeDelta, per-cell for ComputeDeltaPerCell).
+func computeDelta(snapshot, current *CountSketch, thr func(r, c int) float64) (*Delta, error) {
 	if snapshot.Rows != current.Rows || snapshot.Cols != current.Cols {
 		return nil, fmt.Errorf("countsketch: dimension mismatch (%d×%d vs %d×%d)",
 			snapshot.Rows, snapshot.Cols, current.Rows, current.Cols)
@@ -52,21 +77,13 @@ func ComputeDelta(snapshot, current *CountSketch, threshold float64) (*Delta, er
 			// Threshold on the float magnitude (not a truncated int) so a
 			// fractional threshold behaves as written and |Δ|<1 cells are not
 			// silently mis-filtered.
-			if df == 0 || math.Abs(df) < threshold {
+			if df == 0 || math.Abs(df) < thr(r, c) {
 				continue
 			}
-			dc, ok := integralCellDelta(df)
-			if !ok {
-				// CellDelta.DCount is i64 (proto d_counts is sint64); a
-				// fractional/weighted cell cannot be carried losslessly, and
-				// truncating it would make full ≠ delta-against-empty. Reject
-				// so callers emit the lossless full f64 frame instead.
-				return nil, fmt.Errorf(
-					"countsketch: ComputeDelta: cell (%d,%d) delta %v is non-integral; "+
-						"the sparse delta wire is integer-only (use the full frame for "+
-						"weighted/fractional sketches)", r, c, df)
-			}
-			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DCount: dc})
+			// Fractional deltas (weighted / per-row 1/p sampled cells) are carried
+			// as-is; the codec picks the float wire (d_counts_float) when needed
+			// and keeps the compact sint64 wire when every delta is integral.
+			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DValue: df})
 		}
 		d.L2[r] = current.L2[r] - snapshot.L2[r]
 	}
@@ -91,7 +108,7 @@ func ApplyDelta(target *CountSketch, d *Delta) {
 		if r >= target.Rows || col >= target.Cols {
 			continue
 		}
-		target.Count[r][col] += float64(c.DCount)
+		target.Count[r][col] += c.DValue
 	}
 	for r, v := range d.L2 {
 		if r < target.Rows {

@@ -5,6 +5,21 @@ import (
 	"math/rand"
 )
 
+// RowSampler is the admission interface consumed by the per-row sampled sketch
+// updates (CountSketch.UpdateStringSampledPerRow, CountMinSketch.
+// InsertWithHashSampledPerRow). The caller invokes BeginItem() exactly once per
+// stream item, then Admit() exactly once per row in row order (0..d-1).
+//
+// The sole implementation is *GeometricSampler — NitroSketch skip-sampling
+// over the flattened (item,row) candidate stream. Stateful (RNG skip
+// counter); cheapest RNG. Admission is decided exactly once, upstream of
+// serialization (SDK-side), so no other pipeline stage re-derives it.
+type RowSampler interface {
+	BeginItem()
+	Admit() bool
+	P() float64
+}
+
 // GeometricSampler implements NitroSketch-style geometric skip-sampling.
 //
 // Instead of flipping an independent Bernoulli(p) coin on every stream update
@@ -64,7 +79,20 @@ func (s *GeometricSampler) Reset(p float64, seed int64) {
 }
 
 // P returns the configured sampling probability (1.0 when exact).
-func (s *GeometricSampler) P() float64 { return s.p }
+// Nil-safe: a nil sampler reports 1.0, so interface callers holding a typed-nil
+// *GeometricSampler degrade to the exact (unsampled) path.
+func (s *GeometricSampler) P() float64 {
+	if s == nil {
+		return 1.0
+	}
+	return s.p
+}
+
+// BeginItem marks a stream-item boundary (RowSampler). The geometric
+// skip-sampler runs over the FLATTENED (item,row) candidate stream, so item
+// boundaries carry no state here — this is a no-op kept for RowSampler
+// interface parity.
+func (s *GeometricSampler) BeginItem() {}
 
 // IsExact reports whether the sampler admits every update (p == 1.0).
 func (s *GeometricSampler) IsExact() bool { return s.exact }
@@ -137,8 +165,9 @@ func KeepKeyByThreshold(canonicalHash uint64, p float64) bool {
 // applied by the consumer at query time, never here.
 //
 // With p == 1.0 this is a single comparison and never draws from the RNG.
+// Nil-safe: a nil sampler admits everything (exact).
 func (s *GeometricSampler) Admit() bool {
-	if s.exact {
+	if s == nil || s.exact {
 		return true
 	}
 	if s.skip > 0 {

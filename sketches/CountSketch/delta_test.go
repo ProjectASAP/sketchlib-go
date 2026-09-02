@@ -2,7 +2,6 @@ package countsketch
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
@@ -33,19 +32,80 @@ func TestCSDelta_FullEqualsDeltaAgainstEmpty(t *testing.T) {
 	}
 }
 
-// TestCSDelta_RejectsFractionalCells is the P0-2 guard: a fractional/weighted
-// cell makes ComputeDelta error so the caller falls back to the lossless full
-// frame (the i64 sparse delta wire cannot carry a fractional Δ losslessly).
-func TestCSDelta_RejectsFractionalCells(t *testing.T) {
+// TestCSDelta_FractionalCellsLossless supersedes the old P0-2 rejection guard:
+// a fractional/weighted cell now rides the packed-float64 d_counts_float wire
+// and round-trips losslessly (see float_wire_test.go for the sampled-stream
+// end-to-end version).
+func TestCSDelta_FractionalCellsLossless(t *testing.T) {
 	cur := newCS(t)
 	cur.Count[0][0] = -2.25 // fractional, signed
 	empty := newCS(t)
-	_, err := ComputeDelta(empty, cur, 0.1)
-	if err == nil {
-		t.Fatal("expected error for fractional cell delta, got nil")
+	d, err := ComputeDelta(empty, cur, 0.1)
+	if err != nil {
+		t.Fatalf("fractional delta must be accepted: %v", err)
 	}
-	if !strings.Contains(err.Error(), "non-integral") {
-		t.Fatalf("error should mention non-integral, got: %v", err)
+	payload, err := SerializeDelta(d)
+	if err != nil {
+		t.Fatalf("SerializeDelta: %v", err)
+	}
+	got, err := DeserializeDelta(payload)
+	if err != nil {
+		t.Fatalf("DeserializeDelta: %v", err)
+	}
+	recon := newCS(t)
+	ApplyDelta(recon, got)
+	if recon.Count[0][0] != -2.25 {
+		t.Fatalf("fractional cell not lossless: got %v want -2.25", recon.Count[0][0])
+	}
+}
+
+// TestCSDelta_PerCellThreshold: a cell is included iff its delta meets ITS OWN
+// threshold — a big cell under a tight threshold is sent; an equal cell under a
+// loose threshold is dropped. Reconstruction applies only the included cells.
+func TestCSDelta_PerCellThreshold(t *testing.T) {
+	cur := newCS(t)
+	cur.Count[0][0] = 50 // tight threshold below 50 → included
+	cur.Count[1][1] = 50 // loose threshold above 50 → excluded
+	empty := newCS(t)
+
+	th := make([][]float64, cur.Rows)
+	for r := range th {
+		th[r] = make([]float64, cur.Cols)
+		for c := range th[r] {
+			th[r][c] = 1000 // default: loose (exclude everything)
+		}
+	}
+	th[0][0] = 10 // tighten only (0,0)
+
+	delta, err := ComputeDeltaPerCell(empty, cur, th)
+	if err != nil {
+		t.Fatalf("ComputeDeltaPerCell: %v", err)
+	}
+	if len(delta.Cells) != 1 || delta.Cells[0].Row != 0 || delta.Cells[0].Col != 0 {
+		t.Fatalf("expected only cell (0,0), got %+v", delta.Cells)
+	}
+	recon := newCS(t)
+	ApplyDelta(recon, delta)
+	if recon.Count[0][0] != 50 {
+		t.Errorf("(0,0) should apply: %v", recon.Count[0][0])
+	}
+	if recon.Count[1][1] != 0 {
+		t.Errorf("(1,1) below its threshold must be dropped: %v", recon.Count[1][1])
+	}
+}
+
+// A nil threshold matrix is lossless (threshold 0 everywhere).
+func TestCSDelta_PerCellNilIsLossless(t *testing.T) {
+	cur := newCS(t)
+	cur.Count[0][0] = 7
+	cur.Count[3][9] = -3
+	empty := newCS(t)
+	d, err := ComputeDeltaPerCell(empty, cur, nil)
+	if err != nil {
+		t.Fatalf("ComputeDeltaPerCell nil: %v", err)
+	}
+	if len(d.Cells) != 2 {
+		t.Fatalf("nil thresholds → lossless (2 cells), got %d", len(d.Cells))
 	}
 }
 

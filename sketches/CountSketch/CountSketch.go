@@ -392,6 +392,75 @@ func (s *CountSketch) UpdateString(key string, count float64) {
 	}
 }
 
+// GOSCellUpdate is one matrix cell that crossed the insert-time GOS
+// threshold and was reset to zero in place (ASAPCollector's
+// design-gos-unified-edge-telemetry.md §11: "check at insert time whether
+// the accumulated-since-last-sync delta crosses the threshold; if it does,
+// send it and reset"). Delta is the cell's magnitude immediately before the
+// reset — since every cell starts at 0 right after its own last reset, this
+// value already equals "the change since that cell was last sent," so no
+// separate per-cell accumulator is needed on top of the matrix itself.
+type GOSCellUpdate struct {
+	Row, Col uint32
+	Delta    float64
+}
+
+// UpdateStringGOS applies the same per-row hashed update as UpdateString
+// (weighted, Space-Saving-tracked), then immediately checks EACH row's
+// just-touched cell against threshold: a cell whose magnitude now reaches
+// threshold is reset to 0 in place (L2 adjusted to match, so the sketch's
+// own F2 estimate — QueryWithHash(QuerySum2, ·) — stays correct for the
+// cells that remain live) and reported in the returned slice. threshold<=0
+// disables the check entirely and behaves exactly like UpdateString (no
+// cells returned), so callers can toggle GOS mode without a second insert
+// path.
+func (s *CountSketch) UpdateStringGOS(key string, count float64, threshold float64) []GOSCellUpdate {
+	if s.SS != nil {
+		s.SS.Update(key, count)
+	}
+	hash := common.Hash64([]byte(key))
+	if threshold <= 0 {
+		s.InsertWithHashAndValue(hash, count)
+		return nil
+	}
+	hashed := storage.BuildMatrixHash(hash, s.Rows, s.Cols)
+	var dirty []GOSCellUpdate
+	countMatrix := s.Count
+	if hashed.Mode() == storage.MatrixHashPacked64 {
+		packed := hashed.Lower64()
+		for r := 0; r < s.Rows; r++ {
+			c, sign := s.fastPacked64PosAndSign(packed, r)
+			increment := sign * count
+			row := countMatrix[r]
+			prev := row[c]
+			curr := prev + increment
+			row[c] = curr
+			s.L2[r] += (curr * curr) - (prev * prev)
+			if math.Abs(curr) >= threshold {
+				dirty = append(dirty, GOSCellUpdate{Row: uint32(r), Col: uint32(c), Delta: curr})
+				row[c] = 0
+				s.L2[r] -= curr * curr
+			}
+		}
+		return dirty
+	}
+	for r := 0; r < s.Rows; r++ {
+		c, sign := s.derivePosAndSignFromHashed(hashed, r)
+		increment := sign * count
+		row := countMatrix[r]
+		prev := row[c]
+		curr := prev + increment
+		row[c] = curr
+		s.L2[r] += (curr * curr) - (prev * prev)
+		if math.Abs(curr) >= threshold {
+			dirty = append(dirty, GOSCellUpdate{Row: uint32(r), Col: uint32(c), Delta: curr})
+			row[c] = 0
+			s.L2[r] -= curr * curr
+		}
+	}
+	return dirty
+}
+
 // EstimateStringCount is a helper to query by string directly
 func (s *CountSketch) EstimateStringCount(key string) int64 {
 	hash := common.Hash64([]byte(key))

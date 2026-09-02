@@ -11,25 +11,44 @@ import (
 // HHKeys are written to the hh_keys field (mirroring CountSketch). When empty
 // (the default for a plain CMS), the repeated field encodes to nothing, so the
 // bytes are byte-identical to a delta that never carried heavy-hitter keys.
+// Wire selection: when every cell delta is integral, deltas ride the compact
+// packed-sint64 d_counts field (byte-identical to the pre-float encoding).
+// When ANY delta is fractional (weighted / per-row 1/p sampled streams), all
+// deltas ride the packed-float64 d_counts_float field instead — lossless.
 func SerializeDelta(d *Delta) ([]byte, error) {
 	n := len(d.Cells)
 	cellRows := make([]uint32, n)
 	cellCols := make([]uint32, n)
-	dCounts := make([]int64, n)
+	dCounts := make([]int64, 0, n)
+	allInt := true
 	for i := range d.Cells {
 		c := &d.Cells[i]
 		cellRows[i] = c.Row
 		cellCols[i] = c.Col
-		dCounts[i] = c.DCount
+		if allInt {
+			if iv, ok := integralCellDelta(c.DValue); ok {
+				dCounts = append(dCounts, iv)
+			} else {
+				allInt = false
+			}
+		}
 	}
 	msg := &pb.CountMinDelta{
 		Rows:     d.Rows,
 		Cols:     d.Cols,
 		CellRows: cellRows,
 		CellCols: cellCols,
-		DCounts:  dCounts,
 		L1:       d.L1,
 		HhKeys:   d.HHKeys,
+	}
+	if allInt {
+		msg.DCounts = dCounts
+	} else {
+		floats := make([]float64, n)
+		for i := range d.Cells {
+			floats[i] = d.Cells[i].DValue
+		}
+		msg.DCountsFloat = floats
 	}
 	return proto.Marshal(msg)
 }
@@ -47,14 +66,22 @@ func DeserializeDelta(data []byte) (*Delta, error) {
 
 	var cells []CellDelta
 	if len(msg.CellRows) > 0 {
-		// New packed encoding path.
+		// New packed encoding path. Prefer the float wire when present
+		// (fractional/weighted deltas); fall back to the sint64 wire.
 		n := len(msg.CellRows)
 		cells = make([]CellDelta, n)
+		useFloat := len(msg.DCountsFloat) == n
 		for i := 0; i < n; i++ {
+			var dv float64
+			if useFloat {
+				dv = msg.DCountsFloat[i]
+			} else {
+				dv = float64(msg.DCounts[i])
+			}
 			cells[i] = CellDelta{
 				Row:    msg.CellRows[i],
 				Col:    msg.CellCols[i],
-				DCount: msg.DCounts[i],
+				DValue: dv,
 			}
 		}
 	} else {
@@ -64,7 +91,7 @@ func DeserializeDelta(data []byte) (*Delta, error) {
 			cells[i] = CellDelta{
 				Row:    c.Row,
 				Col:    c.Col,
-				DCount: int64(c.DCount),
+				DValue: float64(c.DCount),
 			}
 		}
 	}

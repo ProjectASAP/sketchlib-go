@@ -176,9 +176,13 @@ type CountMinDelta struct {
 	// tracking is not enabled.
 	HhKeys []string `protobuf:"bytes,6,rep,name=hh_keys,json=hhKeys,proto3" json:"hh_keys,omitempty"`
 	// New packed encoding (Opt-1+2, Stage 2):
-	CellRows      []uint32 `protobuf:"varint,9,rep,packed,name=cell_rows,json=cellRows,proto3" json:"cell_rows,omitempty"`  // row index of each changed cell
-	CellCols      []uint32 `protobuf:"varint,10,rep,packed,name=cell_cols,json=cellCols,proto3" json:"cell_cols,omitempty"` // col index of each changed cell
-	DCounts       []int64  `protobuf:"zigzag64,11,rep,packed,name=d_counts,json=dCounts,proto3" json:"d_counts,omitempty"`  // signed integer count delta
+	CellRows []uint32 `protobuf:"varint,9,rep,packed,name=cell_rows,json=cellRows,proto3" json:"cell_rows,omitempty"`  // row index of each changed cell
+	CellCols []uint32 `protobuf:"varint,10,rep,packed,name=cell_cols,json=cellCols,proto3" json:"cell_cols,omitempty"` // col index of each changed cell
+	DCounts  []int64  `protobuf:"zigzag64,11,rep,packed,name=d_counts,json=dCounts,proto3" json:"d_counts,omitempty"`  // signed integer count delta
+	// Float count deltas, populated INSTEAD of d_counts when any cell delta is
+	// non-integral (weighted / sampled 1/p streams). Same length/order as
+	// cell_rows/cell_cols. Decoders prefer this field when present.
+	DCountsFloat  []float64 `protobuf:"fixed64,12,rep,packed,name=d_counts_float,json=dCountsFloat,proto3" json:"d_counts_float,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -265,6 +269,13 @@ func (x *CountMinDelta) GetCellCols() []uint32 {
 func (x *CountMinDelta) GetDCounts() []int64 {
 	if x != nil {
 		return x.DCounts
+	}
+	return nil
+}
+
+func (x *CountMinDelta) GetDCountsFloat() []float64 {
+	if x != nil {
+		return x.DCountsFloat
 	}
 	return nil
 }
@@ -365,7 +376,7 @@ const file_countminsketch_countminsketch_proto_rawDesc = "" +
 	"sum2Counts\x12\x12\n" +
 	"\x02l1\x18\b \x03(\x01B\x02\x10\x01R\x02l1J\x04\b\t\x10\n" +
 	"J\x04\b\n" +
-	"\x10\x10\"\x8a\x02\n" +
+	"\x10\x10\"\xb4\x02\n" +
 	"\rCountMinDelta\x12\x12\n" +
 	"\x04rows\x18\x01 \x01(\rR\x04rows\x12\x12\n" +
 	"\x04cols\x18\x02 \x01(\rR\x04cols\x12=\n" +
@@ -375,7 +386,8 @@ const file_countminsketch_countminsketch_proto_rawDesc = "" +
 	"\tcell_rows\x18\t \x03(\rB\x02\x10\x01R\bcellRows\x12\x1f\n" +
 	"\tcell_cols\x18\n" +
 	" \x03(\rB\x02\x10\x01R\bcellCols\x12\x1d\n" +
-	"\bd_counts\x18\v \x03(\x12B\x02\x10\x01R\adCountsJ\x04\b\x05\x10\x06\"w\n" +
+	"\bd_counts\x18\v \x03(\x12B\x02\x10\x01R\adCounts\x12(\n" +
+	"\x0ed_counts_float\x18\f \x03(\x01B\x02\x10\x01R\fdCountsFloatJ\x04\b\x05\x10\x06\"w\n" +
 	"\fCountMinCell\x12\x10\n" +
 	"\x03row\x18\x01 \x01(\rR\x03row\x12\x10\n" +
 	"\x03col\x18\x02 \x01(\rR\x03col\x12\x17\n" +

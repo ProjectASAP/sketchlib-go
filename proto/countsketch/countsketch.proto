@@ -103,6 +103,10 @@ message CountSketchDelta {
   repeated uint32          cell_cols     = 10 [packed = true];  // col index of each changed cell
   repeated sint64          d_counts      = 11 [packed = true];  // signed integer count delta
   repeated double          l2            = 12 [packed = true];  // per-row L2 norm deltas
+  // Float count deltas, populated INSTEAD of d_counts when any cell delta is
+  // non-integral (weighted / sampled 1/p streams). Same length/order as
+  // cell_rows/cell_cols. Decoders prefer this field when present.
+  repeated double          d_counts_float = 13 [packed = true];
 }
 
 // CountSketchCell is kept for backward-compat deserialization only.

@@ -100,6 +100,10 @@ message CountMinDelta {
   repeated uint32           cell_rows     = 9  [packed = true];  // row index of each changed cell
   repeated uint32           cell_cols     = 10 [packed = true];  // col index of each changed cell
   repeated sint64           d_counts      = 11 [packed = true];  // signed integer count delta
+  // Float count deltas, populated INSTEAD of d_counts when any cell delta is
+  // non-integral (weighted / sampled 1/p streams). Same length/order as
+  // cell_rows/cell_cols. Decoders prefer this field when present.
+  repeated double           d_counts_float = 12 [packed = true];
 }
 
 // CountMinCell is kept only for backward-compat deserialization.
