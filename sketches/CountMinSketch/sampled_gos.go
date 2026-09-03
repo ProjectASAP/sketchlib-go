@@ -1,6 +1,8 @@
 package countminsketch
 
 import (
+	"math/bits"
+
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
@@ -60,23 +62,17 @@ func (s *CountMinSketch) InsertWithHashSampledPerRowGOS(
 		return s.InsertWithHashGOS(hash, 1.0, threshold)
 	}
 
-	sampler.BeginItem()
-	var admitted [maxSampledRowsCMS]int
-	n := 0
-	for r := 0; r < s.Rows; r++ {
-		if sampler.Admit() {
-			admitted[n] = r
-			n++
-		}
-	}
-	if n == 0 {
+	admittedRows := common.AdmitRows(sampler, s.Rows)
+	if admittedRows == 0 {
 		return nil
 	}
 
 	w := 1.0 / sampler.P()
 	var dirty []GOSCellUpdate
-	for i := 0; i < n; i++ {
-		if d, ok := s.applyGosCellAtRowCMS(admitted[i], hash, w, threshold); ok {
+	for admittedRows != 0 {
+		r := bits.TrailingZeros64(admittedRows)
+		admittedRows &^= uint64(1) << uint(r)
+		if d, ok := s.applyGosCellAtRowCMS(r, hash, w, threshold); ok {
 			dirty = append(dirty, d)
 		}
 	}
@@ -108,10 +104,9 @@ func (s *CountMinSketch) InsertWithHashAtRowsGOS(
 		w = value / p
 	}
 	var dirty []GOSCellUpdate
-	for r := 0; r < s.Rows; r++ {
-		if admittedRows&(1<<uint(r)) == 0 {
-			continue
-		}
+	for admittedRows != 0 {
+		r := bits.TrailingZeros64(admittedRows)
+		admittedRows &^= uint64(1) << uint(r)
 		if d, ok := s.applyGosCellAtRowCMS(r, hash, w, threshold); ok {
 			dirty = append(dirty, d)
 		}

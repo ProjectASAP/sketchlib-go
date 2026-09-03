@@ -1,6 +1,8 @@
 package countminsketch
 
 import (
+	"math/bits"
+
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
@@ -39,17 +41,9 @@ func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler common
 		return
 	}
 
-	// 1. Per-row admission (no cell work yet).
-	sampler.BeginItem()
-	var admitted [maxSampledRowsCMS]int
-	n := 0
-	for r := 0; r < s.Rows; r++ {
-		if sampler.Admit() {
-			admitted[n] = r
-			n++
-		}
-	}
-	if n == 0 {
+	// 1. Direct geometric jump over this item's row block (no cell work yet).
+	admittedRows := common.AdmitRows(sampler, s.Rows)
+	if admittedRows == 0 {
 		return // no admitted row → touch nothing
 	}
 
@@ -58,8 +52,9 @@ func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler common
 	// hash window at shift r*bitsPerRow), so a sampled and an unsampled sketch
 	// address identical cells.
 	w := 1.0 / sampler.P()
-	for i := 0; i < n; i++ {
-		r := admitted[i]
+	for admittedRows != 0 {
+		r := bits.TrailingZeros64(admittedRows)
+		admittedRows &^= uint64(1) << uint(r)
 		c := int((hash >> (uint(r) * s.bitsPerRow)) & s.mask)
 		if c >= s.Cols {
 			c %= s.Cols

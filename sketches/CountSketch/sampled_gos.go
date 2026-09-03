@@ -2,6 +2,7 @@ package countsketch
 
 import (
 	"math"
+	"math/bits"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	"github.com/ProjectASAP/sketchlib-go/common/storage"
@@ -64,17 +65,9 @@ func (s *CountSketch) UpdateStringSampledPerRowGOS(
 		return s.UpdateStringGOS(key, count, threshold)
 	}
 
-	// 1. Per-row admission (no hash) — identical to UpdateStringSampledPerRow.
-	sampler.BeginItem()
-	var admitted [maxSampledRows]int
-	n := 0
-	for r := 0; r < s.Rows; r++ {
-		if sampler.Admit() {
-			admitted[n] = r
-			n++
-		}
-	}
-	if n == 0 {
+	// 1. Direct geometric jump — identical decisions to UpdateStringSampledPerRow.
+	admittedRows := common.AdmitRows(sampler, s.Rows)
+	if admittedRows == 0 {
 		return nil // no admitted row → skip the key hash entirely
 	}
 
@@ -85,8 +78,10 @@ func (s *CountSketch) UpdateStringSampledPerRowGOS(
 	packed := hashed.Lower64()
 
 	var dirty []GOSCellUpdate
-	for i := 0; i < n; i++ {
-		if d, ok := s.applyGosCellAtRow(admitted[i], hashed, packed, isPacked, scaled, threshold); ok {
+	for admittedRows != 0 {
+		r := bits.TrailingZeros64(admittedRows)
+		admittedRows &^= uint64(1) << uint(r)
+		if d, ok := s.applyGosCellAtRow(r, hashed, packed, isPacked, scaled, threshold); ok {
 			dirty = append(dirty, d)
 		}
 	}
@@ -126,10 +121,9 @@ func (s *CountSketch) UpdateStringAtRowsGOS(
 	packed := hashed.Lower64()
 
 	var dirty []GOSCellUpdate
-	for r := 0; r < s.Rows; r++ {
-		if admittedRows&(1<<uint(r)) == 0 {
-			continue
-		}
+	for admittedRows != 0 {
+		r := bits.TrailingZeros64(admittedRows)
+		admittedRows &^= uint64(1) << uint(r)
 		if d, ok := s.applyGosCellAtRow(r, hashed, packed, isPacked, scaled, threshold); ok {
 			dirty = append(dirty, d)
 		}
