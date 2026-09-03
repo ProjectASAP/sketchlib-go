@@ -101,6 +101,28 @@ func TestGeometricSamplerAdmitRowsSkipsWholeItems(t *testing.T) {
 	}
 }
 
+func TestAdmitRowsNilSamplerIsExact(t *testing.T) {
+	if got := AdmitRows(nil, 5); got != 0x1f {
+		t.Fatalf("AdmitRows(nil, 5) = %#x, want exact mask %#x", got, uint64(0x1f))
+	}
+	if got := AdmitRows(nil, 64); got != ^uint64(0) {
+		t.Fatalf("AdmitRows(nil, 64) = %#x, want all bits", got)
+	}
+}
+
+func TestGeometricSamplerTinyProbabilityDoesNotOverflowGap(t *testing.T) {
+	s := NewGeometricSampler(1e-20, 42)
+	if s.skip < 0 {
+		t.Fatalf("initial gap overflowed to %d", s.skip)
+	}
+	for i := 0; i < 100; i++ {
+		_ = s.AdmitRows(64)
+		if s.skip < 0 {
+			t.Fatalf("gap overflowed to %d after block %d", s.skip, i)
+		}
+	}
+}
+
 func BenchmarkGeometricSamplerRows(b *testing.B) {
 	for _, p := range []float64{0.1, 0.01} {
 		b.Run(fmt.Sprintf("scalar/p=%g", p), func(b *testing.B) {
