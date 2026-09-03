@@ -17,8 +17,8 @@ const maxSampledRows = 64
 // asap_sketchlib src/sketch_framework/nitro.rs):
 //
 //  1. the sampler decides which of the d rows are admitted for THIS item, by
-//     stepping its geometric skip-counter over the flattened (item,row)
-//     candidate stream — d cheap steps, NO hashing;
+//     jumping its geometric skip-counter over the flattened (item,row)
+//     candidate stream — one block jump plus admitted-row work, NO hashing;
 //  2. if no row is admitted the key is NOT hashed (drop-before-hash, the CPU
 //     win); otherwise the key is hashed once;
 //  3. each admitted row is updated with the 1/p inverse-probability weight,
@@ -105,10 +105,9 @@ func (s *CountSketch) UpdateStringAtRows(key string, count float64, admittedRows
 	isPacked := hashed.Mode() == storage.MatrixHashPacked64
 	packed := hashed.Lower64()
 
-	for r := 0; r < s.Rows; r++ {
-		if admittedRows&(1<<uint(r)) == 0 {
-			continue
-		}
+	for admittedRows != 0 {
+		r := bits.TrailingZeros64(admittedRows)
+		admittedRows &^= uint64(1) << uint(r)
 		var c int
 		var sign float64
 		if isPacked {

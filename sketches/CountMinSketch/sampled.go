@@ -16,7 +16,8 @@ const maxSampledRowsCMS = 64
 //
 //  1. the EXTERNAL sampler decides which of the d rows are admitted for THIS
 //     item, by stepping its geometric skip-counter over the flattened
-//     (item,row) candidate stream — d cheap steps, NO hashing beyond the
+//     (item,row) candidate stream — one block jump plus work proportional to
+//     admitted rows, NO hashing beyond the
 //     already-computed key hash;
 //  2. if no row is admitted the item touches no cell (drop-before-anything);
 //  3. each admitted row is incremented with the 1/p inverse-probability weight,
@@ -98,10 +99,9 @@ func (s *CountMinSketch) InsertWithHashAtRows(hash uint64, value float64, admitt
 	if p > 0 && p < 1.0 {
 		w = value / p
 	}
-	for r := 0; r < s.Rows; r++ {
-		if admittedRows&(1<<uint(r)) == 0 {
-			continue
-		}
+	for admittedRows != 0 {
+		r := bits.TrailingZeros64(admittedRows)
+		admittedRows &^= uint64(1) << uint(r)
 		c := int((hash >> (uint(r) * s.bitsPerRow)) & s.mask)
 		if c >= s.Cols {
 			c %= s.Cols

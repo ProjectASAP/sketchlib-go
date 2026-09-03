@@ -32,14 +32,23 @@ type RowMaskSampler interface {
 // AdmitRows uses a sampler's direct block-jump implementation when available.
 // The fallback preserves compatibility with other RowSampler implementations.
 func AdmitRows(s RowSampler, rows int) uint64 {
-	if s == nil || rows <= 0 {
+	if rows <= 0 {
 		return 0
-	}
-	if fast, ok := s.(RowMaskSampler); ok {
-		return fast.AdmitRows(rows)
 	}
 	if rows > 64 {
 		rows = 64
+	}
+	// A nil sampler is the library-wide spelling of exact admission. Keep the
+	// helper consistent with (*GeometricSampler)(nil).AdmitRows and with the
+	// sampled sketch entry points, which all treat nil as unsampled/exact.
+	if s == nil {
+		if rows == 64 {
+			return ^uint64(0)
+		}
+		return (uint64(1) << uint(rows)) - 1
+	}
+	if fast, ok := s.(RowMaskSampler); ok {
+		return fast.AdmitRows(rows)
 	}
 	s.BeginItem()
 	var mask uint64
@@ -185,7 +194,7 @@ func (s *GeometricSampler) nextGap() int64 {
 	if g < 0 {
 		g = 0
 	}
-	if math.IsInf(g, 1) {
+	if math.IsInf(g, 1) || g >= float64(math.MaxInt64) {
 		// p so small the gap overflows; cap to keep the counter finite.
 		return math.MaxInt64
 	}
