@@ -20,6 +20,37 @@ type RowSampler interface {
 	P() float64
 }
 
+// RowMaskSampler consumes a whole item-sized block from the flattened
+// (item,row) candidate stream at once. Implementations return a bit mask whose
+// bit r is set exactly when row r is admitted. This is the direct-jump form of
+// NitroSketch Algorithm 1: a gap that spans one or more complete items is
+// consumed with one subtraction instead of d Admit calls per skipped item.
+type RowMaskSampler interface {
+	AdmitRows(rows int) uint64
+}
+
+// AdmitRows uses a sampler's direct block-jump implementation when available.
+// The fallback preserves compatibility with other RowSampler implementations.
+func AdmitRows(s RowSampler, rows int) uint64 {
+	if s == nil || rows <= 0 {
+		return 0
+	}
+	if fast, ok := s.(RowMaskSampler); ok {
+		return fast.AdmitRows(rows)
+	}
+	if rows > 64 {
+		rows = 64
+	}
+	s.BeginItem()
+	var mask uint64
+	for r := 0; r < rows; r++ {
+		if s.Admit() {
+			mask |= uint64(1) << uint(r)
+		}
+	}
+	return mask
+}
+
 // GeometricSampler implements NitroSketch-style geometric skip-sampling.
 //
 // Instead of flipping an independent Bernoulli(p) coin on every stream update
@@ -93,6 +124,51 @@ func (s *GeometricSampler) P() float64 {
 // boundaries carry no state here — this is a no-op kept for RowSampler
 // interface parity.
 func (s *GeometricSampler) BeginItem() {}
+
+// AdmitRows consumes rows consecutive candidates from the flattened
+// (item,row) stream and returns their admission mask. It is distributionally
+// and seed-for-seed identical to calling Admit rows times, but skips a whole
+// item in O(1) when the current geometric gap is at least rows. Work for an
+// item is O(1 + number of admitted rows), matching NitroSketch's direct cursor
+// jump rather than scanning every row.
+func (s *GeometricSampler) AdmitRows(rows int) uint64 {
+	if rows <= 0 {
+		return 0
+	}
+	if rows > 64 {
+		rows = 64
+	}
+	if s == nil || s.exact {
+		if rows == 64 {
+			return ^uint64(0)
+		}
+		return (uint64(1) << uint(rows)) - 1
+	}
+
+	block := int64(rows)
+	if s.skip >= block {
+		s.skip -= block
+		return 0
+	}
+
+	position := uint64(s.skip)
+	var mask uint64
+	for {
+		mask |= uint64(1) << position
+		gap := uint64(s.nextGap())
+		next := position + 1 + gap
+		if next >= uint64(rows) {
+			remaining := next - uint64(rows)
+			if remaining > uint64(math.MaxInt64) {
+				s.skip = math.MaxInt64
+			} else {
+				s.skip = int64(remaining)
+			}
+			return mask
+		}
+		position = next
+	}
+}
 
 // IsExact reports whether the sampler admits every update (p == 1.0).
 func (s *GeometricSampler) IsExact() bool { return s.exact }

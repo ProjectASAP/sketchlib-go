@@ -1,6 +1,7 @@
 package common
 
 import (
+	"fmt"
 	"math"
 	"testing"
 )
@@ -66,5 +67,55 @@ func TestGeometricSamplerDegeneratePIsUsable(t *testing.T) {
 	// Should not panic; admit count is allowed to be 0.
 	for i := 0; i < 100; i++ {
 		_ = s.Admit()
+	}
+}
+
+func TestGeometricSamplerAdmitRowsMatchesScalarSequence(t *testing.T) {
+	for _, rows := range []int{1, 3, 5, 16, 64} {
+		for _, p := range []float64{1, 0.75, 0.1, 0.001} {
+			scalar := NewGeometricSampler(p, 9182)
+			jump := NewGeometricSampler(p, 9182)
+			for item := 0; item < 100_000; item++ {
+				var want uint64
+				for row := 0; row < rows; row++ {
+					if scalar.Admit() {
+						want |= uint64(1) << uint(row)
+					}
+				}
+				if got := jump.AdmitRows(rows); got != want {
+					t.Fatalf("rows=%d p=%v item=%d: AdmitRows=%#x, scalar=%#x", rows, p, item, got, want)
+				}
+			}
+		}
+	}
+}
+
+func TestGeometricSamplerAdmitRowsSkipsWholeItems(t *testing.T) {
+	s := NewGeometricSampler(0.5, 1)
+	s.skip = 1_000_003
+	if got := s.AdmitRows(5); got != 0 {
+		t.Fatalf("AdmitRows returned %#x while gap spans the whole item", got)
+	}
+	if want := int64(999_998); s.skip != want {
+		t.Fatalf("remaining gap=%d, want %d", s.skip, want)
+	}
+}
+
+func BenchmarkGeometricSamplerRows(b *testing.B) {
+	for _, p := range []float64{0.1, 0.01} {
+		b.Run(fmt.Sprintf("scalar/p=%g", p), func(b *testing.B) {
+			s := NewGeometricSampler(p, 42)
+			for i := 0; i < b.N; i++ {
+				for row := 0; row < 5; row++ {
+					_ = s.Admit()
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("jump/p=%g", p), func(b *testing.B) {
+			s := NewGeometricSampler(p, 42)
+			for i := 0; i < b.N; i++ {
+				_ = s.AdmitRows(5)
+			}
+		})
 	}
 }
