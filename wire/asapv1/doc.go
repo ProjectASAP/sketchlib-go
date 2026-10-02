@@ -86,10 +86,11 @@
 //
 // # Top-k heaps
 //
-// CMSHeap and CSHeap write their heap's keys and heap_counts arrays with
-// EncodeHeapEntries, which orders entries by descending count, then
-// CompareHeapKeys, and read them with DecodeHeapEntries. HeapKeyTypeOf gives
-// the key_type metadata value.
+// A key array typed by a key_type is written with EncodeHeapKeys and read with
+// DecodeHeapKeys; CheckDistinctHeapKeys rejects a repeated key. A heap's
+// parallel keys and heap_counts arrays are written with EncodeHeapEntries, in
+// descending count then CompareHeapKeys order, and read with DecodeHeapEntries.
+// HeapKeyTypeOf gives a heap's key_type metadata value.
 //
 // # Encoding rules
 //

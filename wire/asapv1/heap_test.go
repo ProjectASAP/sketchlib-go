@@ -244,3 +244,77 @@ func TestDecodeHeapEntriesRejects(t *testing.T) {
 		}
 	}
 }
+
+type flowID string
+
+type port uint16
+
+type digest []byte
+
+func TestHeapHelpersAcceptNamedKeyTypes(t *testing.T) {
+	if got := asapv1.HeapKeyType[flowID](); got != "string" {
+		t.Errorf("flowID key_type %q", got)
+	}
+	if got := asapv1.HeapKeyType[port](); got != "u16" {
+		t.Errorf("port key_type %q", got)
+	}
+	if got := asapv1.HeapKeyType[digest](); got != "bytes" {
+		t.Errorf("digest key_type %q", got)
+	}
+	es := []entry[flowID]{{"b", 1}, {"a", 1}, {"z", 4}}
+	e := asapv1.NewEncoder()
+	asapv1.EncodeHeapEntries(e, es)
+	plain := asapv1.NewEncoder()
+	asapv1.EncodeHeapEntries(plain, []entry[string]{{"b", 1}, {"a", 1}, {"z", 4}})
+	asapv1test.Equal(t, e.Bytes(), plain.Bytes())
+	d := asapv1.NewDecoder(e.Bytes())
+	got := asapv1.DecodeHeapEntries[flowID](d, "string")
+	if err := d.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if want := []entry[flowID]{{"z", 4}, {"a", 1}, {"b", 1}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+
+	keys := []digest{{2}, {1, 0}}
+	e = asapv1.NewEncoder()
+	asapv1.EncodeHeapKeys(e, keys)
+	d = asapv1.NewDecoder(e.Bytes())
+	back := asapv1.DecodeHeapKeys[digest](d, "bytes")
+	if err := d.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(back, keys) {
+		t.Fatalf("digest keys %v, want %v", back, keys)
+	}
+}
+
+func TestHeapKeysKeepOrderAndRepeats(t *testing.T) {
+	keys := []int64{5, -1, 5, 0}
+	e := asapv1.NewEncoder()
+	asapv1.EncodeHeapKeys(e, keys)
+	if err := e.Err(); err != nil {
+		t.Fatal(err)
+	}
+	asapv1test.Equal(t, e.Bytes(), []byte{0x94, 0x05, 0xff, 0x05, 0x00})
+	d := asapv1.NewDecoder(e.Bytes())
+	got := asapv1.DecodeHeapKeys[int64](d, "i64")
+	if err := d.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, keys) {
+		t.Fatalf("got %v, want %v", got, keys)
+	}
+	if err := asapv1.CheckDistinctHeapKeys(keys); err != asapv1.ErrDuplicateHeapKey {
+		t.Errorf("CheckDistinctHeapKeys(%v) = %v", keys, err)
+	}
+	if err := asapv1.CheckDistinctHeapKeys(keys[1:3]); err != nil {
+		t.Errorf("CheckDistinctHeapKeys(%v) = %v", keys[1:3], err)
+	}
+	for _, keyType := range []string{"str", "u64"} {
+		d := asapv1.NewDecoder(e.Bytes())
+		if asapv1.DecodeHeapKeys[int64](d, keyType); d.Err() == nil {
+			t.Errorf("keys labelled %q decoded as i64", keyType)
+		}
+	}
+}
