@@ -84,6 +84,13 @@
 // MarshalASAPv1 with Split, and rebuild with Encode before UnmarshalASAPv1.
 // Encoder.Raw and Decoder.Raw move one already-encoded value.
 //
+// # Top-k heaps
+//
+// CMSHeap and CSHeap write their heap's keys and heap_counts arrays with
+// EncodeHeapEntries, which orders entries by descending count, then
+// CompareHeapKeys, and read them with DecodeHeapEntries. HeapKeyTypeOf gives
+// the key_type metadata value.
+//
 // # Encoding rules
 //
 // Encoder writes every integer in the uint family when it is non-negative and
