@@ -12,10 +12,6 @@
 //     `[]byte` as `bin` by default, producing bytes that cannot be
 //     deserialized on the Rust side.
 //
-//   - The contract only covers one sketch type today (DDSketch).
-//     Writing a 50-line encoder shim gives byte-exact control and drops a
-//     dependency.
-//
 // Wire-format reference for each supported sketch type lives alongside
 // the `Marshal*` function in its per-sketch file. Golden fixtures pinned
 // to the Rust side's `serialize_msgpack` output live in `encoder_test.go`;

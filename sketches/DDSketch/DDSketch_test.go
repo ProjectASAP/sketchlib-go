@@ -1,6 +1,7 @@
 package ddsketch
 
 import (
+	"bytes"
 	"math"
 	"math/rand"
 	"sort"
@@ -368,8 +369,7 @@ func TestDDSketch_Quality_SpecificMappingMismatchMerge(t *testing.T) {
 // added for cross-window object pooling: (1) the bucket backing array's
 // capacity survives Clear() so a same-range refill does not reallocate,
 // (2) quantiles after Clear()+refill match a fresh sketch, and (3)
-// SerializePortable after Clear()+refill does not carry stale zero
-// buckets from the pre-Clear contents (no wire bloat).
+// MarshalASAPv1 after Clear()+refill matches a fresh sketch byte for byte.
 func TestClearReusesCapacityAndStaysCorrect(t *testing.T) {
 	s := NewDDSketch(0.01)
 	// Populate a WIDE range so the store grows large.
@@ -390,7 +390,7 @@ func TestClearReusesCapacityAndStaysCorrect(t *testing.T) {
 	}
 
 	// Refill with a NARROW range; the store should reuse the retained
-	// array (no realloc) and SerializePortable must emit only the
+	// array (no realloc) and MarshalASAPv1 must emit only the
 	// narrow range, not the wide pre-Clear span.
 	for i := 0; i < 1000; i++ {
 		s.Update(10.0 + float64(i%5)) // values in [10,14]
@@ -412,13 +412,15 @@ func TestClearReusesCapacityAndStaysCorrect(t *testing.T) {
 		}
 	}
 
-	// No stale-zero wire bloat: the reused sketch's serialized bucket
-	// count must match the fresh sketch's (same populated range).
-	envReused, _ := s.SerializePortable()
-	envFresh, _ := fresh.SerializePortable()
-	nReused := len(envReused.GetDdsketch().GetStoreCounts())
-	nFresh := len(envFresh.GetDdsketch().GetStoreCounts())
-	if nReused != nFresh {
-		t.Fatalf("stale-zero bloat: reused emits %d store counts, fresh emits %d", nReused, nFresh)
+	reused, err := s.MarshalASAPv1()
+	if err != nil {
+		t.Fatalf("MarshalASAPv1(reused): %v", err)
+	}
+	want, err := fresh.MarshalASAPv1()
+	if err != nil {
+		t.Fatalf("MarshalASAPv1(fresh): %v", err)
+	}
+	if !bytes.Equal(reused, want) {
+		t.Fatalf("reused sketch encodes differently from a fresh one:\n got %x\nwant %x", reused, want)
 	}
 }

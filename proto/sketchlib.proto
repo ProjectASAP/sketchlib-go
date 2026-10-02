@@ -7,7 +7,6 @@
 //   countminsketch/countminsketch.proto — CountMinState (embedded by Hydra and Elastic)
 //   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry
 //   kll/kll.proto                    — KLLState, CoinState
-//   ddsketch/ddsketch.proto          — DDSketchState, DDSketchDelta, DDSketchBucketDelta
 //   univmon/univmon.proto            — UnivMonState, UnivMonLayer
 //   hydra/hydra.proto                — HydraState, HydraCounterType, HydraCell
 //
@@ -20,7 +19,7 @@
 //   - Hash specification is explicit so consumers can detect configuration mismatches.
 //
 // Version history:
-//   1 — initial portable format (CountMin, Count, HLL, KLL, DDSketch)
+//   1 — initial portable format (CountMin, Count, HLL, KLL)
 //   2 — extended to UnivMon and Hydra (reserved, not yet stable)
 
 syntax = "proto3";
@@ -28,7 +27,6 @@ syntax = "proto3";
 package sketchlib.v1;
 
 import "common/common.proto";
-import "ddsketch/ddsketch.proto";
 import "univmon/univmon.proto";
 import "hydra/hydra.proto";
 import "cocosketch/cocosketch.proto";
@@ -46,7 +44,7 @@ option go_package = "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;s
 message SketchEnvelope {
   // Schema version. Consumers should reject envelopes whose version exceeds
   // the highest version they understand.
-  //   1 = CountMin, Count, HLL, KLL, DDSketch
+  //   1 = CountMin, Count, HLL, KLL
   //   2 = UnivMon, Hydra (reserved)
   //   3 = CocoSketch, ElasticSketch (reserved)
   uint32 format_version = 1;
@@ -61,7 +59,6 @@ message SketchEnvelope {
 
   // The sketch payload. Exactly one field must be set.
   oneof sketch_state {
-    DDSketchState    ddsketch     = 14;
     UnivMonState     univmon      = 15;
     HydraState       hydra        = 16;
     CocoSketchState  coco         = 17;
@@ -76,6 +73,8 @@ message SketchEnvelope {
   reserved "hll";
   reserved 13;
   reserved "kll";
+  reserved 14;
+  reserved "ddsketch";
   reserved 19 to 31;  // Reserved for future sketch types.
 
   // Geometric / NitroSketch sampling probability for the producing sketch.
@@ -85,7 +84,7 @@ message SketchEnvelope {
   // and stores the RAW SAMPLED sketch state — never the rescaled state. The
   // consumer applies the `× 1/sample_p` rescale at QUERY time on the count-like
   // estimators (HLL cardinality, CountMin / CountSketch frequency, SUM / COUNT);
-  // quantile estimators (KLL, DDSketch) are scale-invariant under uniform
+  // quantile estimators (KLL) are scale-invariant under uniform
   // sampling so they carry `sample_p` but need no rescale.
   //
   // Lives on the envelope (not per-sketch state) so downstream consumers that
@@ -105,13 +104,6 @@ message SketchEnvelope {
 // transmitted snapshot. They are wrapped in SketchDeltaEnvelope and carried in
 // the sketch_payload bytes field on OTel data points, distinguished from
 // full-sketch payloads by the encoding="proto_delta" attribute.
-//
-// Receiver semantics:
-//   DDSketch buckets:        agg[b]   += bucket.d_count
-//   DDSketch min/max:        lossless  — only transmitted when changed
-//
-// Per-sketch delta message types live in their per-sketch proto files:
-//   ddsketch/ddsketch.proto             — DDSketchDelta, DDSketchBucketDelta
 
 // SketchDeltaEnvelope is the top-level wire container for delta payloads.
 message SketchDeltaEnvelope {
@@ -125,14 +117,12 @@ message SketchDeltaEnvelope {
   // this (partition_key, window_start_ms) after applying this delta.
   bool   is_window_close = 3;
 
-  oneof delta {
-    DDSketchDelta    ddsketch     = 13;
-  }
-
   reserved 10;
   reserved "count_min";
   reserved 11;
   reserved "count_sketch";
   reserved 12;
   reserved "hll";
+  reserved 13;
+  reserved "ddsketch";
 }

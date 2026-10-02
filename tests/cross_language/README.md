@@ -1,6 +1,6 @@
 # Cross-Language Integration Test
 
-Verifies that five sketch types serialise correctly from **sketchlib-go** (Go producer)
+Verifies that four sketch types serialise correctly from **sketchlib-go** (Go producer)
 and deserialise correctly in **sketchlib-rust** (Rust consumer) using the shared
 protobuf wire format defined in `proto/sketchlib.proto`.
 
@@ -8,7 +8,6 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 
 | File | Sketch type | Query checked |
 |------|-------------|---------------|
-| `ddsketch.pb` | DDSketch (alpha=0.01) | `p50 ≈ 5000`, `p99 ≈ 9900` |
 | `coco.pb` | CocoSketch (d=5, width=128) | `estimate("coco:hot") ≥ 500` |
 | `elastic.pb` | ElasticSketch (64 heavy buckets) | `estimate("elephant") ≥ 900` |
 | `univmon.pb` | UnivMon (8 layers, CS 3 × 2048) | `g-sum cardinality ∈ [1 000, 15 000]` |
@@ -20,7 +19,7 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 sketchlib-go/
   tests/cross_language/
     run_test.sh          ← orchestrates both phases
-    producer_test.go     ← Go test that writes the 5 .pb files (no binary)
+    producer_test.go     ← Go test that writes the 4 .pb files (no binary)
     README.md            ← this file
 
 sketchlib-rust/
@@ -83,7 +82,6 @@ XTEST_DIR=/tmp/mytest cargo test --test xtest_consumer -- --nocapture
 ```
 Go producer (go test)            proto wire format           Rust consumer (cargo test)
 ──────────────────────────────────────────────────────────────────────────────────────
-DDSketch.SerializePortable()        →  ddsketch.pb  →  decode + quantile query
 CocoSketch.SerializePortable()      →  coco.pb      →  decode + DeriveIndex lookup
 ElasticSketch.SerializePortable()   →  elastic.pb   →  decode + heavy/light query
 UnivSketch.SerializePortable()      →  univmon.pb   →  decode + g-sum cardinality

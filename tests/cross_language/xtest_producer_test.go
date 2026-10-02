@@ -1,11 +1,10 @@
 // xtest_producer — Cross-language integration test: Go producer side.
 //
-// Inserts synthetic data into five sketch types, serializes each as a portable
+// Inserts synthetic data into four sketch types, serializes each as a portable
 // protobuf SketchEnvelope, and writes the binary files to $XTEST_DIR.
 //
 // Output files:
 //
-//	ddsketch.pb     DDSketchState     (alpha + bucket array)
 //	coco.pb         CocoSketchState   (hash+val+hasKey buckets)
 //	elastic.pb      ElasticState      (heavy buckets + light CM)
 //	univmon.pb      UnivMonState      (layered CS + TopK heaps)
@@ -28,7 +27,6 @@ import (
 	hydrasketch "github.com/ProjectASAP/sketchlib-go/sketch_framework/HydraSketch"
 	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
 	cocosketch "github.com/ProjectASAP/sketchlib-go/sketches/CocoSketch"
-	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/sketches/ElasticSKetch"
 )
 
@@ -44,22 +42,6 @@ func TestXtestProducer(t *testing.T) {
 	t.Log("=======================================================")
 	t.Log("  sketchlib-go → xtest_producer")
 	t.Log("=======================================================")
-
-	// -----------------------------------------------------------------------
-	// DDSketch
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[DDSketch] Step 1/3 — Create sketch (alpha=0.01)")
-	ds := ddsketch.New(0.01)
-
-	t.Log("[DDSketch] Step 2/3 — Insert values 1.0 … 10 000.0")
-	for i := 1; i <= 10_000; i++ {
-		ds.Update(float64(i))
-	}
-	p50dd, _ := ds.Quantile(0.50)
-	p99dd, _ := ds.Quantile(0.99)
-	t.Logf("[DDSketch] Step 3/3 — p50≈%.2f  p99≈%.2f", p50dd, p99dd)
-	writeEnvelope(t, outDir, "ddsketch.pb", tmust(ds.SerializePortable()))
 
 	// -----------------------------------------------------------------------
 	// CocoSketch
@@ -146,7 +128,7 @@ func TestXtestProducer(t *testing.T) {
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 5 sketches written to " + outDir)
+	t.Log("  Producer complete — 4 sketches written to " + outDir)
 	t.Log("=======================================================")
 }
 
