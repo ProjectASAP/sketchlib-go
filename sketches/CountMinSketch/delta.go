@@ -17,8 +17,7 @@ type CellDelta struct {
 	DValue   float64
 }
 
-// Delta is the native Go representation of a sparse CountMinSketch delta.
-// All fields are plain Go types; no proto dependency.
+// Delta is a sparse CountMinSketch delta.
 //
 // HHKeys is the optional heavy-hitter-keys channel: CMS can track heavy
 // hitters, but whether HHKeys is populated is a control-plane decision.
