@@ -1,30 +1,6 @@
-// Package asapmsgpack implements the narrow, hand-rolled MessagePack wire
-// format used on ASAPQuery-backend's sketch-core ingest path. It is the
-// Go producer side of the cross-language contract defined by PR I in the
-// ASAPQuery-backend repo (modified-OTLP `*_ENCODING_MSGPACK = 3` path).
-//
-// Why hand-rolled rather than vmihailenco/msgpack/v5:
-//
-//   - The Rust consumer uses `rmp_serde` with default (compact) settings,
-//     which serializes Rust structs as fixed-length arrays in declaration
-//     order and serializes `Vec<u8>` as an **array of positive fixints**,
-//     not as MessagePack `bin`. Generic Go msgpack libraries encode
-//     `[]byte` as `bin` by default, producing bytes that cannot be
-//     deserialized on the Rust side.
-//
-// Wire-format reference for each supported sketch type lives alongside
-// the `Marshal*` function in its per-sketch file. Golden fixtures pinned
-// to the Rust side's `serialize_msgpack` output live in `encoder_test.go`;
-// if the Rust wire format ever shifts, the tests fail loudly.
-//
-// Out of scope:
-//
-//   - KLL: its encoding is ASAPv1 (sketches/KLL, wire/asapv1).
-//
-//   - Delta transmission (`*_ENCODING_MSGPACK_DELTA = 4`): supported for the
-//     four delta-capable sketches via the `*_delta.go` / `cell_delta.go`
-//     Marshal*Delta functions, byte-matched to asap_sketchlib's
-//     `compute_delta_msgpack`. KLL has no delta form (full-only).
+// Package asapmsgpack holds a hand-rolled MessagePack encoder, decoder and
+// sparse cell-delta codec that match rmp_serde's compact output. No sketch
+// codec uses it.
 package asapmsgpack
 
 import (
