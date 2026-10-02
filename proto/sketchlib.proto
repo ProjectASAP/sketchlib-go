@@ -6,7 +6,6 @@
 //   common/common.proto              — HashSpec, ProducerInfo, CounterType, ...
 //   countminsketch/countminsketch.proto — CountMinState, CountMinDelta, CountMinCell
 //   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry, CountSketchDelta, CountSketchCell
-//   hll/hll.proto                    — HyperLogLogState, HLLVariant, HLLDelta, HLLRegisterUpdate
 //   kll/kll.proto                    — KLLState, CoinState
 //   ddsketch/ddsketch.proto          — DDSketchState, DDSketchDelta, DDSketchBucketDelta
 //   univmon/univmon.proto            — UnivMonState, UnivMonLayer
@@ -31,7 +30,6 @@ package sketchlib.v1;
 import "common/common.proto";
 import "countminsketch/countminsketch.proto";
 import "countsketch/countsketch.proto";
-import "hll/hll.proto";
 import "kll/kll.proto";
 import "ddsketch/ddsketch.proto";
 import "univmon/univmon.proto";
@@ -68,7 +66,6 @@ message SketchEnvelope {
   oneof sketch_state {
     CountMinState    count_min    = 10;
     CountSketchState count_sketch = 11;
-    HyperLogLogState hll          = 12;
     KLLState         kll          = 13;
     DDSketchState    ddsketch     = 14;
     UnivMonState     univmon      = 15;
@@ -109,14 +106,12 @@ message SketchEnvelope {
 //
 // Receiver semantics:
 //   CountMin / CountSketch:  agg[r][c] += cell.d_*
-//   HLL:                     agg[i]    = max(agg[i], update.value)
 //   DDSketch buckets:        agg[b]   += bucket.d_count
 //   DDSketch min/max:        lossless  — only transmitted when changed
 //
 // Per-sketch delta message types live in their per-sketch proto files:
 //   countminsketch/countminsketch.proto — CountMinDelta, CountMinCell
 //   countsketch/countsketch.proto       — CountSketchDelta, CountSketchCell
-//   hll/hll.proto                       — HLLDelta, HLLRegisterUpdate
 //   ddsketch/ddsketch.proto             — DDSketchDelta, DDSketchBucketDelta
 
 // SketchDeltaEnvelope is the top-level wire container for delta payloads.
@@ -134,7 +129,6 @@ message SketchDeltaEnvelope {
   oneof delta {
     CountMinDelta    count_min    = 10;
     CountSketchDelta count_sketch = 11;
-    HLLDelta         hll          = 12;
     DDSketchDelta    ddsketch     = 13;
   }
 }

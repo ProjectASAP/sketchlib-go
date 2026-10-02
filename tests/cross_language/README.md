@@ -2,7 +2,7 @@
 
 Verifies that all nine sketch types serialise correctly from **sketchlib-go** (Go producer)
 and deserialise correctly in **sketchlib-rust** (Rust consumer) using the shared
-protobuf wire format defined in `proto/sketchlib.proto`.
+protobuf wire format defined in `proto/sketchlib.proto`; HLL uses the ASAPv1 format.
 
 ## What is tested
 
@@ -11,7 +11,7 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 | `countmin.pb` | CountMin (3 × 512, float64) | `freq("item:42") ≥ 101` |
 | `kll.pb` | KLL quantile sketch (k=200) | `p50 ≈ 5000`, `p99 ≈ 9900` |
 | `ddsketch.pb` | DDSketch (alpha=0.01) | `p50 ≈ 5000`, `p99 ≈ 9900` |
-| `hll.pb` | HyperLogLog (DataFusion, p=14) | `cardinality ≈ 50 000` |
+| `hll.asapv1` | HyperLogLog (ASAPv1 Ertl-MLE, p=14) | `cardinality ≈ 50 000` |
 | `countsketch.pb` | CountSketch (3 × 512, float64) | `freq("cs:hot") ≥ 200` |
 | `coco.pb` | CocoSketch (d=5, width=128) | `estimate("coco:hot") ≥ 500` |
 | `elastic.pb` | ElasticSketch (64 heavy buckets) | `estimate("elephant") ≥ 900` |
@@ -24,7 +24,7 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 sketchlib-go/
   tests/cross_language/
     run_test.sh          ← orchestrates both phases
-    producer_test.go     ← Go test that writes the 9 .pb files (no binary)
+    producer_test.go     ← Go test that writes the 9 sketch files (no binary)
     README.md            ← this file
 
 sketchlib-rust/
@@ -90,7 +90,7 @@ Go producer (go test)            proto wire format           Rust consumer (carg
 CountMinSketch.SerializePortable()  →  countmin.pb  →  decode + min-freq query
 KLL.SerializePortable()             →  kll.pb       →  decode + quantile query
 DDSketch.SerializePortable()        →  ddsketch.pb  →  decode + quantile query
-HyperLogLog.SerializePortable()     →  hll.pb       →  decode + DataFusion estimate
+HyperLogLog.MarshalASAPv1()         →  hll.asapv1   →  decode + Ertl-MLE estimate
 CountSketch.SerializePortable()     →  countsketch.pb → decode + median signed freq
 CocoSketch.SerializePortable()      →  coco.pb      →  decode + DeriveIndex lookup
 ElasticSketch.SerializePortable()   →  elastic.pb   →  decode + heavy/light query

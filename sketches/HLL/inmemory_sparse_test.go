@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
-	"google.golang.org/protobuf/proto"
 )
 
 // sparseBitWidthGuard fails to compile if rho or index no longer fit the packed
@@ -204,8 +203,8 @@ func TestSparseMergeParity(t *testing.T) {
 }
 
 // TestSparseWireByteIdentical asserts that a sparse instance and a dense instance
-// fed the same keys serialise to byte-identical proto envelopes, at cardinalities
-// below and above the in-memory promotion threshold.
+// fed the same keys encode to identical ASAPv1 bytes, at cardinalities below and
+// above the in-memory promotion threshold.
 func TestSparseWireByteIdentical(t *testing.T) {
 	for _, card := range []int{0, 1, 100, 1000, SparsePromoteThreshold + 500} {
 		card := card
@@ -213,21 +212,21 @@ func TestSparseWireByteIdentical(t *testing.T) {
 			s := buildSparse(card)
 			d := buildDense(card)
 
-			sb, err := s.SerializeProtoBytes()
+			sb, err := s.MarshalASAPv1()
 			if err != nil {
 				t.Fatalf("sparse serialize: %v", err)
 			}
-			db, err := d.SerializeProtoBytes()
+			db, err := d.MarshalASAPv1()
 			if err != nil {
 				t.Fatalf("dense serialize: %v", err)
 			}
 			if string(sb) != string(db) {
-				t.Fatalf("card=%d: sparse proto (%d B) != dense proto (%d B)", card, len(sb), len(db))
+				t.Fatalf("card=%d: sparse bytes (%d B) != dense bytes (%d B)", card, len(sb), len(db))
 			}
 
 			// Round-trip decode of the sparse-produced bytes.
-			got, err := DeserializeHyperLogLogFromProtoBytes(sb)
-			if err != nil {
+			var got HyperLogLog
+			if err := got.UnmarshalASAPv1(sb); err != nil {
 				t.Fatalf("deserialize: %v", err)
 			}
 			if !registersEqualHelper(got.RegisterSlice(), d.RegisterSlice()) {
@@ -368,6 +367,3 @@ func TestSparseOctoPathPromotes(t *testing.T) {
 		t.Fatal("MergeDelta must promote a sparse instance to dense")
 	}
 }
-
-// ensure proto import is used even if other assertions change.
-var _ = proto.Marshal

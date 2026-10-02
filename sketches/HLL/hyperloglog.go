@@ -47,10 +47,10 @@ type HyperLogLog struct {
 	pendingMask  [HLLRegisterCount / 64]uint64
 
 	// sampleP is the HLL hash-threshold sampling probability in (0,1]. 1.0 (the
-	// default) means no sampling and a byte-identical wire form. When p<1, a
-	// DISTINCT key is kept iff u(h(x))<p using an independent re-mix of the
-	// canonical hash (NOT the register hash — using the register hash would
-	// correlate the kept set with the register layout and bias the estimate).
+	// default) means no sampling. When p<1, a DISTINCT key is kept iff
+	// u(h(x))<p using an independent re-mix of the canonical hash (NOT the
+	// register hash — using the register hash would correlate the kept set with
+	// the register layout and bias the estimate).
 	// Stable per key, so frequency does not affect retention. The RAW sampled
 	// registers are stored; the consumer rescales cardinality ×1/p at query.
 	sampleP float64
@@ -86,8 +86,8 @@ func NewHyperLogLog() *HyperLogLog {
 // WithSampleP enables hash-threshold element sampling at probability p in
 // (0,1]. With p>=1 sampling is disabled (exact, the default). A distinct key is
 // kept iff u(h(x))<p, so register writes are cut to ~p× the distinct rate; the
-// RAW sampled registers are stored and the probability is stamped on the
-// SketchEnvelope so the consumer rescales cardinality ×1/p at query time.
+// RAW sampled registers are stored and cardinality is rescaled ×1/p at query
+// time. A sampled sketch has no ASAPv1 encoding.
 //
 // HLL uses hash-threshold (value-determined) sampling, NOT geometric
 // skip-sampling: a max-register update is not additive, so inverse-probability
@@ -112,16 +112,6 @@ func (h *HyperLogLog) SampleP() float64 {
 	return h.sampleP
 }
 
-// wireSampleP returns the value stamped on SketchEnvelope.sample_p: 0.0 (proto3
-// default) when sampling is disabled so the envelope is byte-identical to the
-// pre-sampling format, else the actual probability.
-func (h *HyperLogLog) wireSampleP() float64 {
-	if h.sampleP <= 0 || h.sampleP >= 1.0 {
-		return 0.0
-	}
-	return h.sampleP
-}
-
 // New mirrors Rust constructor naming for the DataFusion-style variant.
 func New() *HyperLogLog {
 	return NewHyperLogLog()
@@ -134,12 +124,11 @@ func New() *HyperLogLog {
 // count reaches SparsePromoteThreshold, after which it is indistinguishable from
 // a NewHyperLogLog() instance.
 //
-// Estimate(), Merge(), Reset() and serialization all return results numerically
-// identical to the dense path (within HLL's error bounds), and Snapshot/Serialize
-// emit BYTE-IDENTICAL proto to a dense instance with the same registers, so the
-// existing wire format and its cross-language parity are preserved. The
-// OctoSketch delta path (ProcessInput/MergeDelta/Flush) and register-level
-// accessors transparently promote-to-dense on first use.
+// Estimate(), Merge() and Reset() return results numerically identical to the
+// dense path (within HLL's error bounds), and MarshalASAPv1 emits the same bytes
+// as a dense instance with the same registers. The OctoSketch delta path
+// (ProcessInput/MergeDelta/Flush) and register-level accessors transparently
+// promote-to-dense on first use.
 //
 // This is opt-in: NewHyperLogLog() remains dense and fully unchanged.
 func NewSparseHyperLogLog() *HyperLogLog {

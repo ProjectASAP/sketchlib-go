@@ -12,8 +12,8 @@
 //     `[]byte` as `bin` by default, producing bytes that cannot be
 //     deserialized on the Rust side.
 //
-//   - The contract only covers four sketch types today (CountMin,
-//     CountSketch, DDSketch, HLL). Writing a 50-line encoder shim gives
+//   - The contract only covers three sketch types today (CountMin,
+//     CountSketch, DDSketch). Writing a 50-line encoder shim gives
 //     byte-exact control and drops a dependency.
 //
 // Wire-format reference for each supported sketch type lives alongside
@@ -132,8 +132,7 @@ func (e *encoder) writeFloat64(v float64) {
 }
 
 // writeString emits the smallest string form (fixstr / str8 / str16 /
-// str32). Matches rmp_serde's enum-as-string serialization for Rust
-// unit variants (e.g. HllVariant::Regular → "Regular").
+// str32), as rmp_serde does.
 func (e *encoder) writeString(s string) {
 	n := len(s)
 	switch {
@@ -148,19 +147,6 @@ func (e *encoder) writeString(s string) {
 			byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
 	}
 	e.buf = append(e.buf, s...)
-}
-
-// writeU8Array emits an array-of-u8 by writing each element as a
-// positive fixint. This matches rmp_serde's default `Vec<u8>`
-// serialization — which is array-of-int, NOT msgpack `bin`. Generic
-// Go msgpack libraries encode `[]byte` as bin and would be incompatible.
-func (e *encoder) writeU8Array(bs []byte) {
-	e.writeArrayLen(len(bs))
-	for _, b := range bs {
-		// b <= 0xff is always positive fixint- or uint8-shaped; since
-		// the loop variable is uint8, writeUint picks the smallest form.
-		e.writeUint(uint64(b))
-	}
 }
 
 // writeFloat64Matrix emits a row-major `[][]float64` as a nested msgpack
