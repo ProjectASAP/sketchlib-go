@@ -102,7 +102,7 @@ m.FastQueryMedian(colFn, projectFn)     // median with optional sign projection
 m.FastQueryAggregate(colFn, init, agg) // custom reduction
 ```
 
-`FlatVector2D` is a pre-bound `Vector2D[float64]` alias used by legacy sketch paths.
+`FlatVector2D` is a pre-bound `Vector2D[float64]` alias used by the float64 sketches.
 
 ##### Vector3D
 
@@ -228,7 +228,7 @@ Design constraints:
 
 Sketches serialize to ASAPv1, a self-describing envelope around a MessagePack metadata map and payload that matches [asap_sketchlib](https://github.com/ProjectASAP/asap_sketchlib) byte for byte: `MarshalASAPv1` / `UnmarshalASAPv1` on each sketch type, shared pieces in `wire/asapv1`.
 The spec is [`docs/asapv1_wire_format.md`](https://github.com/ProjectASAP/asap_sketchlib/blob/main/docs/asapv1_wire_format.md) in asap_sketchlib; the golden byte-vectors in [sketchlib-golden-bytes](https://github.com/ProjectASAP/sketchlib-golden-bytes) (submodule `asapv1_golden/`) are authoritative.
-FoldCountMinSketch, FoldCountSketch, SpaceSaving and ExponentialHistogram have no serialized form.
+FoldCountMinSketch, FoldCountSketch, SpaceSaving, CountL2HH, ExponentialHistogram, NitroSketch and OctoSketch have no serialized form.
 
 ---
 
