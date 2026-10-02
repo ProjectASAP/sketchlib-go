@@ -83,7 +83,6 @@ type matrixState struct {
 	CounterType string
 	Mode        string
 	Ints        []int64
-	Floats      []float64
 }
 
 func (s *matrixState) MarshalASAPv1() ([]byte, error) {
@@ -95,11 +94,7 @@ func (s *matrixState) MarshalASAPv1() ([]byte, error) {
 	md.Str("mode", s.Mode)
 	p := asapv1.NewEncoder()
 	p.Array(1)
-	if s.CounterType == "f64" {
-		asapv1.EncodeFloat64s(p, s.Floats)
-	} else {
-		asapv1.EncodeInts(p, s.Ints)
-	}
+	asapv1.EncodeInts(p, s.Ints)
 	return asapv1.Marshal(s.Kind, md, p)
 }
 
@@ -124,21 +119,18 @@ func (s *matrixState) UnmarshalASAPv1(b []byte) error {
 	}
 	p := asapv1.NewDecoder(payload)
 	p.ExpectArray(1)
-	switch out.CounterType {
-	case "f64":
-		out.Floats = asapv1.DecodeFloat64s(p)
-	case "i32":
+	if out.CounterType == "i32" {
 		for _, v := range asapv1.DecodeInts[int32](p) {
 			out.Ints = append(out.Ints, int64(v))
 		}
-	default:
+	} else {
 		out.Ints = asapv1.DecodeInts[int64](p)
 	}
 	if err := p.Finish(); err != nil {
 		return err
 	}
-	if n := len(out.Ints) + len(out.Floats); uint64(n) != uint64(out.Rows)*uint64(out.Cols) {
-		return fmt.Errorf("%d counts for %dx%d", n, out.Rows, out.Cols)
+	if uint64(len(out.Ints)) != uint64(out.Rows)*uint64(out.Cols) {
+		return fmt.Errorf("%d counts for %dx%d", len(out.Ints), out.Rows, out.Cols)
 	}
 	*s = out
 	return nil
@@ -384,8 +376,8 @@ func kllFixture(itemType string) *kllState {
 
 func TestGoldenFixtures(t *testing.T) {
 	csCounts := []int64{0, 127, 128, 65536, -1, -33, -32768, -2147483648}
-	matrix := func(kind asapv1.KindID, cols uint32, counterType, mode string, ints []int64, floats []float64) *matrixState {
-		return &matrixState{Kind: kind, Rows: 2, Cols: cols, CounterType: counterType, Mode: mode, Ints: ints, Floats: floats}
+	matrix := func(counterType, mode string) *matrixState {
+		return &matrixState{Kind: asapv1.KindCountSketch, Rows: 2, Cols: 4, CounterType: counterType, Mode: mode, Ints: csCounts}
 	}
 	t.Run("hll_classic_p12", func(t *testing.T) {
 		asapv1test.CheckGolden(t, "hll_classic_p12", &hllState{Kind: asapv1.KindHLLClassic, Registers: p12Registers()}, nil)
@@ -398,11 +390,9 @@ func TestGoldenFixtures(t *testing.T) {
 			&hllState{Kind: asapv1.KindHLLHIP, Registers: p12Registers(), HIP: [3]float64{1.5, 2.5, 3.0}}, nil)
 	})
 	for name, known := range map[string]*matrixState{
-		"cms_i64_regular_2x3": matrix(asapv1.KindCountMin, 3, "i64", "regular", []int64{0, 1, 127, 128, 300, 65536}, nil),
-		"cms_f64_fast_2x3":    matrix(asapv1.KindCountMin, 3, "f64", "fast", nil, []float64{0, 1.5, 2.25, 3.75, 4.125, 5.0625}),
-		"cs_i64_regular_2x4":  matrix(asapv1.KindCountSketch, 4, "i64", "regular", csCounts, nil),
-		"cs_i64_fast_2x4":     matrix(asapv1.KindCountSketch, 4, "i64", "fast", csCounts, nil),
-		"cs_i32_regular_2x4":  matrix(asapv1.KindCountSketch, 4, "i32", "regular", csCounts, nil),
+		"cs_i64_regular_2x4": matrix("i64", "regular"),
+		"cs_i64_fast_2x4":    matrix("i64", "fast"),
+		"cs_i32_regular_2x4": matrix("i32", "regular"),
 	} {
 		t.Run(name, func(t *testing.T) { asapv1test.CheckGolden(t, name, known, nil) })
 	}

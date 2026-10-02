@@ -2,10 +2,13 @@ package hydrasketch
 
 import (
 	"fmt"
+	"math"
 
 	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
+	cmpb "github.com/ProjectASAP/sketchlib-go/proto/countminsketch"
 	hydrapb "github.com/ProjectASAP/sketchlib-go/proto/hydra"
 	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
+	countminsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
 )
 
 // SerializePortable serializes the Hydra sketch into a portable protobuf SketchEnvelope.
@@ -80,18 +83,38 @@ func hydraCounterTypeToProto(ct HydraCounterType) hydrapb.HydraCounterType {
 	}
 }
 
-// cellToProto converts a HydraCounter into a HydraCell proto by delegating to
-// the inner sketch's SerializePortable. The counter wrapper structs are in the
-// same package so their private .s field is accessible.
+// countMinCellState returns a Count-Min cell as a CountMinState, with integer
+// counts when every count is integral and float counts otherwise.
+func countMinCellState(s *countminsketch.CountMinSketch) *cmpb.CountMinState {
+	st := &cmpb.CountMinState{Rows: uint32(s.Rows), Cols: uint32(s.Cols), L1: append([]float64(nil), s.L1...)}
+	var counts []float64
+	for r := range s.Rows {
+		counts = append(counts, s.Count[r]...)
+		st.SumCounts = append(st.SumCounts, s.Sum[r]...)
+		st.Sum2Counts = append(st.Sum2Counts, s.Sum2[r]...)
+	}
+	ints := make([]int64, len(counts))
+	for i, v := range counts {
+		if v != math.Trunc(v) || v >= 1<<63 || v < -(1<<63) {
+			st.CounterType = commonpb.CounterType_COUNTER_TYPE_FLOAT64
+			st.CountsFloat = counts
+			return st
+		}
+		ints[i] = int64(v)
+	}
+	st.CounterType = commonpb.CounterType_COUNTER_TYPE_INT64
+	st.CountsInt = ints
+	return st
+}
+
+// cellToProto converts a HydraCounter into a HydraCell proto via
+// countMinCellState or the inner sketch's SerializePortable. The counter
+// wrapper structs are in the same package so their private .s field is accessible.
 func cellToProto(c HydraCounter) (*hydrapb.HydraCell, error) {
 	switch ct := c.(type) {
 	case *countMinCounter:
-		env, err := ct.s.SerializePortable()
-		if err != nil {
-			return nil, err
-		}
 		return &hydrapb.HydraCell{
-			Sketch: &hydrapb.HydraCell_CountMin{CountMin: env.GetCountMin()},
+			Sketch: &hydrapb.HydraCell_CountMin{CountMin: countMinCellState(ct.s)},
 		}, nil
 
 	case *countSketchCounter:

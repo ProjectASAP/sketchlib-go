@@ -7,31 +7,11 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
-// integralCellDelta converts a float64 value to its exact int64, returning
-// ok=false when it is fractional or out of i64 range. Used by the codec to
-// pick the wire encoding: all-integral deltas ride the compact packed-sint64
-// d_counts field; any fractional (weighted / per-row 1/p sampled) delta moves
-// the whole cell list to the lossless packed-float64 d_counts_float field.
-func integralCellDelta(df float64) (int64, bool) {
-	if math.IsNaN(df) || math.IsInf(df, 0) {
-		return 0, false
-	}
-	r := math.Round(df)
-	if r != df {
-		return 0, false
-	}
-	if r > math.MaxInt64 || r < math.MinInt64 {
-		return 0, false
-	}
-	return int64(r), true
-}
-
 // CellDelta holds the additive delta for a single (row, col) cell.
 // DSum and DSum2 are dropped: the receiver reconstructs Sum and Sum2 from
 // DValue — exact for unit-weight streams AND for the per-row 1/p sampled path
 // (which increments all three arrays by the same weight). DValue is float64 so
-// fractional (weighted/sampled) cells are carried losslessly; the codec still
-// emits the compact sint64 wire when every delta is integral.
+// fractional (weighted/sampled) cells are carried losslessly.
 type CellDelta struct {
 	Row, Col uint32
 	DValue   float64
@@ -40,9 +20,8 @@ type CellDelta struct {
 // Delta is the native Go representation of a sparse CountMinSketch delta.
 // All fields are plain Go types; no proto dependency.
 //
-// The shape mirrors the CountSketch Delta so the two sketches serialize to
-// structurally identical wire frames (see CountMinDelta vs CountSketchDelta in
-// the protos). HHKeys is the optional heavy-hitter-keys channel: CMS can track
+// The shape mirrors the CountSketch Delta. HHKeys is the optional
+// heavy-hitter-keys channel: CMS can track
 // heavy hitters, but whether HHKeys is populated is a control-plane decision.
 // It is empty when no heavy-hitter source is wired to the producing sketch.
 type Delta struct {
@@ -82,8 +61,7 @@ func ComputeDelta(snapshot, current *CountMinSketch, threshold float64) (*Delta,
 // included in full. When hh is non-nil and reports candidates, those keys are
 // copied into Delta.HHKeys (mirroring CountSketch's ComputeDelta, which reads
 // current.SS.Candidates()). When hh is nil — the default for a plain CMS with
-// no heavy-hitter tracker — HHKeys stays empty and the serialized bytes are
-// byte-identical to a sketch that never tracked heavy hitters.
+// no heavy-hitter tracker — HHKeys stays empty.
 //
 // Returns an error if the two sketches have different dimensions.
 func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh HeavyHitterSource) (*Delta, error) {
@@ -112,9 +90,7 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 			if df == 0 || math.Abs(df) < threshold {
 				continue
 			}
-			// Fractional deltas are carried as-is; the codec picks the float
-			// wire (d_counts_float) when needed and keeps the compact sint64
-			// wire when every delta is integral.
+			// Fractional deltas are carried as-is.
 			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DValue: df})
 		}
 		d.L1[r] = current.L1[r] - snapshot.L1[r]
@@ -122,7 +98,7 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 
 	// Control-plane-gated heavy-hitter emission. Only populated when a source
 	// is wired in (CMS has no built-in tracker), so the field is empty for a
-	// plain CMS — keeping cross-language byte parity in that case.
+	// plain CMS.
 	if hh != nil {
 		if cands := hh.Candidates(); len(cands) > 0 {
 			d.HHKeys = cands
@@ -139,11 +115,10 @@ func ComputeDeltaWithHH(snapshot, current *CountMinSketch, threshold float64, hh
 // empty matrix and ComputeDelta(emptyPrev, current) reduces to "encode
 // current's non-zero cells".
 //
-// The result is byte-identical to ComputeDelta(zeroSketch, current, threshold)
-// for a freshly-constructed zeroSketch of current's dimensions: the same
-// threshold test, the same cell ordering (row-major), and L1 carried in full
-// (== current's, since the base is zero). Callers SerializeDelta the result
-// exactly as for ComputeDelta.
+// The result equals ComputeDelta(zeroSketch, current, threshold) for a
+// freshly-constructed zeroSketch of current's dimensions: the same threshold
+// test, the same cell ordering (row-major), and L1 carried in full (==
+// current's, since the base is zero).
 func ComputeDeltaAgainstEmpty(current *CountMinSketch, threshold float64) (*Delta, error) {
 	rows, cols := current.Rows, current.Cols
 	d := &Delta{

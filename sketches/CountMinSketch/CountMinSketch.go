@@ -29,11 +29,8 @@ type CountMinSketch struct {
 	mask       uint64
 
 	// sampler implements optional NitroSketch geometric skip-sampling. When nil
-	// (the default) every update is admitted and the sketch is byte-identical to
-	// an unsampled one. When set with p<1, updates are admitted with probability
-	// p and the RAW sampled counts are stored; the consumer rescales ×1/p at
-	// query. The probability rides on the SketchEnvelope (see SerializePortable),
-	// never inside CountMinState, so downstream literal constructors are unaffected.
+	// (the default) every update is admitted. When set with p<1, updates are
+	// admitted with probability p and the RAW sampled counts are stored.
 	sampler *common.GeometricSampler
 }
 
@@ -145,11 +142,10 @@ func WithDimensions(rows, cols int) (*CountMinSketch, error) {
 }
 
 // WithSampleP enables NitroSketch geometric skip-sampling at probability p in
-// (0,1]. With p>=1 sampling is disabled (exact, the default) and the sketch is
-// byte-identical to an unsampled one. The seed makes the admitted subset
-// reproducible. Counter writes are cut to ~p× per item; the RAW sampled counts
-// are stored and the probability is stamped on the SketchEnvelope so the
-// consumer rescales frequency estimates ×1/p at query time.
+// (0,1]. With p>=1 sampling is disabled (exact, the default). The seed makes
+// the admitted subset reproducible. Counter writes are cut to ~p× per item; the
+// RAW sampled counts are stored, so frequency estimates scale by 1/p.
+// MarshalASAPv1 rejects a sampled sketch.
 //
 // Returns the receiver for fluent construction:
 //
@@ -169,18 +165,6 @@ func (s *CountMinSketch) WithSampleP(p float64, seed int64) *CountMinSketch {
 func (s *CountMinSketch) SampleP() float64 {
 	if s.sampler == nil {
 		return 1.0
-	}
-	return s.sampler.P()
-}
-
-// wireSampleP returns the value to stamp on the SketchEnvelope.sample_p field.
-// When sampling is disabled it returns 0.0 (the proto3 default) so the encoded
-// envelope is BYTE-IDENTICAL to the pre-sampling format — proto3 omits
-// default-valued scalars, and the consumer's dual-read treats an unset/0.0
-// sample_p as 1.0. A sampled sketch (p<1) emits its actual probability.
-func (s *CountMinSketch) wireSampleP() float64 {
-	if s.sampler == nil {
-		return 0.0
 	}
 	return s.sampler.P()
 }
