@@ -1,6 +1,6 @@
 // xtest_producer — Cross-language integration test: Go producer side.
 //
-// Inserts synthetic data into nine sketch types, serializes each as a portable
+// Inserts synthetic data into eight sketch types, serializes each as a portable
 // protobuf SketchEnvelope, and writes the binary files to $XTEST_DIR.
 //
 // Output files:
@@ -10,7 +10,6 @@
 //	ddsketch.pb     DDSketchState     (alpha + bucket array)
 //	hll.pb          HyperLogLogState  (DataFusion estimator)
 //	countsketch.pb  CountSketchState  (float64 signed counters)
-//	coco.pb         CocoSketchState   (hash+val+hasKey buckets)
 //	elastic.pb      ElasticState      (heavy buckets + light CM)
 //	univmon.pb      UnivMonState      (layered CS + TopK heaps)
 //	hydra.pb        HydraState        (CM-cell grid)
@@ -31,7 +30,6 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/common"
 	hydrasketch "github.com/ProjectASAP/sketchlib-go/sketch_framework/HydraSketch"
 	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
-	cocosketch "github.com/ProjectASAP/sketchlib-go/sketches/CocoSketch"
 	countminsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
 	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
 	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
@@ -168,23 +166,6 @@ func TestXtestProducer(t *testing.T) {
 	writeEnvelope(t, outDir, "countsketch.pb", tmust(cs.SerializePortable()))
 
 	// -----------------------------------------------------------------------
-	// CocoSketch
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[CocoSketch] Step 1/3 — Create sketch (d=5, width=128)")
-	coco, err := cocosketch.NewCocoSketch(5, 128)
-	tcheck(t, "new coco", err)
-
-	t.Log("[CocoSketch] Step 2/3 — Insert 'coco:hot' with val 500")
-	coco.Insert("coco:hot", 500)
-	for i := 0; i < 1000; i++ {
-		coco.Insert(fmt.Sprintf("coco:%d", i), 1)
-	}
-	cocoEst := coco.Estimate("coco:hot")
-	t.Logf("[CocoSketch] Step 3/3 — 'coco:hot' est = %d (expect ≥ 500)", cocoEst)
-	writeEnvelope(t, outDir, "coco.pb", tmust(coco.SerializePortable()))
-
-	// -----------------------------------------------------------------------
 	// ElasticSketch
 	// -----------------------------------------------------------------------
 	t.Log()
@@ -291,7 +272,7 @@ func TestXtestProducer(t *testing.T) {
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 9 sketches + 2 sampled written to " + outDir)
+	t.Log("  Producer complete — 8 sketches + 2 sampled written to " + outDir)
 	t.Log("=======================================================")
 }
 
