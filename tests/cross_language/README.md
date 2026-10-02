@@ -1,6 +1,6 @@
 # Cross-Language Integration Test
 
-Verifies that all seven sketch types serialise correctly from **sketchlib-go** (Go producer)
+Verifies that six sketch types serialise correctly from **sketchlib-go** (Go producer)
 and deserialise correctly in **sketchlib-rust** (Rust consumer) using the shared
 protobuf wire format defined in `proto/sketchlib.proto`.
 
@@ -8,7 +8,6 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 
 | File | Sketch type | Query checked |
 |------|-------------|---------------|
-| `countmin.pb` | CountMin (3 × 512, float64) | `freq("item:42") ≥ 101` |
 | `ddsketch.pb` | DDSketch (alpha=0.01) | `p50 ≈ 5000`, `p99 ≈ 9900` |
 | `countsketch.pb` | CountSketch (3 × 512, float64) | `freq("cs:hot") ≥ 200` |
 | `coco.pb` | CocoSketch (d=5, width=128) | `estimate("coco:hot") ≥ 500` |
@@ -22,7 +21,7 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 sketchlib-go/
   tests/cross_language/
     run_test.sh          ← orchestrates both phases
-    producer_test.go     ← Go test that writes the 7 .pb files (no binary)
+    producer_test.go     ← Go test that writes the 6 .pb files (no binary)
     README.md            ← this file
 
 sketchlib-rust/
@@ -85,7 +84,6 @@ XTEST_DIR=/tmp/mytest cargo test --test xtest_consumer -- --nocapture
 ```
 Go producer (go test)            proto wire format           Rust consumer (cargo test)
 ──────────────────────────────────────────────────────────────────────────────────────
-CountMinSketch.SerializePortable()  →  countmin.pb  →  decode + min-freq query
 DDSketch.SerializePortable()        →  ddsketch.pb  →  decode + quantile query
 CountSketch.SerializePortable()     →  countsketch.pb → decode + median signed freq
 CocoSketch.SerializePortable()      →  coco.pb      →  decode + DeriveIndex lookup

@@ -4,7 +4,7 @@
 // message types live in their per-sketch proto files:
 //
 //   common/common.proto              — HashSpec, ProducerInfo, CounterType, ...
-//   countminsketch/countminsketch.proto — CountMinState, CountMinDelta, CountMinCell
+//   countminsketch/countminsketch.proto — CountMinState (embedded by Hydra and Elastic)
 //   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry, CountSketchDelta, CountSketchCell
 //   kll/kll.proto                    — KLLState, CoinState
 //   ddsketch/ddsketch.proto          — DDSketchState, DDSketchDelta, DDSketchBucketDelta
@@ -34,7 +34,6 @@ package sketch_envelopepb
 import (
 	cocosketch "github.com/ProjectASAP/sketchlib-go/proto/cocosketch"
 	common "github.com/ProjectASAP/sketchlib-go/proto/common"
-	countminsketch "github.com/ProjectASAP/sketchlib-go/proto/countminsketch"
 	countsketch "github.com/ProjectASAP/sketchlib-go/proto/countsketch"
 	ddsketch "github.com/ProjectASAP/sketchlib-go/proto/ddsketch"
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/proto/elasticsketch"
@@ -76,7 +75,6 @@ type SketchEnvelope struct {
 	//
 	// Types that are valid to be assigned to SketchState:
 	//
-	//	*SketchEnvelope_CountMin
 	//	*SketchEnvelope_CountSketch
 	//	*SketchEnvelope_Ddsketch
 	//	*SketchEnvelope_Univmon
@@ -164,15 +162,6 @@ func (x *SketchEnvelope) GetSketchState() isSketchEnvelope_SketchState {
 	return nil
 }
 
-func (x *SketchEnvelope) GetCountMin() *countminsketch.CountMinState {
-	if x != nil {
-		if x, ok := x.SketchState.(*SketchEnvelope_CountMin); ok {
-			return x.CountMin
-		}
-	}
-	return nil
-}
-
 func (x *SketchEnvelope) GetCountSketch() *countsketch.CountSketchState {
 	if x != nil {
 		if x, ok := x.SketchState.(*SketchEnvelope_CountSketch); ok {
@@ -238,10 +227,6 @@ type isSketchEnvelope_SketchState interface {
 	isSketchEnvelope_SketchState()
 }
 
-type SketchEnvelope_CountMin struct {
-	CountMin *countminsketch.CountMinState `protobuf:"bytes,10,opt,name=count_min,json=countMin,proto3,oneof"`
-}
-
 type SketchEnvelope_CountSketch struct {
 	CountSketch *countsketch.CountSketchState `protobuf:"bytes,11,opt,name=count_sketch,json=countSketch,proto3,oneof"`
 }
@@ -265,8 +250,6 @@ type SketchEnvelope_Coco struct {
 type SketchEnvelope_Elastic struct {
 	Elastic *elasticsketch.ElasticState `protobuf:"bytes,18,opt,name=elastic,proto3,oneof"`
 }
-
-func (*SketchEnvelope_CountMin) isSketchEnvelope_SketchState() {}
 
 func (*SketchEnvelope_CountSketch) isSketchEnvelope_SketchState() {}
 
@@ -292,7 +275,6 @@ type SketchDeltaEnvelope struct {
 	IsWindowClose bool `protobuf:"varint,3,opt,name=is_window_close,json=isWindowClose,proto3" json:"is_window_close,omitempty"`
 	// Types that are valid to be assigned to Delta:
 	//
-	//	*SketchDeltaEnvelope_CountMin
 	//	*SketchDeltaEnvelope_CountSketch
 	//	*SketchDeltaEnvelope_Ddsketch
 	Delta         isSketchDeltaEnvelope_Delta `protobuf_oneof:"delta"`
@@ -358,15 +340,6 @@ func (x *SketchDeltaEnvelope) GetDelta() isSketchDeltaEnvelope_Delta {
 	return nil
 }
 
-func (x *SketchDeltaEnvelope) GetCountMin() *countminsketch.CountMinDelta {
-	if x != nil {
-		if x, ok := x.Delta.(*SketchDeltaEnvelope_CountMin); ok {
-			return x.CountMin
-		}
-	}
-	return nil
-}
-
 func (x *SketchDeltaEnvelope) GetCountSketch() *countsketch.CountSketchDelta {
 	if x != nil {
 		if x, ok := x.Delta.(*SketchDeltaEnvelope_CountSketch); ok {
@@ -389,10 +362,6 @@ type isSketchDeltaEnvelope_Delta interface {
 	isSketchDeltaEnvelope_Delta()
 }
 
-type SketchDeltaEnvelope_CountMin struct {
-	CountMin *countminsketch.CountMinDelta `protobuf:"bytes,10,opt,name=count_min,json=countMin,proto3,oneof"`
-}
-
 type SketchDeltaEnvelope_CountSketch struct {
 	CountSketch *countsketch.CountSketchDelta `protobuf:"bytes,11,opt,name=count_sketch,json=countSketch,proto3,oneof"`
 }
@@ -400,8 +369,6 @@ type SketchDeltaEnvelope_CountSketch struct {
 type SketchDeltaEnvelope_Ddsketch struct {
 	Ddsketch *ddsketch.DDSketchDelta `protobuf:"bytes,13,opt,name=ddsketch,proto3,oneof"`
 }
-
-func (*SketchDeltaEnvelope_CountMin) isSketchDeltaEnvelope_Delta() {}
 
 func (*SketchDeltaEnvelope_CountSketch) isSketchDeltaEnvelope_Delta() {}
 
@@ -411,13 +378,11 @@ var File_sketchlib_proto protoreflect.FileDescriptor
 
 const file_sketchlib_proto_rawDesc = "" +
 	"\n" +
-	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a#countminsketch/countminsketch.proto\x1a\x1dcountsketch/countsketch.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\xfe\x04\n" +
+	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a\x1dcountsketch/countsketch.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\xd3\x04\n" +
 	"\x0eSketchEnvelope\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x126\n" +
 	"\bproducer\x18\x02 \x01(\v2\x1a.sketchlib.v1.ProducerInfoR\bproducer\x123\n" +
-	"\thash_spec\x18\x03 \x01(\v2\x16.sketchlib.v1.HashSpecR\bhashSpec\x12:\n" +
-	"\tcount_min\x18\n" +
-	" \x01(\v2\x1b.sketchlib.v1.CountMinStateH\x00R\bcountMin\x12C\n" +
+	"\thash_spec\x18\x03 \x01(\v2\x16.sketchlib.v1.HashSpecR\bhashSpec\x12C\n" +
 	"\fcount_sketch\x18\v \x01(\v2\x1e.sketchlib.v1.CountSketchStateH\x00R\vcountSketch\x129\n" +
 	"\bddsketch\x18\x0e \x01(\v2\x1b.sketchlib.v1.DDSketchStateH\x00R\bddsketch\x126\n" +
 	"\aunivmon\x18\x0f \x01(\v2\x1a.sketchlib.v1.UnivMonStateH\x00R\aunivmon\x120\n" +
@@ -425,16 +390,16 @@ const file_sketchlib_proto_rawDesc = "" +
 	"\x04coco\x18\x11 \x01(\v2\x1d.sketchlib.v1.CocoSketchStateH\x00R\x04coco\x126\n" +
 	"\aelastic\x18\x12 \x01(\v2\x1a.sketchlib.v1.ElasticStateH\x00R\aelastic\x12\x19\n" +
 	"\bsample_p\x18\x04 \x01(\x01R\asamplePB\x0e\n" +
-	"\fsketch_stateJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x13\x10 R\x03hllR\x03kll\"\xda\x02\n" +
+	"\fsketch_stateJ\x04\b\n" +
+	"\x10\vJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x13\x10 R\tcount_minR\x03hllR\x03kll\"\xaf\x02\n" +
 	"\x13SketchDeltaEnvelope\x12#\n" +
 	"\rpartition_key\x18\x01 \x01(\tR\fpartitionKey\x12&\n" +
 	"\x0fwindow_start_ms\x18\x02 \x01(\x03R\rwindowStartMs\x12&\n" +
-	"\x0fis_window_close\x18\x03 \x01(\bR\risWindowClose\x12:\n" +
-	"\tcount_min\x18\n" +
-	" \x01(\v2\x1b.sketchlib.v1.CountMinDeltaH\x00R\bcountMin\x12C\n" +
+	"\x0fis_window_close\x18\x03 \x01(\bR\risWindowClose\x12C\n" +
 	"\fcount_sketch\x18\v \x01(\v2\x1e.sketchlib.v1.CountSketchDeltaH\x00R\vcountSketch\x129\n" +
 	"\bddsketch\x18\r \x01(\v2\x1b.sketchlib.v1.DDSketchDeltaH\x00R\bddsketchB\a\n" +
-	"\x05deltaJ\x04\b\f\x10\rR\x03hllBMZKgithub.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;sketch_envelopepbb\x06proto3"
+	"\x05deltaJ\x04\b\n" +
+	"\x10\vJ\x04\b\f\x10\rR\tcount_minR\x03hllBMZKgithub.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;sketch_envelopepbb\x06proto3"
 
 var (
 	file_sketchlib_proto_rawDescOnce sync.Once
@@ -454,35 +419,31 @@ var file_sketchlib_proto_goTypes = []any{
 	(*SketchDeltaEnvelope)(nil),          // 1: sketchlib.v1.SketchDeltaEnvelope
 	(*common.ProducerInfo)(nil),          // 2: sketchlib.v1.ProducerInfo
 	(*common.HashSpec)(nil),              // 3: sketchlib.v1.HashSpec
-	(*countminsketch.CountMinState)(nil), // 4: sketchlib.v1.CountMinState
-	(*countsketch.CountSketchState)(nil), // 5: sketchlib.v1.CountSketchState
-	(*ddsketch.DDSketchState)(nil),       // 6: sketchlib.v1.DDSketchState
-	(*univmon.UnivMonState)(nil),         // 7: sketchlib.v1.UnivMonState
-	(*hydra.HydraState)(nil),             // 8: sketchlib.v1.HydraState
-	(*cocosketch.CocoSketchState)(nil),   // 9: sketchlib.v1.CocoSketchState
-	(*elasticsketch.ElasticState)(nil),   // 10: sketchlib.v1.ElasticState
-	(*countminsketch.CountMinDelta)(nil), // 11: sketchlib.v1.CountMinDelta
-	(*countsketch.CountSketchDelta)(nil), // 12: sketchlib.v1.CountSketchDelta
-	(*ddsketch.DDSketchDelta)(nil),       // 13: sketchlib.v1.DDSketchDelta
+	(*countsketch.CountSketchState)(nil), // 4: sketchlib.v1.CountSketchState
+	(*ddsketch.DDSketchState)(nil),       // 5: sketchlib.v1.DDSketchState
+	(*univmon.UnivMonState)(nil),         // 6: sketchlib.v1.UnivMonState
+	(*hydra.HydraState)(nil),             // 7: sketchlib.v1.HydraState
+	(*cocosketch.CocoSketchState)(nil),   // 8: sketchlib.v1.CocoSketchState
+	(*elasticsketch.ElasticState)(nil),   // 9: sketchlib.v1.ElasticState
+	(*countsketch.CountSketchDelta)(nil), // 10: sketchlib.v1.CountSketchDelta
+	(*ddsketch.DDSketchDelta)(nil),       // 11: sketchlib.v1.DDSketchDelta
 }
 var file_sketchlib_proto_depIdxs = []int32{
 	2,  // 0: sketchlib.v1.SketchEnvelope.producer:type_name -> sketchlib.v1.ProducerInfo
 	3,  // 1: sketchlib.v1.SketchEnvelope.hash_spec:type_name -> sketchlib.v1.HashSpec
-	4,  // 2: sketchlib.v1.SketchEnvelope.count_min:type_name -> sketchlib.v1.CountMinState
-	5,  // 3: sketchlib.v1.SketchEnvelope.count_sketch:type_name -> sketchlib.v1.CountSketchState
-	6,  // 4: sketchlib.v1.SketchEnvelope.ddsketch:type_name -> sketchlib.v1.DDSketchState
-	7,  // 5: sketchlib.v1.SketchEnvelope.univmon:type_name -> sketchlib.v1.UnivMonState
-	8,  // 6: sketchlib.v1.SketchEnvelope.hydra:type_name -> sketchlib.v1.HydraState
-	9,  // 7: sketchlib.v1.SketchEnvelope.coco:type_name -> sketchlib.v1.CocoSketchState
-	10, // 8: sketchlib.v1.SketchEnvelope.elastic:type_name -> sketchlib.v1.ElasticState
-	11, // 9: sketchlib.v1.SketchDeltaEnvelope.count_min:type_name -> sketchlib.v1.CountMinDelta
-	12, // 10: sketchlib.v1.SketchDeltaEnvelope.count_sketch:type_name -> sketchlib.v1.CountSketchDelta
-	13, // 11: sketchlib.v1.SketchDeltaEnvelope.ddsketch:type_name -> sketchlib.v1.DDSketchDelta
-	12, // [12:12] is the sub-list for method output_type
-	12, // [12:12] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	4,  // 2: sketchlib.v1.SketchEnvelope.count_sketch:type_name -> sketchlib.v1.CountSketchState
+	5,  // 3: sketchlib.v1.SketchEnvelope.ddsketch:type_name -> sketchlib.v1.DDSketchState
+	6,  // 4: sketchlib.v1.SketchEnvelope.univmon:type_name -> sketchlib.v1.UnivMonState
+	7,  // 5: sketchlib.v1.SketchEnvelope.hydra:type_name -> sketchlib.v1.HydraState
+	8,  // 6: sketchlib.v1.SketchEnvelope.coco:type_name -> sketchlib.v1.CocoSketchState
+	9,  // 7: sketchlib.v1.SketchEnvelope.elastic:type_name -> sketchlib.v1.ElasticState
+	10, // 8: sketchlib.v1.SketchDeltaEnvelope.count_sketch:type_name -> sketchlib.v1.CountSketchDelta
+	11, // 9: sketchlib.v1.SketchDeltaEnvelope.ddsketch:type_name -> sketchlib.v1.DDSketchDelta
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_sketchlib_proto_init() }
@@ -491,7 +452,6 @@ func file_sketchlib_proto_init() {
 		return
 	}
 	file_sketchlib_proto_msgTypes[0].OneofWrappers = []any{
-		(*SketchEnvelope_CountMin)(nil),
 		(*SketchEnvelope_CountSketch)(nil),
 		(*SketchEnvelope_Ddsketch)(nil),
 		(*SketchEnvelope_Univmon)(nil),
@@ -500,7 +460,6 @@ func file_sketchlib_proto_init() {
 		(*SketchEnvelope_Elastic)(nil),
 	}
 	file_sketchlib_proto_msgTypes[1].OneofWrappers = []any{
-		(*SketchDeltaEnvelope_CountMin)(nil),
 		(*SketchDeltaEnvelope_CountSketch)(nil),
 		(*SketchDeltaEnvelope_Ddsketch)(nil),
 	}

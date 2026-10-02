@@ -21,58 +21,49 @@ func fractionalCMS(t *testing.T, n int, seed int64) *CountMinSketch {
 	return cm
 }
 
-// A sampled (fractional-count) CMS must round-trip both proto frames (full and
-// Frequency-Only) losslessly via the counts_float wire.
-func TestFloatWire_CMSFullAndFOLossless(t *testing.T) {
+// A per-row sampled (fractional-count) CMS round-trips ASAPv1 losslessly.
+func TestFloatWire_CMSLossless(t *testing.T) {
 	cm := fractionalCMS(t, 5000, 7)
-
-	for name, ser := range map[string]func() ([]byte, error){
-		"full": cm.SerializeProtoBytes,
-		"fo":   cm.SerializeProtoBytesFO,
-	} {
-		data, err := ser()
-		if err != nil {
-			t.Fatalf("%s serialize: %v", name, err)
-		}
-		back, err := DeserializeCountMinSketchFromProtoBytes(data)
-		if err != nil {
-			t.Fatalf("%s deserialize: %v", name, err)
-		}
-		for r := 0; r < cm.Rows; r++ {
-			for c := 0; c < cm.Cols; c++ {
-				if back.Count[r][c] != cm.Count[r][c] {
-					t.Fatalf("%s cell (%d,%d) not lossless: %v vs %v", name, r, c, back.Count[r][c], cm.Count[r][c])
-				}
+	data, err := cm.MarshalASAPv1()
+	if err != nil {
+		t.Fatalf("MarshalASAPv1: %v", err)
+	}
+	var back CountMinSketch
+	if err := back.UnmarshalASAPv1(data); err != nil {
+		t.Fatalf("UnmarshalASAPv1: %v", err)
+	}
+	for r := 0; r < cm.Rows; r++ {
+		for c := 0; c < cm.Cols; c++ {
+			if back.Count[r][c] != cm.Count[r][c] {
+				t.Fatalf("cell (%d,%d) not lossless: %v vs %v", r, c, back.Count[r][c], cm.Count[r][c])
 			}
 		}
 	}
 }
 
-// Fractional deltas ride the float wire and reconstruct exactly:
-// base + delta == current (threshold 0 → lossless), including Sum/Sum2.
+// Fractional deltas reconstruct exactly: base + delta == current (threshold
+// 0 → lossless), including Sum/Sum2.
 func TestFloatWire_CMSDeltaRoundtripFractional(t *testing.T) {
 	base := fractionalCMS(t, 2000, 42)
-	snapBytes, _ := base.SerializeProtoBytes()
-	snap, _ := DeserializeCountMinSketchFromProtoBytes(snapBytes)
+	snapBytes, err := base.MarshalASAPv1()
+	if err != nil {
+		t.Fatalf("MarshalASAPv1: %v", err)
+	}
+	var snap CountMinSketch
+	if err := snap.UnmarshalASAPv1(snapBytes); err != nil {
+		t.Fatalf("UnmarshalASAPv1: %v", err)
+	}
 
 	s := common.NewGeometricSampler(0.3, 43)
 	for i := 0; i < 2000; i++ {
 		base.InsertWithHashSampledPerRow(common.FromString(fmt.Sprintf("k%d", i%53)).Hash, s)
 	}
 
-	d, err := ComputeDelta(snap, base, 0)
+	d, err := ComputeDelta(&snap, base, 0)
 	if err != nil {
-		t.Fatalf("ComputeDelta must accept fractional deltas now: %v", err)
+		t.Fatalf("ComputeDelta: %v", err)
 	}
-	payload, err := SerializeDelta(d)
-	if err != nil {
-		t.Fatalf("SerializeDelta: %v", err)
-	}
-	got, err := DeserializeDelta(payload)
-	if err != nil {
-		t.Fatalf("DeserializeDelta: %v", err)
-	}
-	ApplyDelta(snap, got)
+	ApplyDelta(&snap, d)
 	for r := 0; r < base.Rows; r++ {
 		for c := 0; c < base.Cols; c++ {
 			if math.Abs(snap.Count[r][c]-base.Count[r][c]) > 1e-9 {

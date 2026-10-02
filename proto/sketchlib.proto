@@ -4,7 +4,7 @@
 // message types live in their per-sketch proto files:
 //
 //   common/common.proto              — HashSpec, ProducerInfo, CounterType, ...
-//   countminsketch/countminsketch.proto — CountMinState, CountMinDelta, CountMinCell
+//   countminsketch/countminsketch.proto — CountMinState (embedded by Hydra and Elastic)
 //   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry, CountSketchDelta, CountSketchCell
 //   kll/kll.proto                    — KLLState, CoinState
 //   ddsketch/ddsketch.proto          — DDSketchState, DDSketchDelta, DDSketchBucketDelta
@@ -28,7 +28,6 @@ syntax = "proto3";
 package sketchlib.v1;
 
 import "common/common.proto";
-import "countminsketch/countminsketch.proto";
 import "countsketch/countsketch.proto";
 import "ddsketch/ddsketch.proto";
 import "univmon/univmon.proto";
@@ -63,7 +62,6 @@ message SketchEnvelope {
 
   // The sketch payload. Exactly one field must be set.
   oneof sketch_state {
-    CountMinState    count_min    = 10;
     CountSketchState count_sketch = 11;
     DDSketchState    ddsketch     = 14;
     UnivMonState     univmon      = 15;
@@ -72,6 +70,8 @@ message SketchEnvelope {
     ElasticState     elastic      = 18;
   }
 
+  reserved 10;
+  reserved "count_min";
   reserved 12;
   reserved "hll";
   reserved 13;
@@ -107,12 +107,11 @@ message SketchEnvelope {
 // full-sketch payloads by the encoding="proto_delta" attribute.
 //
 // Receiver semantics:
-//   CountMin / CountSketch:  agg[r][c] += cell.d_*
+//   CountSketch:             agg[r][c] += cell.d_*
 //   DDSketch buckets:        agg[b]   += bucket.d_count
 //   DDSketch min/max:        lossless  — only transmitted when changed
 //
 // Per-sketch delta message types live in their per-sketch proto files:
-//   countminsketch/countminsketch.proto — CountMinDelta, CountMinCell
 //   countsketch/countsketch.proto       — CountSketchDelta, CountSketchCell
 //   ddsketch/ddsketch.proto             — DDSketchDelta, DDSketchBucketDelta
 
@@ -129,11 +128,12 @@ message SketchDeltaEnvelope {
   bool   is_window_close = 3;
 
   oneof delta {
-    CountMinDelta    count_min    = 10;
     CountSketchDelta count_sketch = 11;
     DDSketchDelta    ddsketch     = 13;
   }
 
+  reserved 10;
+  reserved "count_min";
   reserved 12;
   reserved "hll";
 }

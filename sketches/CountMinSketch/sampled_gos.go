@@ -16,6 +16,7 @@ import (
 // never touched, so it cannot cross on this occurrence — which is what lets
 // "sampling then GOS" compose correctly.
 func (s *CountMinSketch) applyGosCellAtRowCMS(r int, hash uint64, w, threshold float64) (GOSCellUpdate, bool) {
+	s.noteRawHash()
 	c := int((hash >> (uint(r) * s.bitsPerRow)) & s.mask)
 	if c >= s.Cols {
 		c %= s.Cols

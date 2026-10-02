@@ -35,35 +35,6 @@ func TestDDSketchDeltaGoldenAndRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCountMinDeltaGoldenAndRoundTrip(t *testing.T) {
-	rows, cols := uint64(3), uint64(8)
-	rowIdx := []uint32{0, 2}
-	colIdx := []uint32{1, 7}
-	dCount := []int64{5, 100_000}
-	golden := []byte{
-		0x95,       // array5
-		0x03, 0x08, // rows=3, cols=8
-		0x92, 0x00, 0x02, // rowIdx: [0, 2]
-		0x92, 0x01, 0x07, // colIdx: [1, 7]
-		0x92, 0x05, 0xce, 0x00, 0x01, 0x86, 0xa0, // dCount: [5, 100000]
-	}
-	got, err := MarshalCountMinDelta(rows, cols, rowIdx, colIdx, dCount)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, golden) {
-		t.Fatalf("CountMin golden mismatch:\n got  %x\n want %x", got, golden)
-	}
-	r, c, gr, gc, gd, err := UnmarshalCountMinDelta(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r != rows || c != cols || !reflect.DeepEqual(gr, rowIdx) ||
-		!reflect.DeepEqual(gc, colIdx) || !reflect.DeepEqual(gd, dCount) {
-		t.Fatalf("CountMin round-trip mismatch: %d %d %v %v %v", r, c, gr, gc, gd)
-	}
-}
-
 func TestCountSketchCellDeltaGoldenAndRoundTrip(t *testing.T) {
 	rows, cols := uint64(3), uint64(8)
 	rowIdx := []uint32{0, 2}
@@ -96,8 +67,5 @@ func TestCountSketchCellDeltaGoldenAndRoundTrip(t *testing.T) {
 func TestDeltaLengthMismatchErrors(t *testing.T) {
 	if _, err := MarshalDDSketchDelta([]int32{1}, []uint64{1, 2}); err == nil {
 		t.Fatal("DDSketch: expected length-mismatch error")
-	}
-	if _, err := MarshalCountMinDelta(1, 1, []uint32{0}, []uint32{0, 1}, []int64{1}); err == nil {
-		t.Fatal("CountMin: expected length-mismatch error")
 	}
 }
