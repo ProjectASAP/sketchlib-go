@@ -53,10 +53,9 @@ type FlowCount struct {
 	Count  int
 }
 
-// ElasticSketch is a heavy hash table over flow ids backed by an int32
-// Count-Min light layer that absorbs evicted and unelected flows. Heavy
-// placement hashes the flow id at the canonical seed; light row r hashes it at
-// seed index r and takes the lower 32 bits modulo the column count.
+// ElasticSketch is a heavy hash table over flow ids, placed at the canonical
+// seed, backed by an int32 Count-Min light layer whose row r hashes at seed
+// index r and takes the lower 32 bits modulo the column count.
 type ElasticSketch struct {
 	heavy       []HeavyBucket
 	bktlen      int
@@ -116,12 +115,14 @@ func (es *ElasticSketch) InsertN(key string, count int32) {
 	es.insertLocked(key, count)
 }
 
-// InsertInput inserts one event from common.SketchInput.
+// InsertInput inserts one event from common.SketchInput, keyed by its bytes,
+// which must be valid UTF-8 for the sketch to encode.
 func (es *ElasticSketch) InsertInput(input *common.SketchInput) {
 	es.InsertInputN(input, 1)
 }
 
-// InsertInputN inserts count events from common.SketchInput, keyed by its bytes.
+// InsertInputN inserts count events from common.SketchInput, keyed by its
+// bytes, which must be valid UTF-8 for the sketch to encode.
 func (es *ElasticSketch) InsertInputN(input *common.SketchInput, count int32) {
 	if input == nil {
 		return
@@ -310,8 +311,8 @@ func (es *ElasticSketch) contestHeavyAgainst(o *ElasticSketch) []spilled {
 }
 
 // ExpandHeavy doubles the heavy table by appending a copy of itself. Every
-// resident then sits in both halves; the copy in the half it no longer hashes
-// to is stale and is dropped lazily.
+// resident then sits in both halves; the copy in the half it does not hash to
+// is stale and is dropped lazily.
 func (es *ElasticSketch) ExpandHeavy() error {
 	es.mu.Lock()
 	defer es.mu.Unlock()

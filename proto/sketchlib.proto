@@ -52,7 +52,7 @@ message SketchEnvelope {
   // the highest version they understand.
   //   1 = CountMin, Count, HLL, KLL, DDSketch
   //   2 = UnivMon, Hydra (reserved)
-  //   3 = CocoSketch, ElasticSketch (reserved)
+  //   3 = CocoSketch (reserved)
   uint32 format_version = 1;
 
   // Library and build info of the producing side.
@@ -75,6 +75,8 @@ message SketchEnvelope {
     CocoSketchState  coco         = 17;
   }
 
+  reserved 18;
+  reserved "elastic";
   reserved 19 to 31;  // Reserved for future sketch types.
 
   // Geometric / NitroSketch sampling probability for the producing sketch.
