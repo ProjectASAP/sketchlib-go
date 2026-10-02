@@ -125,7 +125,7 @@ func checkCorrectness(t *testing.T, eh *ExpoHistogramUniv, stream []testdata.Sam
 		t.Fatalf("QueryInterval failed: %v", err)
 	}
 
-	// Extract L2 from result (HybridSketch or UnivSketch)
+	// Extract L2 from result (HybridSketch or UnivMon)
 	var estimatedL2 float64
 	if h, ok := res.(*HybridSketch); ok {
 		estimatedL2 = h.GetL2()

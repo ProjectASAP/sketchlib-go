@@ -27,7 +27,6 @@ syntax = "proto3";
 package sketchlib.v1;
 
 import "common/common.proto";
-import "univmon/univmon.proto";
 import "hydra/hydra.proto";
 
 option go_package = "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;sketch_envelopepb";
@@ -56,7 +55,6 @@ message SketchEnvelope {
 
   // The sketch payload. Exactly one field must be set.
   oneof sketch_state {
-    UnivMonState     univmon      = 15;
     HydraState       hydra        = 16;
   }
 
@@ -70,6 +68,8 @@ message SketchEnvelope {
   reserved "kll";
   reserved 14;
   reserved "ddsketch";
+  reserved 15;
+  reserved "univmon";
   reserved 17;
   reserved "coco";
   reserved 18;

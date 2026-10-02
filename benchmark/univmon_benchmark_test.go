@@ -7,19 +7,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ProjectASAP/sketchlib-go/common"
 	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
 	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
 var (
-	univBenchOnce   sync.Once
-	univBenchInputs []*common.SketchInput
-	univBenchHashes []uint64
-	univBenchErr    error
+	univBenchOnce sync.Once
+	univBenchKeys []string
+	univBenchErr  error
 )
 
-func loadCAIDAUnivMonBenchmark(tb testing.TB) ([]*common.SketchInput, []uint64) {
+func loadCAIDAUnivMonBenchmark(tb testing.TB) []string {
 	tb.Helper()
 	univBenchOnce.Do(func() {
 		file := "../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
@@ -28,82 +26,76 @@ func loadCAIDAUnivMonBenchmark(tb testing.TB) ([]*common.SketchInput, []uint64) 
 			univBenchErr = err
 			return
 		}
-		inputs := make([]*common.SketchInput, len(samples))
-		hashes := make([]uint64, len(samples))
+		keys := make([]string, len(samples))
 		for i, s := range samples {
 			var ip [4]byte
 			binary.BigEndian.PutUint32(ip[:], uint32(s.F))
-			inputs[i] = common.FromBytes(ip[:])
-			hashes[i] = common.Hash64(ip[:])
+			keys[i] = string(ip[:])
 		}
-		univBenchInputs = inputs
-		univBenchHashes = hashes
+		univBenchKeys = keys
 	})
 
 	if univBenchErr != nil {
 		tb.Skipf("Skipping CAIDA benchmark: %v", univBenchErr)
 	}
-	if len(univBenchInputs) == 0 || len(univBenchHashes) == 0 {
+	if len(univBenchKeys) == 0 {
 		tb.Skip("Skipping CAIDA benchmark: empty dataset")
 	}
-	return univBenchInputs, univBenchHashes
+	return univBenchKeys
 }
 
-func mustNewUnivMonBenchmark(tb testing.TB) *univmon.UnivSketch {
+func mustNewUnivMonBenchmark(tb testing.TB) *univmon.UnivMon[string] {
 	tb.Helper()
-	us, err := univmon.NewUnivSketchPyramid(200, 5, 4096, 16)
+	us, err := univmon.NewUnivMon[string](200, 5, 4096, 16)
 	if err != nil {
 		tb.Fatalf("new univmon: %v", err)
 	}
 	return us
 }
 
-func cloneUnivMonBenchmark(tb testing.TB, src *univmon.UnivSketch) *univmon.UnivSketch {
+func fillUnivMonBenchmark(tb testing.TB, us *univmon.UnivMon[string], keys []string) {
 	tb.Helper()
-	data, err := src.SerializeToBytes()
-	if err != nil {
-		tb.Fatalf("serialize univmon: %v", err)
+	for _, key := range keys {
+		if err := us.Insert(key, 1); err != nil {
+			tb.Fatalf("insert: %v", err)
+		}
 	}
-	dst, err := univmon.DeserializeUnivSketchFromBytes(data)
+}
+
+func cloneUnivMonBenchmark(tb testing.TB, src *univmon.UnivMon[string]) *univmon.UnivMon[string] {
+	tb.Helper()
+	data, err := src.MarshalASAPv1()
 	if err != nil {
-		tb.Fatalf("deserialize univmon: %v", err)
+		tb.Fatalf("marshal univmon: %v", err)
+	}
+	dst := new(univmon.UnivMon[string])
+	if err := dst.UnmarshalASAPv1(data); err != nil {
+		tb.Fatalf("unmarshal univmon: %v", err)
 	}
 	return dst
 }
 
-func BenchmarkUnivMon_Update_CAIDA(b *testing.B) {
-	inputs, _ := loadCAIDAUnivMonBenchmark(b)
-	n := len(inputs)
+func BenchmarkUnivMon_Insert_CAIDA(b *testing.B) {
+	keys := loadCAIDAUnivMonBenchmark(b)
+	n := len(keys)
 	us := mustNewUnivMonBenchmark(b)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		us.Update(inputs[i%n], 1)
-	}
-}
-
-func BenchmarkUnivMon_InsertWithHash_CAIDA(b *testing.B) {
-	_, hashes := loadCAIDAUnivMonBenchmark(b)
-	n := len(hashes)
-	us := mustNewUnivMonBenchmark(b)
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		us.InsertWithHash(hashes[i%n])
+		_ = us.Insert(keys[i%n], 1)
 	}
 }
 
 func TestUnivMon_Insert_Latency_P50P99(t *testing.T) {
-	inputs, _ := loadCAIDAUnivMonBenchmark(t)
+	keys := loadCAIDAUnivMonBenchmark(t)
 	us := mustNewUnivMonBenchmark(t)
 
-	sampleSize := benchMinInt(20_000, len(inputs))
+	sampleSize := benchMinInt(20_000, len(keys))
 	latencies := make([]int64, sampleSize)
 	for i := 0; i < sampleSize; i++ {
 		start := time.Now()
-		us.Update(inputs[i], 1)
+		_ = us.Insert(keys[i], 1)
 		latencies[i] = time.Since(start).Nanoseconds()
 	}
 
@@ -115,45 +107,27 @@ func TestUnivMon_Insert_Latency_P50P99(t *testing.T) {
 }
 
 func BenchmarkUnivMon_QueryCardinality_CAIDA(b *testing.B) {
-	inputs, _ := loadCAIDAUnivMonBenchmark(b)
+	keys := loadCAIDAUnivMonBenchmark(b)
 	us := mustNewUnivMonBenchmark(b)
-	for _, input := range inputs {
-		us.Update(input, 1)
-	}
+	fillUnivMonBenchmark(b, us, keys)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = us.QueryWithHash(common.QueryCardinality, 0)
-	}
-}
-
-func BenchmarkUnivMon_QueryTopK_CAIDA(b *testing.B) {
-	inputs, _ := loadCAIDAUnivMonBenchmark(b)
-	us := mustNewUnivMonBenchmark(b)
-	for _, input := range inputs {
-		us.Update(input, 1)
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = us.QueryTopK(100)
+		_ = us.CalcCard()
 	}
 }
 
 func TestUnivMon_Query_Latency_Distribution(t *testing.T) {
-	inputs, _ := loadCAIDAUnivMonBenchmark(t)
+	keys := loadCAIDAUnivMonBenchmark(t)
 	us := mustNewUnivMonBenchmark(t)
-	for _, input := range inputs {
-		us.Update(input, 1)
-	}
+	fillUnivMonBenchmark(t, us, keys)
 
 	sampleSize := 5_000
 	latencies := make([]int64, sampleSize)
 	for i := 0; i < sampleSize; i++ {
 		start := time.Now()
-		_, _ = us.QueryWithHash(common.QueryCardinality, 0)
+		_ = us.CalcCard()
 		latencies[i] = time.Since(start).Nanoseconds()
 	}
 
@@ -166,18 +140,13 @@ func TestUnivMon_Query_Latency_Distribution(t *testing.T) {
 }
 
 func BenchmarkUnivMon_Merge_CAIDA(b *testing.B) {
-	inputs, _ := loadCAIDAUnivMonBenchmark(b)
-	mid := len(inputs) / 2
+	keys := loadCAIDAUnivMonBenchmark(b)
+	mid := len(keys) / 2
 
 	leftSrc := mustNewUnivMonBenchmark(b)
 	rightSrc := mustNewUnivMonBenchmark(b)
-	for i, input := range inputs {
-		if i < mid {
-			leftSrc.Update(input, 1)
-		} else {
-			rightSrc.Update(input, 1)
-		}
-	}
+	fillUnivMonBenchmark(b, leftSrc, keys[:mid])
+	fillUnivMonBenchmark(b, rightSrc, keys[mid:])
 
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -192,35 +161,28 @@ func BenchmarkUnivMon_Merge_CAIDA(b *testing.B) {
 	}
 }
 
-func BenchmarkUnivMon_Serialize_CAIDA(b *testing.B) {
-	inputs, _ := loadCAIDAUnivMonBenchmark(b)
+func BenchmarkUnivMon_Marshal_CAIDA(b *testing.B) {
+	keys := loadCAIDAUnivMonBenchmark(b)
 	us := mustNewUnivMonBenchmark(b)
-	for _, input := range inputs {
-		us.Update(input, 1)
-	}
+	fillUnivMonBenchmark(b, us, keys)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := us.SerializeToBytes(); err != nil {
-			b.Fatalf("serialize failed: %v", err)
+		if _, err := us.MarshalASAPv1(); err != nil {
+			b.Fatalf("marshal failed: %v", err)
 		}
 	}
 }
 
 func TestUnivMon_Merge_Latency_Distribution(t *testing.T) {
-	inputs, _ := loadCAIDAUnivMonBenchmark(t)
-	mid := len(inputs) / 2
+	keys := loadCAIDAUnivMonBenchmark(t)
+	mid := len(keys) / 2
 
 	leftSrc := mustNewUnivMonBenchmark(t)
 	rightSrc := mustNewUnivMonBenchmark(t)
-	for i, input := range inputs {
-		if i < mid {
-			leftSrc.Update(input, 1)
-		} else {
-			rightSrc.Update(input, 1)
-		}
-	}
+	fillUnivMonBenchmark(t, leftSrc, keys[:mid])
+	fillUnivMonBenchmark(t, rightSrc, keys[mid:])
 
 	sampleSize := 250
 	latencies := make([]int64, sampleSize)

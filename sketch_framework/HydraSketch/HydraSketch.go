@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
-	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
 )
 
 const (
@@ -484,9 +483,6 @@ type hydraSnapshot struct {
 	SeedCM2       uint64
 	Cells         [][]byte
 	Big           []byte
-
-	// Legacy payload compatibility (v1)
-	Grid [][][]byte
 }
 
 // SerializeToBytes serializes Hydra into bytes.
@@ -539,52 +535,6 @@ func DeserializeHydraFromBytes(data []byte) (*Hydra, error) {
 	}
 	if snap.D <= 0 || snap.W <= 0 {
 		return nil, errors.New("invalid snapshot dimensions")
-	}
-
-	// Legacy snapshot fallback (v1 UnivMon grid)
-	if len(snap.Cells) == 0 && len(snap.Grid) > 0 {
-		if len(snap.Grid) != snap.D {
-			return nil, errors.New("invalid snapshot grid depth")
-		}
-		h := &Hydra{
-			D:             snap.D,
-			W:             snap.W,
-			enableTopK:    true,
-			fanoutSubkeys: true,
-			seedHydra:     defaultHydraSeed,
-			seedCM1:       0x1111111111111111,
-			seedCM2:       0x2222222222222222,
-			cells:         make([]HydraCounter, snap.D*snap.W),
-		}
-		if snap.Version >= 1 {
-			h.enableTopK = snap.EnableTopK
-			h.seedCM1 = snap.SeedCM1
-			h.seedCM2 = snap.SeedCM2
-		}
-
-		for i := 0; i < snap.D; i++ {
-			if len(snap.Grid[i]) != snap.W {
-				return nil, errors.New("invalid snapshot grid width")
-			}
-			for j := 0; j < snap.W; j++ {
-				um, err := univmon.DeserializeUnivSketchFromBytes(snap.Grid[i][j])
-				if err != nil {
-					return nil, err
-				}
-				um.SetTopKEnabled(h.enableTopK)
-				h.cells[i*h.W+j] = &univCounter{s: um}
-			}
-		}
-		if len(snap.Big) > 0 {
-			um, err := univmon.DeserializeUnivSketchFromBytes(snap.Big)
-			if err != nil {
-				return nil, err
-			}
-			um.SetTopKEnabled(h.enableTopK)
-			h.bigCounter = &univCounter{s: um}
-		}
-		h.typeToClone = &univCounter{}
-		return h, nil
 	}
 
 	if len(snap.Cells) != snap.D*snap.W {

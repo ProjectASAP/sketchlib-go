@@ -2,12 +2,12 @@
 # run_test.sh — Cross-language integration test for sketchlib.
 #
 # Builds and runs:
-#   1. Go producer  (sketchlib-go)   — writes 2 .pb sketch files into a tmp dir (go test)
+#   1. Go producer  (sketchlib-go)   — writes 1 .pb sketch file into a tmp dir (go test)
 #   2. Rust consumer (sketchlib-rust) — reads those files, deserialises each sketch,
 #      runs sanity queries, and asserts correctness
 #
 # Sketch types covered:
-#   UnivMon · HydraSketch
+#   HydraSketch
 #
 # Usage (run from anywhere inside the repo):
 #   sketchlib-go/tests/cross_language/run_test.sh
@@ -106,7 +106,7 @@ step "Produced .pb files:"
 ls -lh "$TMP_DIR"/*.pb 2>/dev/null || { err "No .pb files produced"; exit 1; }
 
 EXPECTED_FILES=(
-    univmon.pb hydra.pb
+    hydra.pb
 )
 MISSING=0
 for f in "${EXPECTED_FILES[@]}"; do
@@ -116,7 +116,7 @@ for f in "${EXPECTED_FILES[@]}"; do
     fi
 done
 if [[ "$MISSING" != "0" ]]; then exit 1; fi
-ok "All 2 sketch files present"
+ok "Sketch file present"
 
 # ---------------------------------------------------------------------------
 # Phase 2 — Rust consumer
