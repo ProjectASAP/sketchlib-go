@@ -67,12 +67,12 @@ func preloadElasticBenchmark(es *elasticsketch.ElasticSketch, keys []string) {
 
 func cloneElasticBenchmark(tb testing.TB, src *elasticsketch.ElasticSketch) *elasticsketch.ElasticSketch {
 	tb.Helper()
-	data, err := src.SerializeToBytes()
+	data, err := src.MarshalASAPv1()
 	if err != nil {
 		tb.Fatalf("serialize elastic: %v", err)
 	}
-	dst, err := elasticsketch.DeserializeElasticSketchFromBytes(data)
-	if err != nil {
+	dst := new(elasticsketch.ElasticSketch)
+	if err := dst.UnmarshalASAPv1(data); err != nil {
 		tb.Fatalf("deserialize elastic: %v", err)
 	}
 	return dst

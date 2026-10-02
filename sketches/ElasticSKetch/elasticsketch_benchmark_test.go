@@ -70,12 +70,12 @@ func mustNewElastic(tb testing.TB) *ElasticSketch {
 
 func cloneElastic(tb testing.TB, src *ElasticSketch) *ElasticSketch {
 	tb.Helper()
-	data, err := src.SerializeToBytes()
+	data, err := src.MarshalASAPv1()
 	if err != nil {
 		tb.Fatalf("serialize elastic: %v", err)
 	}
-	dst, err := DeserializeElasticSketchFromBytes(data)
-	if err != nil {
+	dst := new(ElasticSketch)
+	if err := dst.UnmarshalASAPv1(data); err != nil {
 		tb.Fatalf("deserialize elastic: %v", err)
 	}
 	return dst
@@ -146,7 +146,7 @@ func BenchmarkElasticSketch_Serialize_CAIDA(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := es.SerializeToBytes(); err != nil {
+		if _, err := es.MarshalASAPv1(); err != nil {
 			b.Fatalf("serialize failed: %v", err)
 		}
 	}
