@@ -593,28 +593,3 @@ func (h *HyperLogLog) Flush(emit func(common.DeltaUpdate)) {
 	})
 	h.clearPending()
 }
-
-// SerializeToBytes serializes HyperLogLog into bytes.
-func (h *HyperLogLog) SerializeToBytes() ([]byte, error) {
-	return common.EncodeToBytes(h.RegisterSlice())
-}
-
-// DeserializeHyperLogLogFromBytes restores HyperLogLog from serialized bytes.
-func DeserializeHyperLogLogFromBytes(data []byte) (*HyperLogLog, error) {
-	var regs []uint8
-	if err := common.DecodeFromBytes(data, &regs); err == nil {
-		if len(regs) != HLLRegisterCount {
-			return nil, errors.New("hyperloglog: invalid register length")
-		}
-		return &HyperLogLog{Registers: storage.Vector1DFromSlice(regs)}, nil
-	}
-
-	// Backward compatibility with legacy fixed-array gob payload.
-	var legacyRegs [HLLRegisterCount]uint8
-	if err := common.DecodeFromBytes(data, &legacyRegs); err != nil {
-		return nil, err
-	}
-	regs = make([]uint8, HLLRegisterCount)
-	copy(regs, legacyRegs[:])
-	return &HyperLogLog{Registers: storage.Vector1DFromSlice(regs)}, nil
-}

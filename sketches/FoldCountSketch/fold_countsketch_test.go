@@ -129,29 +129,6 @@ func TestFoldCountSketchUnfoldMergeMatchesDense(t *testing.T) {
 	}
 }
 
-func TestFoldCountSketchSerializationRoundTrip(t *testing.T) {
-	sketch, _ := NewFoldCountSketch(3, 256, 3)
-	for i := 0; i < 50; i++ {
-		sketch.UpdateWeight(common.FromU64(uint64(i)), float64(i+1))
-	}
-
-	data, err := sketch.SerializeToBytes()
-	if err != nil {
-		t.Fatalf("serialize: %v", err)
-	}
-	decoded, err := DeserializeFoldCountSketchFromBytes(data)
-	if err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
-
-	for i := 0; i < 50; i++ {
-		input := common.FromU64(uint64(i))
-		if got, want := decoded.Estimate(input), sketch.Estimate(input); got != want {
-			t.Fatalf("round-trip mismatch for key %d: got %v want %v", i, got, want)
-		}
-	}
-}
-
 func TestFoldCountSketchSparseCollisionProfile(t *testing.T) {
 	sketch, _ := NewFoldCountSketch(3, 4096, 4)
 	hasPos := false

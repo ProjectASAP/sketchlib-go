@@ -64,46 +64,6 @@ func hashLayoutForCols(cols int) (uint, uint64) {
 	return uint(bits.TrailingZeros(uint(width))), uint64(width - 1)
 }
 
-func (s *CountMinSketch) rehydrateStorage() error {
-	if s.Rows <= 0 || s.Cols <= 0 {
-		return errors.New("invalid snapshot dimensions")
-	}
-	if len(s.Count) != s.Rows || len(s.Sum) != s.Rows || len(s.Sum2) != s.Rows {
-		return errors.New("invalid snapshot matrix row count")
-	}
-	for r := 0; r < s.Rows; r++ {
-		if len(s.Count[r]) != s.Cols || len(s.Sum[r]) != s.Cols || len(s.Sum2[r]) != s.Cols {
-			return errors.New("invalid snapshot matrix col count")
-		}
-	}
-	if len(s.L1) != s.Rows {
-		return errors.New("invalid snapshot l1 size")
-	}
-
-	countStore, err := storage.NewFlatVector2DFrom2D(s.Count)
-	if err != nil {
-		return err
-	}
-	sumStore, err := storage.NewFlatVector2DFrom2D(s.Sum)
-	if err != nil {
-		return err
-	}
-	sum2Store, err := storage.NewFlatVector2DFrom2D(s.Sum2)
-	if err != nil {
-		return err
-	}
-
-	s.countStore = countStore
-	s.sumStore = sumStore
-	s.sum2Store = sum2Store
-	s.Count = countStore.As2D()
-	s.Sum = sumStore.As2D()
-	s.Sum2 = sum2Store.As2D()
-	s.bitsPerRow, s.mask = hashLayoutForCols(s.Cols)
-	s.rawHashWide = rawHashWideFor(s.Rows, s.Cols)
-	return nil
-}
-
 /* sketch configurations */
 const (
 	DefaultRowNum    = 3
@@ -702,21 +662,4 @@ func (s *CountMinSketch) Flush(emit func(common.DeltaUpdate)) {
 		emit(common.DeltaUpdate{Row: row, Col: col, Value: val})
 		s.SetCell(row, col, 0)
 	})
-}
-
-// SerializeToBytes serializes CountMinSketch into bytes.
-func (s *CountMinSketch) SerializeToBytes() ([]byte, error) {
-	return common.EncodeToBytes(s)
-}
-
-// DeserializeCountMinSketchFromBytes restores CountMinSketch from serialized bytes.
-func DeserializeCountMinSketchFromBytes(data []byte) (*CountMinSketch, error) {
-	var s CountMinSketch
-	if err := common.DecodeFromBytes(data, &s); err != nil {
-		return nil, err
-	}
-	if err := s.rehydrateStorage(); err != nil {
-		return nil, err
-	}
-	return &s, nil
 }

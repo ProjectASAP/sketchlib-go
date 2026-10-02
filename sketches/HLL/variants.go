@@ -113,27 +113,6 @@ func (h *HyperLogLogVariant) Merge(other common.Sketch) error {
 	return nil
 }
 
-func (h *HyperLogLogVariant) SerializeToBytes() ([]byte, error) {
-	return common.EncodeToBytes(struct {
-		Variant HLLVariant
-		Regs    []uint8
-	}{Variant: h.Variant, Regs: append([]uint8(nil), h.Registers.AsSlice()...)})
-}
-
-func DeserializeHyperLogLogVariantFromBytes(data []byte) (*HyperLogLogVariant, error) {
-	var snap struct {
-		Variant HLLVariant
-		Regs    []uint8
-	}
-	if err := common.DecodeFromBytes(data, &snap); err != nil {
-		return nil, err
-	}
-	if len(snap.Regs) != HLLRegisterCount {
-		return nil, errors.New("hll variant: invalid register length")
-	}
-	return &HyperLogLogVariant{Registers: storage.Vector1DFromSlice(snap.Regs), Variant: snap.Variant}, nil
-}
-
 // HyperLogLogHIP mirrors Rust HyperLogLogHIP.
 type HyperLogLogHIP struct {
 	Registers *storage.Vector1D[uint8]
@@ -193,39 +172,4 @@ func (h *HyperLogLogHIP) QueryWithHash(q common.QueryType, hash uint64) (float64
 
 func (h *HyperLogLogHIP) Merge(other common.Sketch) error {
 	return errors.New("hll_hip merge is not supported in this Go port")
-}
-
-func (h *HyperLogLogHIP) SerializeToBytes() ([]byte, error) {
-	return common.EncodeToBytes(struct {
-		Regs []uint8
-		Kxq0 float64
-		Kxq1 float64
-		Est  float64
-	}{
-		Regs: append([]uint8(nil), h.Registers.AsSlice()...),
-		Kxq0: h.kxq0,
-		Kxq1: h.kxq1,
-		Est:  h.est,
-	})
-}
-
-func DeserializeHyperLogLogHIPFromBytes(data []byte) (*HyperLogLogHIP, error) {
-	var snap struct {
-		Regs []uint8
-		Kxq0 float64
-		Kxq1 float64
-		Est  float64
-	}
-	if err := common.DecodeFromBytes(data, &snap); err != nil {
-		return nil, err
-	}
-	if len(snap.Regs) != HLLRegisterCount {
-		return nil, errors.New("hll hip: invalid register length")
-	}
-	return &HyperLogLogHIP{
-		Registers: storage.Vector1DFromSlice(snap.Regs),
-		kxq0:      snap.Kxq0,
-		kxq1:      snap.Kxq1,
-		est:       snap.Est,
-	}, nil
 }

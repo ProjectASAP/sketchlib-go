@@ -103,7 +103,6 @@ m.FastQueryAggregate(colFn, init, agg) // custom reduction
 ```
 
 `FlatVector2D` is a pre-bound `Vector2D[float64]` alias used by legacy sketch paths.
-Serialization: `SerializeToBytes` / `DeserializeVector2DFromBytes`.
 
 ##### Vector3D
 
