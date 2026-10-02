@@ -2,6 +2,7 @@ package elasticsketch
 
 import (
 	"math"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -34,7 +35,7 @@ func TestElasticHeavyBucketTracksRepeatedFlow(t *testing.T) {
 	if len(es.heavy) != 8 {
 		t.Fatalf("expected 8 heavy buckets, got %d", len(es.heavy))
 	}
-	if es.light.Rows() != elasticLightRows || es.light.Cols() != elasticLightCols {
+	if es.light.Rows() != DefaultLightRows || es.light.Cols() != DefaultLightCols {
 		t.Fatalf("unexpected light layout: got %dx%d", es.light.Rows(), es.light.Cols())
 	}
 }
@@ -72,8 +73,8 @@ func TestElasticLightSketchCountsCollidingFlows(t *testing.T) {
 	if lightEst < 6 {
 		t.Fatalf("expected light estimate >=6, got %d", lightEst)
 	}
-	if es.lightEstimateHash(hashForElastic(secondary)) < 6 {
-		t.Fatalf("expected direct light estimate >=6, got %.0f", es.lightEstimateHash(hashForElastic(secondary)))
+	if es.lightEstimate(secondary) < 6 {
+		t.Fatalf("expected direct light estimate >=6, got %d", es.lightEstimate(secondary))
 	}
 }
 
@@ -82,13 +83,13 @@ func TestElasticSerializeRoundTrip(t *testing.T) {
 	es.InsertN("foo", 7)
 	es.InsertN("bar", 3)
 
-	blob, err := es.SerializeToBytes()
+	blob, err := es.MarshalASAPv1()
 	if err != nil {
 		t.Fatalf("serialize failed: %v", err)
 	}
 
-	restored, err := DeserializeElasticSketchFromBytes(blob)
-	if err != nil {
+	restored := new(ElasticSketch)
+	if err := restored.UnmarshalASAPv1(blob); err != nil {
 		t.Fatalf("deserialize failed: %v", err)
 	}
 
@@ -106,11 +107,11 @@ func TestElasticSerializeRoundTrip(t *testing.T) {
 	}
 }
 
-func TestElastic_RustAlignedLayout(t *testing.T) {
+func TestElastic_DefaultLayout(t *testing.T) {
 	es := mustNewElasticForTest(t, 16)
 
 	if len(es.heavy) != 16 {
-		t.Fatalf("expected heavy Vec-style layout of 16 buckets, got %d", len(es.heavy))
+		t.Fatalf("expected 16 heavy buckets, got %d", len(es.heavy))
 	}
 	for i, bucket := range es.heavy {
 		if bucket.FlowID != "" || bucket.VotePos != 0 || bucket.VoteNeg != 0 || bucket.Eviction {
@@ -121,8 +122,8 @@ func TestElastic_RustAlignedLayout(t *testing.T) {
 	if es.light == nil {
 		t.Fatal("light part is nil")
 	}
-	if es.light.Rows() != elasticLightRows || es.light.Cols() != elasticLightCols {
-		t.Fatalf("light part should be Vector2D[%d x %d], got %dx%d", elasticLightRows, elasticLightCols, es.light.Rows(), es.light.Cols())
+	if es.light.Rows() != DefaultLightRows || es.light.Cols() != DefaultLightCols {
+		t.Fatalf("light part should be Vector2D[%d x %d], got %dx%d", DefaultLightRows, DefaultLightCols, es.light.Rows(), es.light.Cols())
 	}
 }
 
@@ -199,12 +200,12 @@ func TestElastic_Quality_SerializeRoundTrip(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		es.Insert("k:" + strconv.Itoa(i%7))
 	}
-	b, err := es.SerializeToBytes()
+	b, err := es.MarshalASAPv1()
 	if err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
-	r, err := DeserializeElasticSketchFromBytes(b)
-	if err != nil {
+	r := new(ElasticSketch)
+	if err := r.UnmarshalASAPv1(b); err != nil {
 		t.Fatalf("deserialize: %v", err)
 	}
 	for i := 0; i < 7; i++ {
@@ -264,5 +265,55 @@ func TestElastic_Merge_CollidingFlows(t *testing.T) {
 	}
 	if afterCollider < beforeCollider {
 		t.Fatalf("collider regressed after merge: before=%d after=%d", beforeCollider, afterCollider)
+	}
+}
+
+func TestElastic_EmptyFlowIDIsAFlow(t *testing.T) {
+	es := mustNewElasticForTest(t, 8)
+	es.InsertN("", 5)
+	if got := es.Query(""); got != 5 {
+		t.Fatalf(`Query("") = %d, want 5`, got)
+	}
+}
+
+func TestElastic_ExpandThenCompressKeepsResidents(t *testing.T) {
+	es := mustNewElasticForTest(t, 8)
+	for i := 0; i < 6; i++ {
+		es.InsertN("flow:"+strconv.Itoa(i), int32(10+i))
+	}
+	want := es.HeavyHitters(1)
+
+	if err := es.ExpandHeavy(); err != nil {
+		t.Fatal(err)
+	}
+	if len(es.heavy) != 16 || !es.staleCopies {
+		t.Fatalf("after expand: %d buckets, staleCopies=%v", len(es.heavy), es.staleCopies)
+	}
+	if got := es.HeavyHitters(1); !slices.Equal(got, want) {
+		t.Fatalf("after expand: heavy hitters %v, want %v", got, want)
+	}
+
+	if err := es.CompressHeavy(2); err != nil {
+		t.Fatal(err)
+	}
+	if len(es.heavy) != 8 || es.bktlen != 8 || es.staleCopies {
+		t.Fatalf("after compress: %d buckets, bktlen %d, staleCopies=%v", len(es.heavy), es.bktlen, es.staleCopies)
+	}
+	if got := es.HeavyHitters(1); !slices.Equal(got, want) {
+		t.Fatalf("after compress: heavy hitters %v, want %v", got, want)
+	}
+	if err := es.CompressHeavy(3); err == nil {
+		t.Fatal("ratio 3 accepted for 8 buckets")
+	}
+}
+
+func TestElastic_SelfMergeDoublesCounts(t *testing.T) {
+	es := mustNewElasticForTest(t, 8)
+	es.InsertN("flow", 7)
+	if err := es.Merge(es); err != nil {
+		t.Fatal(err)
+	}
+	if got := es.Query("flow"); got != 14 {
+		t.Fatalf("Query after self-merge = %d, want 14", got)
 	}
 }
