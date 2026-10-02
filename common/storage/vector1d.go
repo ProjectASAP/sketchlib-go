@@ -2,7 +2,6 @@ package storage
 
 import (
 	"cmp"
-	"encoding/json"
 	"errors"
 	"slices"
 )
@@ -193,19 +192,6 @@ func (v *Vector1D[T]) UpdateIfGreater(index int, value T) error {
 	if value > v.data[index] {
 		v.data[index] = value
 	}
-	return nil
-}
-
-func (v Vector1D[T]) MarshalJSON() ([]byte, error) {
-	return json.Marshal(v.data)
-}
-
-func (v *Vector1D[T]) UnmarshalJSON(data []byte) error {
-	var raw []T
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-	v.data = raw
 	return nil
 }
 

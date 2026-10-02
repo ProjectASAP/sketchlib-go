@@ -88,7 +88,7 @@ ptr, _ := v.Get(i)   // returns *T — no copy
 v.SortBy(cmp)
 ```
 
-Key operations: `Push`, `Get` / `GetMut`, `Fill`, `Truncate`, `Clear`, `Append`, `SortBy`, `UpdateIfGreater` / `UpdateIfSmaller`, JSON marshal/unmarshal.
+Key operations: `Push`, `Get` / `GetMut`, `Fill`, `Truncate`, `Clear`, `Append`, `SortBy`, `UpdateIfGreater` / `UpdateIfSmaller`.
 
 ##### Vector2D
 
