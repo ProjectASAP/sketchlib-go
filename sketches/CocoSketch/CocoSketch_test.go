@@ -36,8 +36,11 @@ func TestCocoInsertThenEstimatePartial(t *testing.T) {
 	cs.Insert("user:1234", 3)
 	cs.Insert("user:1234", 2)
 
-	if got := cs.Estimate("user"); got != 5 {
+	if got := cs.EstimateSubstring("user"); got != 5 {
 		t.Fatalf("expected estimate(user)=5, got %d", got)
+	}
+	if got := cs.Estimate("user:1234"); got != 5 {
+		t.Fatalf("expected estimate(user:1234)=5, got %d", got)
 	}
 }
 
@@ -69,10 +72,10 @@ func TestCocoMergeReplaysBuckets(t *testing.T) {
 		t.Fatalf("merge failed: %v", err)
 	}
 
-	if got := left.Estimate("alpha"); got != 7 {
+	if got := left.EstimateSubstring("alpha"); got != 7 {
 		t.Fatalf("expected alpha=7, got %d", got)
 	}
-	if got := left.Estimate("beta"); got != 11 {
+	if got := left.EstimateSubstring("beta"); got != 11 {
 		t.Fatalf("expected beta=11, got %d", got)
 	}
 }
@@ -94,10 +97,50 @@ func TestCocoHashAdapterRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCocoRecordsEmptyKeyAndZeroValue(t *testing.T) {
+	cs, _ := NewCocoSketch(4, 32)
+	cs.Insert("", 5)
+	cs.Insert("zero", 0)
+	if got := cs.Estimate(""); got != 5 {
+		t.Fatalf("expected estimate(\"\")=5, got %d", got)
+	}
+	found := false
+	for _, row := range cs.table {
+		for _, b := range row {
+			found = found || (b.HasKey && b.Key == "zero" && b.Val == 0)
+		}
+	}
+	if !found {
+		t.Fatal("Insert(\"zero\", 0) left no bucket")
+	}
+}
+
+// A fresh table ties all d mapped buckets at 0, so the first insert lands in a
+// uniformly drawn row.
+func TestCocoTiedMinimumBucketsAreChosenUniformly(t *testing.T) {
+	const d, trials = 4, 2000
+	var landings [d]int
+	for trial := range trials {
+		cs, _ := NewCocoSketch(d, 32)
+		cs.SetSeed(int64(trial))
+		cs.Insert("flow::tie-probe", 1)
+		for r := range d {
+			if b := cs.table[r][cs.hashIndex(r, "flow::tie-probe")]; b.HasKey {
+				landings[r]++
+			}
+		}
+	}
+	for r, n := range landings {
+		if n <= trials/10 || n >= trials*2/5 {
+			t.Fatalf("row %d took %d of %d landings, expected 200..800", r, n, trials)
+		}
+	}
+}
+
 func ExampleCocoSketch_Insert() {
 	cs, _ := NewCocoSketch(4, 64)
 	cs.Insert("user:42", 5)
-	fmt.Println(cs.Estimate("user"))
+	fmt.Println(cs.EstimateSubstring("user"))
 	// Output: 5
 }
 

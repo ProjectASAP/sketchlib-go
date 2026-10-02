@@ -76,6 +76,7 @@ message SketchEnvelope {
   }
 
   reserved 17;
+  reserved "coco";
   reserved 19 to 31;  // Reserved for future sketch types.
 
   // Geometric / NitroSketch sampling probability for the producing sketch.

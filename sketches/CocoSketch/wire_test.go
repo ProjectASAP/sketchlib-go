@@ -54,6 +54,17 @@ func TestASAPv1Golden(t *testing.T) {
 		{2, 5, "uint32-max", 4294967295},
 	})
 	asapv1test.CheckGolden(t, "coco_3x7", known, sameState)
+	var got CocoSketch
+	if err := got.UnmarshalASAPv1(asapv1test.Golden(t, "coco_3x7")); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range known.table {
+		for _, b := range row {
+			if b.HasKey && got.Estimate(b.Key) != b.Val {
+				t.Errorf("Estimate(%q) = %d, want %d", b.Key, got.Estimate(b.Key), b.Val)
+			}
+		}
+	}
 }
 
 func TestASAPv1RoundTripAfterInserts(t *testing.T) {
@@ -220,7 +231,7 @@ func TestASAPv1RejectsBadGeometry(t *testing.T) {
 }
 
 func TestASAPv1RejectsForeignKindAndMetadata(t *testing.T) {
-	expectDecodeError(t, envelope(t, asapv1.KindCountMin, 1, 2, make([]*string, 2), make([]uint64, 2)), "")
+	expectDecodeError(t, envelope(t, asapv1.KindCountMin, 1, 2, make([]*string, 2), make([]uint64, 2)), "kind_id")
 
 	md := asapv1.NewMetadataWriter(1)
 	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)

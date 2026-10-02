@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math/rand"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
@@ -71,55 +72,42 @@ func hashKey(hash uint64) string {
 	return strconv.FormatUint(hash, 16)
 }
 
-// insertKeyValue adds v to key's bucket if one of its d buckets holds it, else
-// claims the first free one, else adds v to the smallest and elects key with
-// probability v/val.
+// insertKeyValue adds v to key's bucket if one of its d buckets holds it.
+// Otherwise v goes to the smallest of them, ties drawn uniformly, and key takes
+// that bucket if it was free, else with probability v/val.
 func (c *CocoSketch) insertKeyValue(key string, v uint64) {
 
-	minRow := c.d
+	var victim *cocoBucket
 	minVal := ^uint64(0)
-	var free *cocoBucket
+	tied := 0
 
 	for i := 0; i < c.d; i++ {
 
-		idx := c.hashIndex(i, key)
-		b := &c.table[i][idx]
+		b := &c.table[i][c.hashIndex(i, key)]
 
-		if b.HasKey {
+		if b.HasKey && b.Key == key {
+			b.Val += v
+			return
+		}
 
-			if b.Key == key {
-				b.Val += v
-				return
+		switch {
+		case b.Val < minVal:
+			minVal = b.Val
+			victim = b
+			tied = 1
+		case b.Val == minVal:
+			tied++
+			if c.rng.Intn(tied) == 0 {
+				victim = b
 			}
-
-			if b.Val < minVal {
-				minVal = b.Val
-				minRow = i
-			}
-
-		} else if free == nil {
-			free = b
 		}
 	}
 
-	if free != nil {
-		free.Key = key
-		free.Val = v
-		free.HasKey = true
-		return
-	}
+	victim.Val += v
 
-	if minRow >= c.d {
-		minRow = 0
-	}
-
-	idx := c.hashIndex(minRow, key)
-	b := &c.table[minRow][idx]
-
-	b.Val += v
-
-	if float64(v)/float64(b.Val) > c.rng.Float64() {
-		b.Key = key
+	if !victim.HasKey || float64(v) > c.rng.Float64()*float64(victim.Val) {
+		victim.Key = key
+		victim.HasKey = true
 	}
 }
 
@@ -128,12 +116,9 @@ func (c *CocoSketch) InsertWithHash(hash uint64) {
 	c.insertKeyValue(hashKey(hash), 1)
 }
 
+// Insert adds v to key. A sketch holding a key that is not valid UTF-8 cannot
+// be encoded as ASAPv1.
 func (c *CocoSketch) Insert(key string, v uint64) {
-
-	if key == "" || v == 0 {
-		return
-	}
-
 	c.insertKeyValue(key, v)
 }
 
@@ -158,6 +143,11 @@ func (c *CocoSketch) Estimate(key string) uint64 {
 	}
 
 	return total
+}
+
+// EstimateSubstring sums every occupied bucket whose key contains partial.
+func (c *CocoSketch) EstimateSubstring(partial string) uint64 {
+	return c.EstimateWithUDF(partial, strings.Contains)
 }
 
 func (c *CocoSketch) EstimateWithUDF(partialKey string, udf func(full, partial string) bool) uint64 {
