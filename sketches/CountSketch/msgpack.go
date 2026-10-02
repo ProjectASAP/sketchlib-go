@@ -41,11 +41,15 @@ func integralCellDelta(df float64) (int64, bool) {
 // CountMinSketch wire format (which places the matrix first) —
 // intentional; both reproduce their respective Rust sides exactly.
 func (s *CountSketch) SerializeMsgpack() ([]byte, error) {
-	return asapmsgpack.MarshalCountSketch(
+	payload, err := asapmsgpack.MarshalCountSketch(
 		uint64(s.Rows),
 		uint64(s.Cols),
 		s.Count,
 	)
+	if err != nil {
+		return nil, err
+	}
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountSketch}, payload), nil
 }
 
 // SerializeMsgpackWithHeap emits the heap-bearing MessagePack wire
@@ -73,13 +77,17 @@ func (s *CountSketch) SerializeMsgpackWithHeap(heapSize int) ([]byte, error) {
 		heapSize = 1
 	}
 	heap := s.buildWireHeap(heapSize)
-	return asapmsgpack.MarshalCountSketchWithHeap(
+	payload, err := asapmsgpack.MarshalCountSketchWithHeap(
 		uint64(s.Rows),
 		uint64(s.Cols),
 		s.Count,
 		heap,
 		uint64(heapSize),
 	)
+	if err != nil {
+		return nil, err
+	}
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, payload), nil
 }
 
 // SerializeMsgpackWithHeapDelta emits the DELTA-HEAP MessagePack wire form
@@ -140,13 +148,17 @@ func (s *CountSketch) SerializeMsgpackWithHeapDelta(
 		}
 	}
 	heap := s.buildWireHeap(heapSize)
-	return asapmsgpack.MarshalCountSketchWithHeapDelta(
+	payload, err := asapmsgpack.MarshalCountSketchWithHeapDelta(
 		uint64(s.Rows),
 		uint64(s.Cols),
 		cells,
 		heap,
 		uint64(heapSize),
 	)
+	if err != nil {
+		return nil, err
+	}
+	return asapmsgpack.EncodeWrapper([]byte{asapmsgpack.MagicCountMinSketchWithHeap}, payload), nil
 }
 
 // buildWireHeap returns up to heapSize (key, estimatedCount) pairs for the
@@ -189,7 +201,11 @@ func (s *CountSketch) buildWireHeap(heapSize int) []asapmsgpack.HeapItem {
 // round-trip tests; the backend (data_plane) applies the same frame via
 // rmp_serde directly onto its stored matrix + heap.
 func (s *CountSketch) ApplyMsgpackWithHeapDelta(buf []byte) error {
-	_, _, cells, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeapDelta(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountMinSketchWithHeap)
+	if err != nil {
+		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: %w", err)
+	}
+	_, _, cells, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeapDelta(payload)
 	if err != nil {
 		return fmt.Errorf("countsketch: apply msgpack-with-heap delta: %w", err)
 	}
@@ -211,41 +227,45 @@ func (s *CountSketch) ApplyMsgpackWithHeapDelta(buf []byte) error {
 }
 
 // IsMsgpackWithHeapDelta reports whether buf is a DELTA-HEAP frame
-// (4-element array with a leading `is_delta=true` marker), as opposed to a
-// full heap frame (3-element array) or any other payload.
+// (magic-ID byte followed by a 4-element array with a leading `is_delta=true`
+// marker), as opposed to a full heap frame (magic-ID byte + 3-element array)
+// or any other payload.
 //
-// It only PEEKS the framing prefix — the outer array header (which must encode
-// length 4) followed by the first element being msgpack `true` (0xc3) — rather
-// than fully decoding the matrix delta + heap (which on a large sparse frame is
-// O(cells) work just to return a bool). The full frame is a 3-element array and
-// any non-delta payload either has a different array length or a non-true first
-// element, so this prefix is a sufficient and unambiguous discriminator (the
-// two frame shapes are proven distinct by the wire tests).
+// It only PEEKS the framing prefix — the magic-ID byte (0x03), the outer array
+// header (which must encode length 4) and the first element being msgpack `true`
+// (0xc3) — rather than fully decoding the matrix delta + heap.  The full frame
+// is a 3-element array and any non-delta payload either has a different array
+// length or a non-true first element.
 func IsMsgpackWithHeapDelta(buf []byte) bool {
-	// Outer array length must be exactly 4. rmp_serde emits a fixarray
-	// (0x90|len) for our 4-element frame, but accept array16/array32 too for
-	// robustness against any future re-encoding.
-	if len(buf) < 2 {
+	// Strip the ASAPv1 envelope and verify it's a CountMinSketchWithHeap frame.
+	msgpackPayload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountMinSketchWithHeap)
+	if err != nil {
+		return false
+	}
+	// Inspect the msgpack payload: outer array length must be exactly 4.
+	// rmp_serde emits a fixarray (0x90|len) for our 4-element frame, but
+	// accept array16/array32 too for robustness.
+	if len(msgpackPayload) == 0 {
 		return false
 	}
 	var hdr int
 	var rest []byte
-	switch b := buf[0]; {
+	switch b := msgpackPayload[0]; {
 	case b&0xf0 == 0x90: // fixarray
 		hdr = int(b & 0x0f)
-		rest = buf[1:]
+		rest = msgpackPayload[1:]
 	case b == 0xdc: // array16
-		if len(buf) < 3 {
+		if len(msgpackPayload) < 3 {
 			return false
 		}
-		hdr = int(buf[1])<<8 | int(buf[2])
-		rest = buf[3:]
+		hdr = int(msgpackPayload[1])<<8 | int(msgpackPayload[2])
+		rest = msgpackPayload[3:]
 	case b == 0xdd: // array32
-		if len(buf) < 5 {
+		if len(msgpackPayload) < 5 {
 			return false
 		}
-		hdr = int(buf[1])<<24 | int(buf[2])<<16 | int(buf[3])<<8 | int(buf[4])
-		rest = buf[5:]
+		hdr = int(msgpackPayload[1])<<24 | int(msgpackPayload[2])<<16 | int(msgpackPayload[3])<<8 | int(msgpackPayload[4])
+		rest = msgpackPayload[5:]
 	default:
 		return false
 	}
@@ -268,7 +288,11 @@ func IsMsgpackWithHeapDelta(buf []byte) bool {
 // the frame is ignored (the producer always ships its own current heap in
 // the delta frame).
 func DeserializeMsgpackWithHeapMatrix(buf []byte) (*CountSketch, error) {
-	rowNum, colNum, matrix, _, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountMinSketchWithHeap)
+	if err != nil {
+		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: %w", err)
+	}
+	rowNum, colNum, matrix, _, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(payload)
 	if err != nil {
 		return nil, fmt.Errorf("countsketch: msgpack-with-heap decode: %w", err)
 	}
@@ -291,7 +315,11 @@ func DeserializeMsgpackWithHeapMatrix(buf []byte) (*CountSketch, error) {
 // `sketch_core::count_sketch::CountSketch::serialize_msgpack`). Mirrors
 // Rust's `deserialize_msgpack(bytes) -> Result<Self>`.
 func DeserializeMsgpack(buf []byte) (*CountSketch, error) {
-	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(buf)
+	payload, err := asapmsgpack.DecodePayload(buf, asapmsgpack.MagicCountSketch)
+	if err != nil {
+		return nil, fmt.Errorf("countsketch: %w", err)
+	}
+	rowNum, colNum, matrix, err := asapmsgpack.UnmarshalCountSketch(payload)
 	if err != nil {
 		return nil, fmt.Errorf("countsketch: msgpack decode: %w", err)
 	}

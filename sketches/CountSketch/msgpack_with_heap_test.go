@@ -159,7 +159,15 @@ func TestSerializeMsgpackWithHeap_BuildsHeapFromCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
-	rows, cols, _, heap, heapSize, err := asapmsgpack.UnmarshalCountSketchWithHeap(b)
+	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
+	kindID, wrapPayload, err := asapmsgpack.DecodeWrapper(b)
+	if err != nil {
+		t.Fatalf("DecodeWrapper: %v", err)
+	}
+	if len(kindID) != 1 || kindID[0] != asapmsgpack.MagicCountMinSketchWithHeap {
+		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicCountMinSketchWithHeap, kindID)
+	}
+	rows, cols, _, heap, heapSize, err := asapmsgpack.UnmarshalCountSketchWithHeap(wrapPayload)
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -191,7 +199,15 @@ func TestSerializeMsgpackWithHeap_EmptyWhenNoCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serialize: %v", err)
 	}
-	_, _, _, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(b)
+	// Strip the ASAPv1 envelope before feeding into the low-level unmarshal.
+	kindID2, wrapPayload2, err := asapmsgpack.DecodeWrapper(b)
+	if err != nil {
+		t.Fatalf("DecodeWrapper: %v", err)
+	}
+	if len(kindID2) != 1 || kindID2[0] != asapmsgpack.MagicCountMinSketchWithHeap {
+		t.Fatalf("expected kind_id [0x%02x], got %v", asapmsgpack.MagicCountMinSketchWithHeap, kindID2)
+	}
+	_, _, _, heap, _, err := asapmsgpack.UnmarshalCountSketchWithHeap(wrapPayload2)
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}

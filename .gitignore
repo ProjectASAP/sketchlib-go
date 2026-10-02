@@ -1,6 +1,9 @@
 testdata/caida
 caida_zip.zip
 
+# macOS metadata
+.DS_Store
+
 # Go build outputs
 bin/
 build/
