@@ -34,10 +34,8 @@ func TestDelta_FullEqualsDeltaAgainstEmpty(t *testing.T) {
 	}
 }
 
-// TestDelta_FractionalCellsLossless supersedes the old P0-2 rejection guard: a
-// fractional/weighted cell now rides the packed-float64 d_counts_float wire and
-// round-trips losslessly (see float_wire_test.go for the sampled-stream
-// end-to-end version).
+// TestDelta_FractionalCellsLossless checks that a fractional/weighted cell
+// survives ComputeDelta and ApplyDelta exactly.
 func TestDelta_FractionalCellsLossless(t *testing.T) {
 	cur := newCMS(t)
 	cur.Count[0][0] = 2.5 // fractional / weighted
@@ -46,16 +44,8 @@ func TestDelta_FractionalCellsLossless(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fractional delta must be accepted: %v", err)
 	}
-	payload, err := SerializeDelta(d)
-	if err != nil {
-		t.Fatalf("SerializeDelta: %v", err)
-	}
-	got, err := DeserializeDelta(payload)
-	if err != nil {
-		t.Fatalf("DeserializeDelta: %v", err)
-	}
 	recon := newCMS(t)
-	ApplyDelta(recon, got)
+	ApplyDelta(recon, d)
 	if recon.Count[0][0] != 2.5 {
 		t.Fatalf("fractional cell not lossless: got %v want 2.5", recon.Count[0][0])
 	}
@@ -122,38 +112,6 @@ func TestDelta_RoundTrip(t *testing.T) {
 	ApplyDelta(reconstructed, delta)
 
 	cmsEqual(t, "RoundTrip", current, reconstructed)
-}
-
-// TestDelta_Codec verifies the full bytes->Delta->ApplyDelta pipeline matches
-// a direct merge: serialize delta to bytes, deserialize, apply.
-func TestDelta_Codec(t *testing.T) {
-	snap := newCMS(t)
-	insert(snap, "x", 200)
-
-	current := newCMS(t)
-	insert(current, "x", 300)
-	insert(current, "y", 75)
-
-	delta, err := ComputeDelta(snap, current, 1.0)
-	if err != nil {
-		t.Fatalf("ComputeDelta: %v", err)
-	}
-	b, err := SerializeDelta(delta)
-	if err != nil {
-		t.Fatalf("SerializeDelta: %v", err)
-	}
-	decoded, err := DeserializeDelta(b)
-	if err != nil {
-		t.Fatalf("DeserializeDelta: %v", err)
-	}
-
-	reconstructed := newCMS(t)
-	if err := reconstructed.Merge(snap); err != nil {
-		t.Fatalf("Merge: %v", err)
-	}
-	ApplyDelta(reconstructed, decoded)
-
-	cmsEqual(t, "Codec", current, reconstructed)
 }
 
 // TestDelta_EmptyDelta checks that ComputeDelta on identical sketches
@@ -223,15 +181,7 @@ func TestDelta_MultipleWindows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("window %d ComputeDelta: %v", w, err)
 		}
-		b, err := SerializeDelta(delta)
-		if err != nil {
-			t.Fatalf("window %d SerializeDelta: %v", w, err)
-		}
-		decoded, err := DeserializeDelta(b)
-		if err != nil {
-			t.Fatalf("window %d DeserializeDelta: %v", w, err)
-		}
-		ApplyDelta(receiver, decoded)
+		ApplyDelta(receiver, delta)
 
 		// Advance snapshot to current sender state.
 		snap, _ = NewCountMinSketch(CM_ROW_NO, CM_COL_NO)

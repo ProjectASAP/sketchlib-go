@@ -24,14 +24,14 @@ const maxSampledRowsCMS = 64
 //     keeping every row's cell an unbiased estimate of the true +1-per-item
 //     frequency.
 //
-// Unlike WithSampleP (whole-item admission, RAW counts stored, consumer
-// rescales ×1/p at query via the stamped envelope probability), this path
+// Unlike WithSampleP (whole-item admission, RAW counts stored, estimates
+// rescaled ×1/p at query), this path
 // applies the 1/p weight IN-PLACE and takes an external sampler, leaving the
 // sketch's own s.sampler nil. That is required for per-row sampling: because a
 // different subset of rows is admitted per item, no single scalar rescale at the
-// consumer can recover the counts — the correction must be per-update. The wire
-// envelope therefore stays "exact" (wireSampleP()==0) and downstream does NOT
-// double-correct. A nil / full-rate (p>=1) sampler degenerates to InsertWithHash.
+// consumer can recover the counts — the correction must be per-update. The
+// sketch's own sampler stays nil, so it encodes as exact counts. A nil /
+// full-rate (p>=1) sampler degenerates to InsertWithHash.
 //
 // The sampler is any common.RowSampler — currently *common.GeometricSampler
 // (NitroSketch skip-sampling, stateful). Admission is decided exactly once,
@@ -47,6 +47,7 @@ func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler common
 	if admittedRows == 0 {
 		return // no admitted row → touch nothing
 	}
+	s.noteRawHash()
 
 	// 2. Update admitted rows only, with the inverse-probability weight. The
 	// per-row column derivation mirrors InsertWithHash exactly (row r reads the
@@ -88,13 +89,13 @@ func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler common
 //
 // admittedRows == 0 is a no-op (the caller is expected to have already
 // dropped R(x)=∅ occurrences). p<=0 or p>=1 skips the rescale (weight =
-// value). Matches InsertWithHashSampledPerRow's "exact envelope, no
-// double-correct" contract: the weight is baked into the cell here, so
-// downstream must NOT also stamp/consume a wire sample_p for this sketch.
+// value). As with InsertWithHashSampledPerRow, the weight is baked into the
+// cell, so the stored counts are already unbiased.
 func (s *CountMinSketch) InsertWithHashAtRows(hash uint64, value float64, admittedRows uint64, p float64) {
 	if admittedRows == 0 || s.Rows > maxSampledRowsCMS {
 		return
 	}
+	s.noteRawHash()
 	w := value
 	if p > 0 && p < 1.0 {
 		w = value / p

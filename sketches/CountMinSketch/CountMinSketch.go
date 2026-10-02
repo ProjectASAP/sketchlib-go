@@ -9,8 +9,9 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
-// CountMinSketch with single-hash multi-row derivation.
-// Hashing MUST be done externally.
+// CountMinSketch with single-hash multi-row derivation. Methods taking a uint64
+// hash expect common.HashIt(0, key); they match Update only while
+// rows*(ceil_log2(cols)+1) <= 64, and a sketch they write outside that cannot be encoded.
 type CountMinSketch struct {
 	Rows int
 	Cols int
@@ -29,12 +30,27 @@ type CountMinSketch struct {
 	mask       uint64
 
 	// sampler implements optional NitroSketch geometric skip-sampling. When nil
-	// (the default) every update is admitted and the sketch is byte-identical to
-	// an unsampled one. When set with p<1, updates are admitted with probability
-	// p and the RAW sampled counts are stored; the consumer rescales ×1/p at
-	// query. The probability rides on the SketchEnvelope (see SerializePortable),
-	// never inside CountMinState, so downstream literal constructors are unaffected.
+	// (the default) every update is admitted. When set with p<1, updates are
+	// admitted with probability p and the RAW sampled counts are stored.
 	sampler *common.GeometricSampler
+
+	// rawHashWide: the dimensions fall outside the packed 64-bit hash layout.
+	rawHashWide bool
+	// foreignLayout: a uint64-hash write happened while rawHashWide.
+	foreignLayout bool
+	// sampled: an update went through sampler.
+	sampled bool
+}
+
+func rawHashWideFor(rows, cols int) bool {
+	return storage.HashModeForMatrix(rows, cols) != storage.MatrixHashPacked64
+}
+
+// noteRawHash records a write through a uint64-hash path.
+func (s *CountMinSketch) noteRawHash() {
+	if s.rawHashWide {
+		s.foreignLayout = true
+	}
 }
 
 func hashLayoutForCols(cols int) (uint, uint64) {
@@ -84,6 +100,7 @@ func (s *CountMinSketch) rehydrateStorage() error {
 	s.Sum = sumStore.As2D()
 	s.Sum2 = sum2Store.As2D()
 	s.bitsPerRow, s.mask = hashLayoutForCols(s.Cols)
+	s.rawHashWide = rawHashWideFor(s.Rows, s.Cols)
 	return nil
 }
 
@@ -120,17 +137,18 @@ func NewCountMinSketch(row, col int) (*CountMinSketch, error) {
 	bitsPerRow, mask := hashLayoutForCols(col)
 
 	return &CountMinSketch{
-		Rows:       row,
-		Cols:       col,
-		countStore: countStore,
-		sumStore:   sumStore,
-		sum2Store:  sum2Store,
-		Count:      countStore.As2D(),
-		Sum:        sumStore.As2D(),
-		Sum2:       sum2Store.As2D(),
-		L1:         make([]float64, row),
-		bitsPerRow: bitsPerRow,
-		mask:       mask,
+		Rows:        row,
+		Cols:        col,
+		countStore:  countStore,
+		sumStore:    sumStore,
+		sum2Store:   sum2Store,
+		Count:       countStore.As2D(),
+		Sum:         sumStore.As2D(),
+		Sum2:        sum2Store.As2D(),
+		L1:          make([]float64, row),
+		bitsPerRow:  bitsPerRow,
+		mask:        mask,
+		rawHashWide: rawHashWideFor(row, col),
 	}, nil
 }
 
@@ -145,11 +163,10 @@ func WithDimensions(rows, cols int) (*CountMinSketch, error) {
 }
 
 // WithSampleP enables NitroSketch geometric skip-sampling at probability p in
-// (0,1]. With p>=1 sampling is disabled (exact, the default) and the sketch is
-// byte-identical to an unsampled one. The seed makes the admitted subset
-// reproducible. Counter writes are cut to ~p× per item; the RAW sampled counts
-// are stored and the probability is stamped on the SketchEnvelope so the
-// consumer rescales frequency estimates ×1/p at query time.
+// (0,1]. With p>=1 sampling is disabled (exact, the default). The seed makes
+// the admitted subset reproducible. Counter writes are cut to ~p× per item; the
+// RAW sampled counts are stored, so frequency estimates scale by 1/p.
+// MarshalASAPv1 rejects a sampled sketch.
 //
 // Returns the receiver for fluent construction:
 //
@@ -173,24 +190,13 @@ func (s *CountMinSketch) SampleP() float64 {
 	return s.sampler.P()
 }
 
-// wireSampleP returns the value to stamp on the SketchEnvelope.sample_p field.
-// When sampling is disabled it returns 0.0 (the proto3 default) so the encoded
-// envelope is BYTE-IDENTICAL to the pre-sampling format — proto3 omits
-// default-valued scalars, and the consumer's dual-read treats an unset/0.0
-// sample_p as 1.0. A sampled sketch (p<1) emits its actual probability.
-func (s *CountMinSketch) wireSampleP() float64 {
-	if s.sampler == nil {
-		return 0.0
-	}
-	return s.sampler.P()
-}
-
 // admit reports whether the next update should be applied. Always true when no
 // sampler is configured (exact, no RNG cost).
 func (s *CountMinSketch) admit() bool {
 	if s.sampler == nil {
 		return true
 	}
+	s.sampled = true
 	return s.sampler.Admit()
 }
 
@@ -221,6 +227,7 @@ func (s *CountMinSketch) InsertWithHash(hash uint64) {
 	if !s.admit() {
 		return
 	}
+	s.noteRawHash()
 	shift := uint(0)
 	for r := 0; r < s.Rows; r++ {
 		c := int((hash >> shift) & s.mask)
@@ -342,6 +349,7 @@ func (s *CountMinSketch) InsertWithHashGOS(hash uint64, many float64, threshold 
 		s.insertHashRaw(hash, many)
 		return nil
 	}
+	s.noteRawHash()
 	var dirty []GOSCellUpdate
 	shift := uint(0)
 	for r := 0; r < s.Rows; r++ {
@@ -376,6 +384,7 @@ func (s *CountMinSketch) InsertWithHashGOS(hash uint64, many float64, threshold 
 // factored out of FastInsertWeightWithHashValue so InsertWithHashGOS's
 // threshold<=0 fast path shares it instead of duplicating the loop body.
 func (s *CountMinSketch) insertHashRaw(hash uint64, many float64) {
+	s.noteRawHash()
 	shift := uint(0)
 	for r := 0; r < s.Rows; r++ {
 		c := int((hash >> shift) & s.mask)
@@ -540,6 +549,7 @@ func (s *CountMinSketch) Reset() {
 		clear(s.Sum2[i])
 	}
 	clear(s.L1)
+	s.foreignLayout, s.sampled = false, false
 }
 
 func (s *CountMinSketch) TypeName() string {
@@ -556,6 +566,8 @@ func (s *CountMinSketch) Merge(other common.Sketch) error {
 	if s.Rows != o.Rows || s.Cols != o.Cols {
 		return errors.New("cannot merge: dimension mismatch")
 	}
+	s.foreignLayout = s.foreignLayout || o.foreignLayout
+	s.sampled = s.sampled || o.sampled || o.sampler != nil
 
 	for r := 0; r < s.Rows; r++ {
 		s.L1[r] += o.L1[r]
@@ -584,8 +596,10 @@ func (s *CountMinSketch) Merge(other common.Sketch) error {
 // whole-stream statistics that are irrelevant to the per-cell OctoSketch loop.
 
 // ColForRow derives the column index for row r from input's pre-computed hash,
-// using the same bit-slicing as InsertWithHash. Pure: same input → same col.
+// using the same bit-slicing as InsertWithHash. Same input → same col; it
+// counts as a uint64-hash write, since the caller writes that column.
 func (s *CountMinSketch) ColForRow(input *common.SketchInput, row int) int {
+	s.noteRawHash()
 	return s.deriveIndex(input.Hash, row)
 }
 
@@ -636,6 +650,7 @@ func (s *CountMinSketch) ProcessInput(input *common.SketchInput, tau float64, em
 	if input == nil {
 		return
 	}
+	s.noteRawHash()
 	hash := input.Hash
 	shift := uint(0)
 	for row := 0; row < s.Rows; row++ {
@@ -670,12 +685,14 @@ func (s *CountMinSketch) BuildDelta(row, col int, input *common.SketchInput) com
 func (s *CountMinSketch) ResetCell(row, col int) { s.SetCell(row, col, 0) }
 
 // MergeDelta adds delta.Value to the global counter at (delta.Row, delta.Col).
-// Out-of-bounds indices are silently dropped.
+// Out-of-bounds indices are silently dropped. The cell comes from a worker's
+// uint64-hash path, so it counts as one.
 func (s *CountMinSketch) MergeDelta(delta common.DeltaUpdate) {
 	if delta.Row < 0 || delta.Row >= s.Rows ||
 		delta.Col < 0 || delta.Col >= s.Cols {
 		return
 	}
+	s.noteRawHash()
 	s.IncrCell(delta.Row, delta.Col, delta.Value)
 }
 

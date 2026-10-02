@@ -1,6 +1,6 @@
 # Cross-Language Integration Test
 
-Verifies that all nine sketch types serialise correctly from **sketchlib-go** (Go producer)
+Verifies that eight sketch types serialise correctly from **sketchlib-go** (Go producer)
 and deserialise correctly in **sketchlib-rust** (Rust consumer) using the shared
 protobuf wire format defined in `proto/sketchlib.proto`.
 
@@ -8,7 +8,6 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 
 | File | Sketch type | Query checked |
 |------|-------------|---------------|
-| `countmin.pb` | CountMin (3 × 512, float64) | `freq("item:42") ≥ 101` |
 | `kll.pb` | KLL quantile sketch (k=200) | `p50 ≈ 5000`, `p99 ≈ 9900` |
 | `ddsketch.pb` | DDSketch (alpha=0.01) | `p50 ≈ 5000`, `p99 ≈ 9900` |
 | `hll.pb` | HyperLogLog (DataFusion, p=14) | `cardinality ≈ 50 000` |
@@ -24,7 +23,7 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 sketchlib-go/
   tests/cross_language/
     run_test.sh          ← orchestrates both phases
-    producer_test.go     ← Go test that writes the 9 .pb files (no binary)
+    producer_test.go     ← Go test that writes the 8 .pb files (no binary)
     README.md            ← this file
 
 sketchlib-rust/
@@ -87,7 +86,6 @@ XTEST_DIR=/tmp/mytest cargo test --test xtest_consumer -- --nocapture
 ```
 Go producer (go test)            proto wire format           Rust consumer (cargo test)
 ──────────────────────────────────────────────────────────────────────────────────────
-CountMinSketch.SerializePortable()  →  countmin.pb  →  decode + min-freq query
 KLL.SerializePortable()             →  kll.pb       →  decode + quantile query
 DDSketch.SerializePortable()        →  ddsketch.pb  →  decode + quantile query
 HyperLogLog.SerializePortable()     →  hll.pb       →  decode + DataFusion estimate
