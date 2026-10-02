@@ -32,10 +32,8 @@ func TestCSDelta_FullEqualsDeltaAgainstEmpty(t *testing.T) {
 	}
 }
 
-// TestCSDelta_FractionalCellsLossless supersedes the old P0-2 rejection guard:
-// a fractional/weighted cell now rides the packed-float64 d_counts_float wire
-// and round-trips losslessly (see float_wire_test.go for the sampled-stream
-// end-to-end version).
+// TestCSDelta_FractionalCellsLossless checks a fractional, signed cell delta
+// applies exactly.
 func TestCSDelta_FractionalCellsLossless(t *testing.T) {
 	cur := newCS(t)
 	cur.Count[0][0] = -2.25 // fractional, signed
@@ -44,16 +42,8 @@ func TestCSDelta_FractionalCellsLossless(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fractional delta must be accepted: %v", err)
 	}
-	payload, err := SerializeDelta(d)
-	if err != nil {
-		t.Fatalf("SerializeDelta: %v", err)
-	}
-	got, err := DeserializeDelta(payload)
-	if err != nil {
-		t.Fatalf("DeserializeDelta: %v", err)
-	}
 	recon := newCS(t)
-	ApplyDelta(recon, got)
+	ApplyDelta(recon, d)
 	if recon.Count[0][0] != -2.25 {
 		t.Fatalf("fractional cell not lossless: got %v want -2.25", recon.Count[0][0])
 	}
@@ -165,37 +155,6 @@ func TestCSDelta_RoundTrip(t *testing.T) {
 	csEqual(t, "RoundTrip", current, reconstructed)
 }
 
-// TestCSDelta_Codec verifies the full bytes->Delta->ApplyDelta pipeline.
-func TestCSDelta_Codec(t *testing.T) {
-	snap := newCS(t)
-	csInsert(snap, "x", 200)
-
-	current := newCS(t)
-	csInsert(current, "x", 300)
-	csInsert(current, "y", 75)
-
-	delta, err := ComputeDelta(snap, current, 1.0)
-	if err != nil {
-		t.Fatalf("ComputeDelta: %v", err)
-	}
-	b, err := SerializeDelta(delta)
-	if err != nil {
-		t.Fatalf("SerializeDelta: %v", err)
-	}
-	decoded, err := DeserializeDelta(b)
-	if err != nil {
-		t.Fatalf("DeserializeDelta: %v", err)
-	}
-
-	reconstructed := newCS(t)
-	if err := reconstructed.Merge(snap); err != nil {
-		t.Fatalf("Merge: %v", err)
-	}
-	ApplyDelta(reconstructed, decoded)
-
-	csEqual(t, "Codec", current, reconstructed)
-}
-
 // TestCSDelta_EmptyDelta checks that identical sketches produce zero cells.
 func TestCSDelta_EmptyDelta(t *testing.T) {
 	s := newCS(t)
@@ -234,14 +193,11 @@ func TestCSDelta_LinearityProperty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ComputeDelta: %v", err)
 	}
-	b, _ := SerializeDelta(delta)
-	decoded, _ := DeserializeDelta(b)
-
 	recv := newCS(t)
 	if err := recv.Merge(snap); err != nil {
 		t.Fatalf("Merge recv: %v", err)
 	}
-	ApplyDelta(recv, decoded)
+	ApplyDelta(recv, delta)
 
 	csEqual(t, "LinearityProperty", current, recv)
 }
@@ -260,9 +216,7 @@ func TestCSDelta_MultipleWindows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("window %d: %v", w, err)
 		}
-		b, _ := SerializeDelta(delta)
-		decoded, _ := DeserializeDelta(b)
-		ApplyDelta(receiver, decoded)
+		ApplyDelta(receiver, delta)
 
 		snap = newCS(t)
 		if err := snap.Merge(sender); err != nil {

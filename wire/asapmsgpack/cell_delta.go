@@ -9,14 +9,10 @@ import "fmt"
 //
 // byte-identical to Rust
 // `rmp_serde::to_vec(&(u64, u64, Vec<u32>, Vec<u32>, Vec<i64>))` (compact
-// mode). This is the shared shape emitted by asap_sketchlib's
-// `CountMinSketch` / `CountSketch` `compute_delta_msgpack` — signed integer
-// cell deltas (rmp_serde encodes non-negative `i64` in the compact unsigned
-// form, so a delta of all-positive cells is byte-identical to a `u64` one).
-//
-// NOTE: this is distinct from `count_sketch_delta_sparse.go`, whose vals are
-// `[]float64` — that file serves the geometric-F2 `C_ref` reference-matrix
-// broadcast, a separate data flow.
+// mode). This is the shape emitted by asap_sketchlib's `CountMinSketch`
+// `compute_delta_msgpack` — signed integer cell deltas (rmp_serde encodes
+// non-negative `i64` in the compact unsigned form, so a delta of all-positive
+// cells is byte-identical to a `u64` one).
 func marshalCellDeltaInt64(rows, cols uint64, rowIdx, colIdx []uint32, dCount []int64) ([]byte, error) {
 	if len(rowIdx) != len(colIdx) || len(rowIdx) != len(dCount) {
 		return nil, fmt.Errorf("asapmsgpack: cell delta arrays length mismatch (%d/%d/%d)",

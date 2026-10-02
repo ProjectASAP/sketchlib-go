@@ -27,49 +27,6 @@ func mustHex(t *testing.T, s string) []byte {
 	return b
 }
 
-// ─── CountSketch ─────────────────────────────────────────────────────
-
-func TestCountSketchMatchesRustGolden(t *testing.T) {
-	// Rust:
-	//   CountSketch::from_legacy_matrix(
-	//     vec![vec![1.0, -2.0], vec![3.0, -4.0]], 2, 2
-	//   ).serialize_msgpack()
-	golden := mustHex(t,
-		"9302029292cb3ff0000000000000cbc00000000000000092cb4008000000000000cbc010000000000000")
-
-	got, err := MarshalCountSketch(2, 2, [][]float64{
-		{1.0, -2.0},
-		{3.0, -4.0},
-	})
-	if err != nil {
-		t.Fatalf("MarshalCountSketch: %v", err)
-	}
-	if !reflect.DeepEqual(got, golden) {
-		t.Fatalf(
-			"CountSketch wire mismatch\n  got    %x\n  golden %x",
-			got, golden)
-	}
-
-	rows, cols, matrix, err := UnmarshalCountSketch(got)
-	if err != nil {
-		t.Fatalf("UnmarshalCountSketch: %v", err)
-	}
-	if rows != 2 || cols != 2 {
-		t.Errorf("dims: got %dx%d, want 2x2", rows, cols)
-	}
-	want := [][]float64{{1.0, -2.0}, {3.0, -4.0}}
-	if !reflect.DeepEqual(matrix, want) {
-		t.Errorf("matrix mismatch: got %v, want %v", matrix, want)
-	}
-}
-
-func TestCountSketchRejectsRaggedMatrix(t *testing.T) {
-	_, err := MarshalCountSketch(2, 3, [][]float64{{1, 2, 3}, {4, 5}})
-	if err == nil {
-		t.Fatal("expected error for ragged matrix, got nil")
-	}
-}
-
 // ─── DDSketch ────────────────────────────────────────────────────────
 
 func TestDDSketchMatchesRustGolden(t *testing.T) {
@@ -185,8 +142,8 @@ func TestCountMinSketchMatchesRustGolden(t *testing.T) {
 	//   let cms = CountMinSketch::new(2, 3);
 	//   cms.serialize_msgpack()
 	//
-	// Empty 2x3 matrix (zeros). Note the field order differs from
-	// CountSketch: matrix first, then row_num, then col_num.
+	// Empty 2x3 matrix (zeros). Field order: matrix first, then row_num,
+	// then col_num.
 	golden := mustHex(t,
 		"939293cb0000000000000000cb0000000000000000cb000000000000000093cb0000000000000000cb0000000000000000cb00000000000000000203")
 

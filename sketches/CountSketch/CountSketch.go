@@ -27,9 +27,31 @@ const (
 	RustDefaultCols = 4096
 )
 
+// CounterType is the element type the counters hold. Storage is float64 for
+// every type; an integer type keeps each cell an integer within its range.
+type CounterType uint8
+
+const (
+	CounterFloat64 CounterType = iota
+	CounterInt32
+	CounterInt64
+)
+
+// Mode is the key-to-column and sign derivation. Update, UpdateWeight and
+// Estimate follow it; every other insert and query method derives the fast way.
+type Mode uint8
+
+const (
+	ModeFast Mode = iota
+	ModeRegular
+)
+
 type CountSketch struct {
 	Rows int
 	Cols int
+
+	CounterType CounterType
+	Mode        Mode
 
 	countStore *storage.FlatVector2D
 
@@ -193,6 +215,10 @@ func (s *CountSketch) Update(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
+	if s.Mode == ModeRegular {
+		s.insertRegular(input.Bytes, 1)
+		return
+	}
 	s.insertWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
 }
 
@@ -203,7 +229,33 @@ func (s *CountSketch) UpdateWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
+	if s.Mode == ModeRegular {
+		s.insertRegular(input.Bytes, many)
+		return
+	}
 	s.insertWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), many)
+}
+
+// regularPosAndSign derives row's column from the low 32 bits of the row's
+// own seeded hash and its sign from bit 63.
+func (s *CountSketch) regularPosAndSign(key []byte, row int) (int, float64) {
+	h := common.HashIt(row, key)
+	col := int((h & 0xffffffff) % uint64(s.Cols))
+	if h>>63 == 1 {
+		return col, 1
+	}
+	return col, -1
+}
+
+func (s *CountSketch) insertRegular(key []byte, value float64) {
+	for r := 0; r < s.Rows; r++ {
+		c, sign := s.regularPosAndSign(key, r)
+		row := s.Count[r]
+		prev := row[c]
+		curr := prev + sign*value
+		row[c] = curr
+		s.L2[r] += (curr * curr) - (prev * prev)
+	}
 }
 
 func (s *CountSketch) FastInsertWithHashValue(hash uint64) {
@@ -295,6 +347,14 @@ func (s *CountSketch) Estimate(input *common.SketchInput) float64 {
 	if input == nil {
 		return 0
 	}
+	if s.Mode == ModeRegular {
+		estimates := make([]float64, s.Rows)
+		for r := range estimates {
+			c, sign := s.regularPosAndSign(input.Bytes, r)
+			estimates[r] = s.Count[r][c] * sign
+		}
+		return common.ComputeMedianInlineF64(estimates)
+	}
 	return s.estimateWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols))
 }
 
@@ -351,6 +411,9 @@ func (s *CountSketch) Merge(other common.Sketch) error {
 	}
 	if s.Rows != o.Rows || s.Cols != o.Cols {
 		return errors.New("cannot merge: dimension mismatch")
+	}
+	if s.CounterType != o.CounterType || s.Mode != o.Mode {
+		return errors.New("cannot merge: counter type or mode mismatch")
 	}
 
 	// 1. Merge Matrix and L2

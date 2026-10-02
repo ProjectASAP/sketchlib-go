@@ -1,6 +1,6 @@
 // xtest_producer — Cross-language integration test: Go producer side.
 //
-// Inserts synthetic data into nine sketch types, serializes each as a portable
+// Inserts synthetic data into eight sketch types, serializes each as a portable
 // protobuf SketchEnvelope, and writes the binary files to $XTEST_DIR.
 //
 // Output files:
@@ -9,7 +9,6 @@
 //	kll.pb          KLLState          (quantile items + coin RNG)
 //	ddsketch.pb     DDSketchState     (alpha + bucket array)
 //	hll.pb          HyperLogLogState  (DataFusion estimator)
-//	countsketch.pb  CountSketchState  (float64 signed counters)
 //	coco.pb         CocoSketchState   (hash+val+hasKey buckets)
 //	elastic.pb      ElasticState      (heavy buckets + light CM)
 //	univmon.pb      UnivMonState      (layered CS + TopK heaps)
@@ -33,7 +32,6 @@ import (
 	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
 	cocosketch "github.com/ProjectASAP/sketchlib-go/sketches/CocoSketch"
 	countminsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
-	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
 	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/sketches/ElasticSKetch"
 	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
@@ -145,27 +143,6 @@ func TestXtestProducer(t *testing.T) {
 	t.Logf("[HLL/sparse] Step 3/3 — cardinality≈%d (expect ~500), sparse tag 7 populated",
 		hSparse.Estimate())
 	writeEnvelope(t, outDir, "hll_sparse.pb", sparseEnv)
-
-	// -----------------------------------------------------------------------
-	// CountSketch
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[CountSketch] Step 1/3 — Create sketch (3 rows × 512 cols)")
-	cs, err := countsketch.NewCountSketch(3, 512)
-	tcheck(t, "new countsketch", err)
-
-	t.Log("[CountSketch] Step 2/3 — Insert 10 000 items + 200 extra for 'cs:hot'")
-	for i := 0; i < 10_000; i++ {
-		cs.InsertWithHashAndValue(common.Hash64([]byte(fmt.Sprintf("cs:%d", i))), 1)
-	}
-	hotCSKey := []byte("cs:hot")
-	hotCSHash := common.Hash64(hotCSKey)
-	for i := 0; i < 200; i++ {
-		cs.InsertWithHashAndValue(hotCSHash, 1)
-	}
-	csEst, _ := cs.QueryWithHash(common.QueryFrequency, hotCSHash)
-	t.Logf("[CountSketch] Step 3/3 — 'cs:hot' est = %.0f (expect ≥ 200)", csEst)
-	writeEnvelope(t, outDir, "countsketch.pb", tmust(cs.SerializePortable()))
 
 	// -----------------------------------------------------------------------
 	// CocoSketch
@@ -291,7 +268,7 @@ func TestXtestProducer(t *testing.T) {
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 9 sketches + 2 sampled written to " + outDir)
+	t.Log("  Producer complete — 8 sketches + 2 sampled written to " + outDir)
 	t.Log("=======================================================")
 }
 

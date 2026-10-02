@@ -8,16 +8,13 @@ import (
 )
 
 // CellDelta holds the signed additive delta for a single (row, col) cell.
-// DValue is float64 so weighted/sampled (1/p) cells are carried losslessly;
-// the codec still emits the compact sint64 wire when every delta is integral
-// (see SerializeDelta).
+// DValue is float64 so weighted/sampled (1/p) cells are carried losslessly.
 type CellDelta struct {
 	Row, Col uint32
 	DValue   float64 // signed delta (fractional allowed)
 }
 
-// Delta is the native Go representation of a sparse CountSketch delta.
-// All fields are plain Go types; no proto dependency.
+// Delta is a sparse CountSketch delta.
 type Delta struct {
 	Rows, Cols uint32
 	Cells      []CellDelta // only cells where |ΔCount| ≥ threshold
@@ -41,8 +38,8 @@ func ComputeDelta(snapshot, current *CountSketch, threshold float64) (*Delta, er
 // (`thresholds[r][c]`) — the GOS anisotropic gate (design §7): each cell is
 // included when `|ΔCount| ≥ thresholds[r][c]`, so a gradient-weighted threshold
 // vector can send heavy/sensitive cells at a tighter threshold than light ones.
-// The wire format is identical to ComputeDelta (a sparse cell list), so
-// ApplyDelta and the backend are unchanged — only the cell selection differs.
+// The result is the same sparse cell list ComputeDelta returns; only the cell
+// selection differs.
 // A nil/short row falls back to threshold 0 (lossless) for missing cells.
 func ComputeDeltaPerCell(snapshot, current *CountSketch, thresholds [][]float64) (*Delta, error) {
 	return computeDelta(snapshot, current, func(r, c int) float64 {
@@ -81,8 +78,7 @@ func computeDelta(snapshot, current *CountSketch, thr func(r, c int) float64) (*
 				continue
 			}
 			// Fractional deltas (weighted / per-row 1/p sampled cells) are carried
-			// as-is; the codec picks the float wire (d_counts_float) when needed
-			// and keeps the compact sint64 wire when every delta is integral.
+			// as-is.
 			d.Cells = append(d.Cells, CellDelta{Row: uint32(r), Col: uint32(c), DValue: df})
 		}
 		d.L2[r] = current.L2[r] - snapshot.L2[r]

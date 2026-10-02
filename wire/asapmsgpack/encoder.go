@@ -13,7 +13,7 @@
 //     deserialized on the Rust side.
 //
 //   - The contract only covers four sketch types today (CountMin,
-//     CountSketch, DDSketch, HLL). Writing a 50-line encoder shim gives
+//     CountSketch with heap, DDSketch, HLL). Writing a 50-line encoder shim gives
 //     byte-exact control and drops a dependency.
 //
 // Wire-format reference for each supported sketch type lives alongside
