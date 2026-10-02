@@ -70,43 +70,6 @@ func TestCountSketchRejectsRaggedMatrix(t *testing.T) {
 	}
 }
 
-// ─── DDSketch ────────────────────────────────────────────────────────
-
-func TestDDSketchMatchesRustGolden(t *testing.T) {
-	// DataPoint-level metric scalars (count/sum/min/max) are no longer
-	// carried on the wire. The payload is now a 3-element array:
-	//   [ alpha, store_counts, store_offset ]
-	//
-	// Rust:
-	//   DdSketch::from_raw(0.01, vec![1, 2, 3], -2).serialize_msgpack()
-	golden := mustHex(t,
-		"93cb3f847ae147ae147b93010203fe")
-
-	state := DDSketchState{
-		Alpha:       0.01,
-		StoreCounts: []uint64{1, 2, 3},
-		StoreOffset: -2,
-	}
-	got, err := MarshalDDSketch(state)
-	if err != nil {
-		t.Fatalf("MarshalDDSketch: %v", err)
-	}
-	if !reflect.DeepEqual(got, golden) {
-		t.Fatalf(
-			"DDSketch wire mismatch\n  got    %x\n  golden %x",
-			got, golden)
-	}
-
-	decoded, err := UnmarshalDDSketch(got)
-	if err != nil {
-		t.Fatalf("UnmarshalDDSketch: %v", err)
-	}
-	if !reflect.DeepEqual(decoded, state) {
-		t.Errorf("round-trip mismatch\n  got  %+v\n  want %+v",
-			decoded, state)
-	}
-}
-
 // ─── HLLSketch ───────────────────────────────────────────────────────
 
 func TestHLLSketchRegularMatchesRustGolden(t *testing.T) {

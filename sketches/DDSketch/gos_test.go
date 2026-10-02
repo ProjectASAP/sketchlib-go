@@ -102,7 +102,7 @@ func TestUpdateGOS_PopulatedBucketsTracksFirstTouchOnly(t *testing.T) {
 // this mechanism depends on: even though the SOURCE sketch's buckets are
 // repeatedly zeroed in place as they cross threshold, applying every
 // DDSketchGOSUpdate ever reported onto a fresh TARGET sketch (as a +=
-// AddToBucket, mirroring ApplyDelta's per-bucket semantics), plus whatever
+// AddToBucket), plus whatever
 // residual is left un-crossed in source at the end (mirrors what a
 // window-boundary flush would drain), reconstructs the EXACT same
 // per-bucket distribution a never-reset REFERENCE sketch fed the identical
@@ -152,10 +152,9 @@ func TestUpdateGOS_TelescopingReconstruction(t *testing.T) {
 	// Quantiles must match within the relative-accuracy guarantee. Bucket
 	// counts are identical (checked above), but q=0/q=1 read min/max, and
 	// target's min/max come from AddToBucket's bucket-REPRESENTATIVE value
-	// (gamma^(k+0.5)) rather than reference's raw inserted value — the same
-	// bucket-edge discrepancy TestSerializeStateProtoBytes_QuantilesAfter-
-	// ScalarRemoval documents and tolerates via 2*alpha; every other quantile
-	// is derived purely from the (identical) bucket distribution.
+	// rather than reference's raw inserted value, so they are tolerated
+	// within 2*alpha; every other quantile is derived purely from the
+	// (identical) bucket distribution.
 	const tol = 2 * alpha
 	for _, q := range []float64{0.0, 0.25, 0.5, 0.9, 1.0} {
 		gotQ, gotOK := target.Quantile(q)

@@ -299,69 +299,6 @@ func (g *kllGrid) UnmarshalASAPv1(b []byte) error {
 	return nil
 }
 
-type ddState struct {
-	Counts         []uint64
-	Offset         int64
-	Sum, Min, Max  float64
-	Signed         bool
-	NegativeCounts []uint64
-	NegativeOffset int64
-	ZeroCount      uint64
-	Alpha          float64
-}
-
-func (s *ddState) MarshalASAPv1() ([]byte, error) {
-	version, fields := uint8(1), 5
-	if s.Signed {
-		version, fields = 2, 8
-	}
-	md := asapv1.NewMetadataWriter(version)
-	md.Float64("alpha", s.Alpha)
-	p := asapv1.NewEncoder()
-	p.Array(fields)
-	asapv1.EncodeUints(p, s.Counts)
-	p.Int(s.Offset)
-	p.Float64(s.Sum)
-	p.Float64(s.Min)
-	p.Float64(s.Max)
-	if s.Signed {
-		asapv1.EncodeUints(p, s.NegativeCounts)
-		p.Int(s.NegativeOffset)
-		p.Uint(s.ZeroCount)
-	}
-	return asapv1.Marshal(asapv1.KindDDSketch, md, p)
-}
-
-func (s *ddState) UnmarshalASAPv1(b []byte) error {
-	md, p, err := asapv1.Open(b, asapv1.KindDDSketch)
-	if err != nil {
-		return err
-	}
-	md.ExpectVersion(1, 2)
-	out := ddState{Signed: md.Version() == 2, Alpha: md.Float64("alpha")}
-	if err := md.Finish(); err != nil {
-		return err
-	}
-	if out.Signed {
-		p.ExpectArray(8)
-	} else {
-		p.ExpectArray(5)
-	}
-	out.Counts = asapv1.DecodeUints[uint64](p)
-	out.Offset = p.Int()
-	out.Sum, out.Min, out.Max = p.Float64(), p.Float64(), p.Float64()
-	if out.Signed {
-		out.NegativeCounts = asapv1.DecodeUints[uint64](p)
-		out.NegativeOffset = p.Int()
-		out.ZeroCount = p.Uint()
-	}
-	if err := p.Finish(); err != nil {
-		return err
-	}
-	*s = out
-	return nil
-}
-
 func p12Registers() []byte {
 	r := make([]byte, 4096)
 	r[0], r[1], r[100], r[4095] = 1, 7, 42, 3
@@ -408,16 +345,6 @@ func TestGoldenFixtures(t *testing.T) {
 	}
 	t.Run("kll_i64_k200", func(t *testing.T) { asapv1test.CheckGolden(t, "kll_i64_k200", kllFixture("i64"), nil) })
 	t.Run("kll_f64_k200", func(t *testing.T) { asapv1test.CheckGolden(t, "kll_f64_k200", kllFixture("f64"), nil) })
-	t.Run("ddsketch_positive_a001", func(t *testing.T) {
-		asapv1test.CheckGolden(t, "ddsketch_positive_a001", &ddState{Alpha: 0.01,
-			Counts: []uint64{1, 0, 127, 128, 300, 65536, 4294967296}, Offset: -40,
-			Sum: 2181071000.0, Min: 0.453125, Max: 0.5078125}, nil)
-	})
-	t.Run("ddsketch_signed_a001", func(t *testing.T) {
-		asapv1test.CheckGolden(t, "ddsketch_signed_a001", &ddState{Alpha: 0.01, Signed: true,
-			Counts: []uint64{3, 0, 2}, Offset: 310, Sum: 2523.90625, Min: -0.016, Max: 515.0,
-			NegativeCounts: []uint64{5, 1}, NegativeOffset: -208, ZeroCount: 7}, nil)
-	})
 }
 
 func TestNestedPayloads(t *testing.T) {

@@ -22,6 +22,7 @@ const (
 // ---------------- Index Mapping ----------------
 
 type IndexMapping struct {
+	alpha       float64
 	gamma       float64
 	invLogGamma float64
 }
@@ -34,6 +35,7 @@ func NewIndexMapping(alpha float64) IndexMapping {
 	gamma := (1 + alpha) / (1 - alpha)
 
 	return IndexMapping{
+		alpha:       alpha,
 		gamma:       gamma,
 		invLogGamma: 1 / math.Log(gamma),
 	}
@@ -43,26 +45,19 @@ func (m IndexMapping) Equals(other IndexMapping) bool {
 	return math.Abs(m.gamma-other.gamma) < 1e-15
 }
 
-// RelativeAccuracy recovers α from γ without a stored field:
-// γ=(1+α)/(1-α) ⇒ α = (γ-1)/(γ+1) = 1 - 2/(1+γ). Matches DataDog's
-// LogarithmicMapping.RelativeAccuracy().
+// RelativeAccuracy returns the α the mapping was built with.
 func (m IndexMapping) RelativeAccuracy() float64 {
-	return 1 - 2/(1+m.gamma)
+	return m.alpha
 }
 
 func (m IndexMapping) Index(v float64) int32 {
 	return int32(math.Floor(math.Log(v) * m.invLogGamma))
 }
 
-// Value returns the representative of bucket k. It is the bucket's LOWER bound
-// γ^k scaled by (1+α), matching DataDog's
-// logarithmic_mapping.go `Value = LowerBound(index) * (1 + RelativeAccuracy())`.
-// This choice makes the relative error EXACTLY α at both bucket edges — the
-// log-midpoint γ^(k+0.5) used previously gave edge error √γ−1 (≈ α + α²/2 > α),
-// silently violating the sketch's advertised α-accuracy guarantee near a
-// bucket edge (sketchlib-go#73 / asap_sketchlib#70 item 1).
+// Value returns the representative of bucket k: its lower bound γ^k scaled by
+// (1+α), so the relative error is exactly α at both bucket edges.
 func (m IndexMapping) Value(k int32) float64 {
-	return m.LowerBound(k) * (1 + m.RelativeAccuracy())
+	return m.LowerBound(k) * (1 + m.alpha)
 }
 
 // LowerBound returns the lower edge γ^k of bucket k.
@@ -274,10 +269,13 @@ func (b Buckets) Clone() Buckets {
 
 // ---------------- DDSketch ----------------
 
-// High-performance latency quantile sketch (v > 0 only)
+// DDSketch is a relative-accuracy quantile sketch. Update records positive
+// values; negative magnitudes and zeros are held when merged or decoded.
 type DDSketch struct {
-	mapping IndexMapping
-	store   Buckets
+	mapping   IndexMapping
+	store     Buckets
+	negative  Buckets
+	zeroCount uint64
 
 	count uint64
 	sum   float64
@@ -295,10 +293,9 @@ type DDSketch struct {
 	// and never mixes it with the plain insert path. See PopulatedBuckets.
 	gosPopulated uint32
 
-	// wireP is the EXTERNAL-sampling probability stamped on the wire envelope
-	// when admission is decided outside the sketch (SetWireSampleP); 0 = exact.
-	// Ignored while an internal sampler is installed (sampler.P() wins).
-	wireP float64
+	// reps caches bucket representatives for addOneFast, direct-mapped by
+	// absolute bucket index; allocated on first use.
+	reps *[repCacheSize]repEntry
 
 	// sampler implements optional NitroSketch geometric skip-sampling. When nil
 	// (the default) every value is recorded and the sketch is byte-identical to
@@ -308,8 +305,7 @@ type DDSketch struct {
 	// (the skip decision is value-independent, unlike a hash-determined filter).
 	// RAW sampled bucket counts are stored; quantiles are rank-preserving and
 	// need no rescale, while a total-count query rescales ×1/p. The probability
-	// rides on the SketchEnvelope (see SerializePortable), never inside
-	// DDSketchState, so downstream literal constructors are unaffected.
+	// is not serialized.
 	sampler *common.GeometricSampler
 }
 
@@ -323,30 +319,6 @@ func (d *DDSketch) WithSampleP(p float64, seed int64) *DDSketch {
 	}
 	d.sampler = common.NewGeometricSampler(p, seed)
 	return d
-}
-
-// SetWireSampleP stamps a sampling probability on the wire envelope WITHOUT
-// installing an internal sampler. Used when admission is decided EXTERNALLY
-// (e.g. consistent per-item sampling at the collector wrapper or the wire
-// filter, design §3.1.1): the sketch stores the raw admitted counts, the
-// external stage owns the drop decision, and the consumer still learns p for
-// its ×1/p rescale. p >= 1 or <= 0 clears the override (exact).
-func (d *DDSketch) SetWireSampleP(p float64) {
-	if p >= 1.0 || p <= 0 || math.IsNaN(p) {
-		d.wireP = 0
-		return
-	}
-	d.wireP = p
-}
-
-// wireSampleP returns the sampling probability to stamp on the envelope (0.0
-// when unsampled = exact). An internal sampler wins; otherwise the external
-// SetWireSampleP override applies.
-func (d *DDSketch) wireSampleP() float64 {
-	if d.sampler == nil {
-		return d.wireP
-	}
-	return d.sampler.P()
 }
 
 // admit reports whether the next value should be recorded. Always true when no
@@ -379,11 +351,8 @@ func New(alpha float64) *DDSketch {
 // force (sketchlib-go#72). Opt-in — plain NewDDSketch/New stay unbounded
 // (maxBins=0), matching today's behavior exactly. maxBins must be positive.
 //
-// The cap is a purely LOCAL, in-memory bound: it is not carried on the
-// wire (SerializePortable/SerializeToBytes emit exactly the buckets
-// present, capped or not) and a decoded/reconstructed sketch
-// (NewFromState, DeserializeDDSketchFromBytes) is always unbounded — only
-// the live, actively-inserted-into edge sketch needs the cap.
+// The cap is a local, in-memory bound: MarshalASAPv1 emits the buckets
+// present, capped or not, and UnmarshalASAPv1 returns an unbounded sketch.
 func NewDDSketchWithMaxBins(alpha float64, maxBins int32) *DDSketch {
 	if maxBins <= 0 {
 		panic("maxBins must be positive")
@@ -399,16 +368,16 @@ func NewDDSketchWithMaxBins(alpha float64, maxBins int32) *DDSketch {
 // Clear resets the sketch to empty IN PLACE, preserving the bucket
 // store's backing-array capacity so a sketch reused across windows
 // (e.g. via an object pool) avoids re-allocating + re-growing its
-// store. The store length is dropped to 0 — so a subsequent
-// SerializePortable emits only the buckets populated in the NEW window
-// rather than stale zeros left by a prior series (which would bloat the
-// wire payload) — while the capacity is retained for the addOne/ensure
-// fast path. The index mapping (alpha) is unchanged.
+// store. The store length is dropped to 0, so a subsequent MarshalASAPv1
+// emits only the buckets populated in the new window, while the capacity
+// is retained for the addOne/ensure fast path. The index mapping is unchanged.
 func (d *DDSketch) Clear() {
 	if d.store.counts != nil {
 		d.store.counts.Clear() // len -> 0, capacity retained
 	}
 	d.store.offset = 0
+	d.negative = Buckets{}
+	d.zeroCount = 0
 	d.count = 0
 	d.sum = 0
 	d.min = math.Inf(1)
@@ -446,7 +415,7 @@ func (d *DDSketch) Update(v float64) {
 	}
 
 	d.count++
-	d.sum += v
+	d.addToSum(v)
 
 	if v < d.min {
 		d.min = v
@@ -457,6 +426,24 @@ func (d *DDSketch) Update(v float64) {
 
 	k := d.mapping.Index(v)
 	d.store.addOne(k)
+}
+
+// addToSum advances sum, saturating at ±math.MaxFloat64 instead of overflowing.
+func (d *DDSketch) addToSum(delta float64) {
+	next := d.sum + delta
+	if math.IsInf(next, 0) {
+		next = math.Copysign(math.MaxFloat64, next)
+	}
+	d.sum = next
+}
+
+// resetScalarsIfEmpty restores the empty sum/min/max once the count reaches 0.
+func (d *DDSketch) resetScalarsIfEmpty() {
+	if d.count == 0 {
+		d.sum = 0
+		d.min = math.Inf(1)
+		d.max = math.Inf(-1)
+	}
 }
 
 // InsertWithHash implements common.Sketch.
@@ -519,13 +506,15 @@ func (d *DDSketch) Merge(other common.Sketch) error {
 		d.min = o.min
 		d.max = o.max
 		d.store = o.store.Clone()
+		d.negative = o.negative.Clone()
+		d.zeroCount = o.zeroCount
 		d.gosPopulated = o.gosPopulated
 		// Mapping is already equal
 		return nil
 	}
 
 	d.count += o.count
-	d.sum += o.sum
+	d.addToSum(o.sum)
 
 	if o.min < d.min {
 		d.min = o.min
@@ -535,6 +524,8 @@ func (d *DDSketch) Merge(other common.Sketch) error {
 	}
 
 	d.mergeBuckets(&d.store, &o.store)
+	d.mergeBuckets(&d.negative, &o.negative)
+	d.zeroCount += o.zeroCount
 	// Merge is not the per-insert hot path (already O(merged span) via
 	// mergeBuckets above), so recompute gosPopulated exactly by scanning the
 	// merged result rather than trying to reconcile the two operands'
@@ -596,67 +587,53 @@ func (d *DDSketch) mergeBuckets(a *Buckets, b *Buckets) {
 
 // ---------------- Quantile ----------------
 
-// Quantile returns the value at quantile q (0 <= q <= 1). Mirrors Rust's
-// `quantile` (sketches/ddsketch.rs) in the unified API.
-//
-// The top-of-walk fallback is derived from the highest non-empty bucket's
-// representative value rather than a stored `max` scalar (which is no longer
-// carried on the wire). The result stays within the relative-accuracy
-// guarantee because a bucket's representative value is within alpha of every
-// value mapped into it.
+// Quantile returns the value at quantile q in [0, 1], walking negative buckets
+// in descending index order, then zeros, then positive buckets ascending. Bucket
+// values are capped to [min, max]; q == 0 returns min and q == 1 returns max.
 func (d *DDSketch) Quantile(q float64) (float64, bool) {
 	if d.count == 0 || q < 0 || q > 1 {
 		return 0, false
 	}
-
 	if q == 0 {
 		return d.min, true
 	}
-
-	if d.store.counts == nil {
+	if q == 1 {
 		return d.max, true
 	}
 
 	rank := uint64(math.Ceil(q * float64(d.count)))
-
-	counts := d.store.counts.AsSlice()
-
-	// Highest non-empty bucket's representative value: the top of the walk
-	// and the q==1 answer, both bounded by relative accuracy.
-	topVal := d.max
-	for i := len(counts) - 1; i >= 0; i-- {
-		if counts[i] != 0 {
-			topVal = d.mapping.Value(d.store.offset + int32(i))
-			break
-		}
-	}
-
-	if q == 1 {
-		return topVal, true
-	}
+	clamp := func(v float64) float64 { return math.Min(math.Max(v, d.min), d.max) }
 
 	var seen uint64
-	for i, c := range counts {
-		if c == 0 {
-			continue
-		}
-		seen += c
-		if seen >= rank {
-			k := d.store.offset + int32(i)
-			v := d.mapping.Value(k)
-
-			// clamp for safety
-			if v < d.min {
-				v = d.min
+	if !d.negative.IsEmpty() {
+		neg := d.negative.counts.AsSlice()
+		for i := len(neg) - 1; i >= 0; i-- {
+			if neg[i] == 0 {
+				continue
 			}
-			if v > topVal {
-				v = topVal
+			seen += neg[i]
+			if seen >= rank {
+				return clamp(-d.mapping.Value(d.negative.offset + int32(i))), true
 			}
-			return v, true
 		}
 	}
+	seen += d.zeroCount
+	if seen >= rank {
+		return 0, true
+	}
 
-	return topVal, true
+	if !d.store.IsEmpty() {
+		for i, c := range d.store.counts.AsSlice() {
+			if c == 0 {
+				continue
+			}
+			seen += c
+			if seen >= rank {
+				return clamp(d.mapping.Value(d.store.offset + int32(i))), true
+			}
+		}
+	}
+	return d.max, true
 }
 
 // QueryWithHash implements common.Sketch.
@@ -685,6 +662,8 @@ func (d *DDSketch) Clone() *DDSketch {
 	return &DDSketch{
 		mapping:      d.mapping,
 		store:        d.store.Clone(),
+		negative:     d.negative.Clone(),
+		zeroCount:    d.zeroCount,
 		count:        d.count,
 		sum:          d.sum,
 		min:          d.min,
@@ -750,7 +729,8 @@ func (d *DDSketch) addOneGOS(k int32) (newCount uint64, firstTouch bool) {
 // adjusted to match — the local edge-side copy now reflects "accumulated
 // since this bucket was last sent", exactly like Update's running d.count
 // already does across resets) and the crossing is reported via
-// DDSketchGOSUpdate. threshold==0 disables the check entirely and behaves
+// DDSketchGOSUpdate; sum/min/max return to their empty values when the count
+// reaches 0. threshold==0 disables the check entirely and behaves
 // exactly like Update (no gosPopulated bookkeeping either — mirrors
 // CountSketch.UpdateStringGOS's threshold<=0 escape hatch), so callers can
 // toggle GOS mode without a second insert path.
@@ -769,7 +749,7 @@ func (d *DDSketch) UpdateGOS(v float64, threshold uint64) (crossed bool, update 
 		return false, DDSketchGOSUpdate{}
 	}
 
-	d.sum += v
+	d.addToSum(v)
 	if v < d.min {
 		d.min = v
 	}
@@ -802,6 +782,7 @@ func (d *DDSketch) UpdateGOS(v float64, threshold uint64) (crossed bool, update 
 	} else {
 		d.count = 0
 	}
+	d.resetScalarsIfEmpty()
 	d.gosPopulated--
 	return true, DDSketchGOSUpdate{Index: k, Count: newCount}
 }
@@ -838,8 +819,9 @@ func (d *DDSketch) BucketCount(k int32) uint64 {
 	return counts[idx]
 }
 
-// AddToBucket increments bucket k's count by delta, adjusts d.count, updates
-// d.min/d.max, and returns the new bucket count. Grows the bucket store if k
+// AddToBucket increments bucket k's count by delta, adjusts d.count, advances
+// d.sum by the bucket representative times delta, updates d.min/d.max, and
+// returns the new bucket count. Grows the bucket store if k
 // is outside the current range (or, when the store is maxBins-capped,
 // collapses the lowest bins — in which case k's delta lands in the
 // collapsed floor bucket, not a bucket of its own).
@@ -855,6 +837,7 @@ func (d *DDSketch) AddToBucket(k int32, delta uint64) uint64 {
 	// the collapsed floor bucket, not k's own), so min/max stay consistent
 	// with what Quantile() can resolve post-collapse.
 	rep := d.mapping.Value(d.store.offset + int32(idx))
+	d.addToSum(rep * float64(delta))
 	if rep < d.min {
 		d.min = rep
 	}
@@ -862,6 +845,33 @@ func (d *DDSketch) AddToBucket(k int32, delta uint64) uint64 {
 		d.max = rep
 	}
 	return counts[idx]
+}
+
+const repCacheSize = 256
+
+// repEntry is one representative cache slot; v == 0 means empty.
+type repEntry struct {
+	k int32
+	v float64
+}
+
+// cachedValue returns d.mapping.Value(k) through the reps cache.
+func (d *DDSketch) cachedValue(k int32) float64 {
+	if d.reps != nil {
+		if e := &d.reps[uint32(k)%repCacheSize]; e.k == k && e.v != 0 {
+			return e.v
+		}
+	}
+	return d.fillValue(k)
+}
+
+func (d *DDSketch) fillValue(k int32) float64 {
+	if d.reps == nil {
+		d.reps = new([repCacheSize]repEntry)
+	}
+	v := d.mapping.Value(k)
+	d.reps[uint32(k)%repCacheSize] = repEntry{k: k, v: v}
+	return v
 }
 
 // addOneFast is the hot-path variant of AddToBucket(k, 1).
@@ -876,9 +886,10 @@ func (d *DDSketch) addOneFast(k int32) uint64 {
 			prev := counts[idx]
 			counts[idx]++
 			d.count++
+			rep := d.cachedValue(k)
+			d.addToSum(rep)
 			if prev == 0 {
 				// First write to this bucket: initialise min/max from representative.
-				rep := d.mapping.Value(k)
 				if rep < d.min {
 					d.min = rep
 				}
@@ -892,8 +903,9 @@ func (d *DDSketch) addOneFast(k int32) uint64 {
 	return d.AddToBucket(k, 1)
 }
 
-// ResetBucket zeroes bucket k and decrements d.count by the bucket's current count.
-// Used by DDSketchOcto.ResetCell to drain a worker-local bucket after emitting a delta.
+// ResetBucket zeroes bucket k and decrements d.count by the bucket's current count;
+// sum/min/max return to their empty values when the count reaches 0. Used by
+// DDSketchOcto.ResetCell to drain a worker-local bucket after emitting a delta.
 func (d *DDSketch) ResetBucket(k int32) {
 	if d.store.IsEmpty() {
 		return
@@ -913,23 +925,31 @@ func (d *DDSketch) ResetBucket(k int32) {
 	} else {
 		d.count = 0
 	}
+	d.resetScalarsIfEmpty()
 }
 
-// DrainBuckets calls f(k, count) for every non-zero bucket and then zeroes the
-// entire store (setting d.count = 0). Used by DDSketchOcto.Flush to ship all
-// worker-local sub-τ residuals to the aggregator at end-of-window.
+// DrainBuckets calls f(k, count) for every non-zero positive bucket, zeroes it and
+// subtracts it from d.count, resetting sum/min/max once the count reaches 0.
+// Used by DDSketchOcto.Flush to ship worker-local sub-τ residuals at end-of-window.
 func (d *DDSketch) DrainBuckets(f func(k int32, count uint64)) {
 	if d.store.IsEmpty() {
 		return
 	}
 	counts := d.store.counts.AsMutSlice()
+	var drained uint64
 	for i, c := range counts {
 		if c > 0 {
 			f(d.store.offset+int32(i), c)
 			counts[i] = 0
+			drained += c
 		}
 	}
-	d.count = 0
+	if d.count >= drained {
+		d.count -= drained
+	} else {
+		d.count = 0
+	}
+	d.resetScalarsIfEmpty()
 }
 
 // EachBucket calls f(k, count) for every non-zero bucket without modifying
@@ -1127,61 +1147,4 @@ func maxInt32(a, b int32) int32 {
 		return a
 	}
 	return b
-}
-
-type ddSketchSnapshot struct {
-	MappingGamma       float64
-	MappingInvLogGamma float64
-	StoreCounts        []uint64
-	StoreOffset        int32
-	Count              uint64
-	Sum                float64
-	Min                float64
-	Max                float64
-}
-
-// SerializeToBytes serializes DDSketch into bytes.
-func (d *DDSketch) SerializeToBytes() ([]byte, error) {
-	storeCounts := []uint64(nil)
-	if d.store.counts != nil {
-		storeCounts = append([]uint64(nil), d.store.counts.AsSlice()...)
-	}
-	return common.EncodeToBytes(ddSketchSnapshot{
-		MappingGamma:       d.mapping.gamma,
-		MappingInvLogGamma: d.mapping.invLogGamma,
-		StoreCounts:        storeCounts,
-		StoreOffset:        d.store.offset,
-		Count:              d.count,
-		Sum:                d.sum,
-		Min:                d.min,
-		Max:                d.max,
-	})
-}
-
-// DeserializeDDSketchFromBytes restores DDSketch from serialized bytes.
-func DeserializeDDSketchFromBytes(data []byte) (*DDSketch, error) {
-	var snap ddSketchSnapshot
-	if err := common.DecodeFromBytes(data, &snap); err != nil {
-		return nil, err
-	}
-	if snap.MappingGamma <= 1 || snap.MappingInvLogGamma <= 0 {
-		return nil, errors.New("invalid snapshot mapping")
-	}
-
-	store := Buckets{
-		counts: storage.Vector1DFromVec(snap.StoreCounts),
-		offset: snap.StoreOffset,
-	}
-	return &DDSketch{
-		mapping: IndexMapping{
-			gamma:       snap.MappingGamma,
-			invLogGamma: snap.MappingInvLogGamma,
-		},
-		store:        store,
-		count:        snap.Count,
-		sum:          snap.Sum,
-		min:          snap.Min,
-		max:          snap.Max,
-		gosPopulated: populatedBucketCount(&store),
-	}, nil
 }
