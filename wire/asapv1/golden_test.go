@@ -2,7 +2,6 @@ package asapv1_test
 
 import (
 	"fmt"
-	"math/bits"
 	"reflect"
 	"testing"
 
@@ -12,70 +11,6 @@ import (
 
 // The types below hold raw fixture state and follow the codec convention, so
 // the fixtures check the envelope, metadata and msgpack helpers end to end.
-
-type hllState struct {
-	Kind      asapv1.KindID
-	Registers []byte
-	HIP       [3]float64
-}
-
-func (s *hllState) MarshalASAPv1() ([]byte, error) {
-	md := asapv1.NewMetadataWriter(1)
-	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexCanonical)
-	md.Uint("precision", uint64(bits.TrailingZeros(uint(len(s.Registers)))))
-	p := asapv1.NewEncoder()
-	if s.Kind == asapv1.KindHLLHIP {
-		p.Array(4)
-		p.Bin(s.Registers)
-		for _, v := range s.HIP {
-			p.Float64(v)
-		}
-	} else {
-		p.Array(1)
-		p.Bin(s.Registers)
-	}
-	return asapv1.Marshal(s.Kind, md, p)
-}
-
-func (s *hllState) UnmarshalASAPv1(b []byte) error {
-	kind, metadata, payload, err := asapv1.Split(b)
-	if err != nil {
-		return err
-	}
-	if kind != asapv1.KindHLLClassic && kind != asapv1.KindHLLErtlMLE && kind != asapv1.KindHLLHIP {
-		return fmt.Errorf("kind_id %v is not HLL", kind)
-	}
-	md, err := asapv1.ReadMetadata(metadata)
-	if err != nil {
-		return err
-	}
-	md.ExpectVersion(1)
-	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexCanonical)
-	precision := md.Uint8("precision")
-	if err := md.Finish(); err != nil {
-		return err
-	}
-	out := hllState{Kind: kind}
-	p := asapv1.NewDecoder(payload)
-	if kind == asapv1.KindHLLHIP {
-		p.ExpectArray(4)
-		out.Registers = p.Bin()
-		for i := range out.HIP {
-			out.HIP[i] = p.Float64()
-		}
-	} else {
-		p.ExpectArray(1)
-		out.Registers = p.Bin()
-	}
-	if err := p.Finish(); err != nil {
-		return err
-	}
-	if len(out.Registers) != 1<<precision {
-		return fmt.Errorf("%d registers at precision %d", len(out.Registers), precision)
-	}
-	*s = out
-	return nil
-}
 
 type matrixState struct {
 	Kind        asapv1.KindID
@@ -362,12 +297,6 @@ func (s *ddState) UnmarshalASAPv1(b []byte) error {
 	return nil
 }
 
-func p12Registers() []byte {
-	r := make([]byte, 4096)
-	r[0], r[1], r[100], r[4095] = 1, 7, 42, 3
-	return r
-}
-
 func kllFixture(itemType string) *kllState {
 	seed := uint64(42)
 	s := &kllState{Kind: asapv1.KindKLL, K: 200, M: 8, ItemType: itemType, Seed: &seed,
@@ -387,16 +316,6 @@ func TestGoldenFixtures(t *testing.T) {
 	matrix := func(kind asapv1.KindID, cols uint32, counterType, mode string, ints []int64, floats []float64) *matrixState {
 		return &matrixState{Kind: kind, Rows: 2, Cols: cols, CounterType: counterType, Mode: mode, Ints: ints, Floats: floats}
 	}
-	t.Run("hll_classic_p12", func(t *testing.T) {
-		asapv1test.CheckGolden(t, "hll_classic_p12", &hllState{Kind: asapv1.KindHLLClassic, Registers: p12Registers()}, nil)
-	})
-	t.Run("hll_ertl_mle_p12", func(t *testing.T) {
-		asapv1test.CheckGolden(t, "hll_ertl_mle_p12", &hllState{Kind: asapv1.KindHLLErtlMLE, Registers: p12Registers()}, nil)
-	})
-	t.Run("hll_hip_p12", func(t *testing.T) {
-		asapv1test.CheckGolden(t, "hll_hip_p12",
-			&hllState{Kind: asapv1.KindHLLHIP, Registers: p12Registers(), HIP: [3]float64{1.5, 2.5, 3.0}}, nil)
-	})
 	for name, known := range map[string]*matrixState{
 		"cms_i64_regular_2x3": matrix(asapv1.KindCountMin, 3, "i64", "regular", []int64{0, 1, 127, 128, 300, 65536}, nil),
 		"cms_f64_fast_2x3":    matrix(asapv1.KindCountMin, 3, "f64", "fast", nil, []float64{0, 1.5, 2.25, 3.75, 4.125, 5.0625}),

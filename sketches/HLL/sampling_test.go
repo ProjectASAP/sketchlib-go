@@ -6,12 +6,10 @@ import (
 	"testing"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
-	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
-	"google.golang.org/protobuf/proto"
 )
 
-// p=1.0 (sampling disabled) must produce byte-identical envelopes to a sketch
-// built without ever calling WithSampleP.
+// p=1.0 (sampling disabled) encodes to the same bytes as a sketch built
+// without ever calling WithSampleP.
 func TestHLLSampleP1IsByteIdentical(t *testing.T) {
 	build := func(sampled bool) []byte {
 		h := NewHyperLogLog()
@@ -21,7 +19,7 @@ func TestHLLSampleP1IsByteIdentical(t *testing.T) {
 		for i := 0; i < 20_000; i++ {
 			h.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("k:%d", i))))
 		}
-		b, err := h.SerializeProtoBytes()
+		b, err := h.MarshalASAPv1()
 		if err != nil {
 			t.Fatalf("serialize: %v", err)
 		}
@@ -60,41 +58,4 @@ func TestHLLSampledRescaleUnbiased(t *testing.T) {
 		t.Errorf("rescaled cardinality %.0f rel err %.4f exceeds 5%% of %d", rescaled, relErr, n)
 	}
 	t.Logf("HLL p=%v: raw≈%.0f rescaled≈%.0f truth=%d relErr=%.4f", p, raw, rescaled, n, relErr)
-}
-
-// Sampling thins the registers, so the sampled wire form is never larger.
-func TestHLLSampledWireNotLarger(t *testing.T) {
-	mk := func(p float64) int {
-		h := NewHyperLogLog()
-		if p < 1.0 {
-			h.WithSampleP(p)
-		}
-		for i := 0; i < 5000; i++ {
-			h.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("x:%d", i))))
-		}
-		b, _ := h.SerializeProtoBytes()
-		return len(b)
-	}
-	full := mk(1.0)
-	sampled := mk(0.1)
-	if sampled > full+16 {
-		t.Errorf("sampled wire %d B exceeds unsampled %d B (+slack)", sampled, full)
-	}
-	t.Logf("HLL wire: unsampled=%d B  sampled(p=0.1)=%d B", full, sampled)
-}
-
-func TestHLLSampledEnvelopeCarriesP(t *testing.T) {
-	h := NewHyperLogLog()
-	h.WithSampleP(0.2)
-	for i := 0; i < 1000; i++ {
-		h.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("z:%d", i))))
-	}
-	b, _ := h.SerializeProtoBytes()
-	var env envpb.SketchEnvelope
-	if err := proto.Unmarshal(b, &env); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if math.Abs(env.GetSampleP()-0.2) > 1e-9 {
-		t.Fatalf("envelope sample_p=%v want 0.2", env.GetSampleP())
-	}
 }

@@ -20,11 +20,8 @@
 // accurate than the Ertl estimator in the low-cardinality regime and matches
 // HyperLogLog++ behaviour. The Ertl estimator is used once dense.
 //
-// The on-the-wire sparse format (sparse.go / portable.go) and its cross-language
-// parity with the Rust asap_sketchlib decoder are untouched: serialization
-// densifies the in-memory sparse entries into the same dense register array the
-// existing encoder already consumes, so the emitted proto is byte-identical to a
-// dense instance with the same registers.
+// Serialization densifies the sparse entries, so a sparse instance encodes to
+// the same bytes as a dense instance with the same registers.
 
 package hll
 
@@ -62,10 +59,6 @@ const (
 	// 4096 that is 16KB, on par with the 16384-byte dense array, and adding the
 	// temp buffer + the dense pendingMask we would otherwise lazily avoid makes
 	// dense the better representation beyond this point.
-	//
-	// This IN-MEMORY threshold is deliberately distinct from the on-the-wire
-	// SparseCrossoverNonZero (6000), which is tuned for the varint wire encoding
-	// (~2.7 bytes/entry) rather than the 4-byte in-memory entry.
 	SparsePromoteThreshold = 4096
 )
 

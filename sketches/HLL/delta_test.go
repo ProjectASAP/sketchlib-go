@@ -53,40 +53,6 @@ func TestHLLDelta_RoundTrip(t *testing.T) {
 	hllRegistersEqual(t, "RoundTrip", current, reconstructed)
 }
 
-// TestHLLDelta_Codec verifies the full bytes->RegisterDelta->ApplyRegisterDelta pipeline.
-func TestHLLDelta_Codec(t *testing.T) {
-	snap := NewHyperLogLog()
-	for i := 0; i < 300; i++ {
-		hllInsert(snap, fmt.Sprintf("u-%d", i))
-	}
-
-	current := NewHyperLogLog()
-	if err := current.Merge(snap); err != nil {
-		t.Fatalf("Merge: %v", err)
-	}
-	for i := 300; i < 600; i++ {
-		hllInsert(current, fmt.Sprintf("u-%d", i))
-	}
-
-	delta := ComputeRegisterDelta(snap, current)
-	b, err := SerializeRegisterDelta(delta)
-	if err != nil {
-		t.Fatalf("SerializeRegisterDelta: %v", err)
-	}
-	decoded, err := DeserializeRegisterDelta(b)
-	if err != nil {
-		t.Fatalf("DeserializeRegisterDelta: %v", err)
-	}
-
-	reconstructed := NewHyperLogLog()
-	if err := reconstructed.Merge(snap); err != nil {
-		t.Fatalf("Merge: %v", err)
-	}
-	ApplyRegisterDelta(reconstructed, decoded)
-
-	hllRegistersEqual(t, "Codec", current, reconstructed)
-}
-
 // TestHLLDelta_MaxSemantics verifies that re-applying the same delta is
 // idempotent (max semantics: applying twice is same as applying once).
 func TestHLLDelta_MaxSemantics(t *testing.T) {
@@ -104,7 +70,6 @@ func TestHLLDelta_MaxSemantics(t *testing.T) {
 	}
 
 	delta := ComputeRegisterDelta(snap, current)
-	b, _ := SerializeRegisterDelta(delta)
 
 	recv := NewHyperLogLog()
 	if err := recv.Merge(snap); err != nil {
@@ -112,10 +77,8 @@ func TestHLLDelta_MaxSemantics(t *testing.T) {
 	}
 
 	// Apply twice — result must be same as applying once.
-	d1, _ := DeserializeRegisterDelta(b)
-	ApplyRegisterDelta(recv, d1)
-	d2, _ := DeserializeRegisterDelta(b)
-	ApplyRegisterDelta(recv, d2)
+	ApplyRegisterDelta(recv, delta)
+	ApplyRegisterDelta(recv, delta)
 
 	hllRegistersEqual(t, "MaxSemantics(idempotent)", current, recv)
 }
@@ -150,14 +113,12 @@ func TestHLLDelta_CardinalityConvergence(t *testing.T) {
 	}
 
 	delta := ComputeRegisterDelta(snap, current)
-	b, _ := SerializeRegisterDelta(delta)
-	decoded, _ := DeserializeRegisterDelta(b)
 
 	recv := NewHyperLogLog()
 	if err := recv.Merge(snap); err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
-	ApplyRegisterDelta(recv, decoded)
+	ApplyRegisterDelta(recv, delta)
 
 	// Registers must be identical — cardinality follows automatically.
 	hllRegistersEqual(t, "CardinalityConvergence", current, recv)
@@ -166,7 +127,7 @@ func TestHLLDelta_CardinalityConvergence(t *testing.T) {
 	t.Logf("true=%d estimated=%d", n, got)
 }
 
-// TestHLLDelta_MultipleWindows simulates consecutive delta transmissions.
+// TestHLLDelta_MultipleWindows applies the deltas of consecutive windows.
 func TestHLLDelta_MultipleWindows(t *testing.T) {
 	sender := NewHyperLogLog()
 	receiver := NewHyperLogLog()
@@ -176,10 +137,7 @@ func TestHLLDelta_MultipleWindows(t *testing.T) {
 		for i := 0; i < 200; i++ {
 			hllInsert(sender, fmt.Sprintf("w%d-item%d", w, i))
 		}
-		delta := ComputeRegisterDelta(snap, sender)
-		b, _ := SerializeRegisterDelta(delta)
-		decoded, _ := DeserializeRegisterDelta(b)
-		ApplyRegisterDelta(receiver, decoded)
+		ApplyRegisterDelta(receiver, ComputeRegisterDelta(snap, sender))
 
 		snap = NewHyperLogLog()
 		if err := snap.Merge(sender); err != nil {

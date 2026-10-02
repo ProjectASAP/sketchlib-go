@@ -6,7 +6,6 @@ package sketchlib.v1;
 
 import "countminsketch/countminsketch.proto";
 import "countsketch/countsketch.proto";
-import "hll/hll.proto";
 import "kll/kll.proto";
 import "univmon/univmon.proto";
 
@@ -73,8 +72,10 @@ message HydraCell {
   oneof sketch {
     CountMinState    count_min    = 1;
     CountSketchState count_sketch = 2;
-    HyperLogLogState hll          = 3;
     KLLState         kll          = 4;
     UnivMonState     univmon      = 5;
   }
+
+  reserved 3;
+  reserved "hll";
 }

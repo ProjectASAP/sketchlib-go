@@ -82,13 +82,8 @@ func (h *HyperLogLogVariant) estimateRegular() int {
 		z += math.Pow(2, -float64(reg))
 	}
 	est := alphaM * m * m / z
-	if est <= m*2.5 {
-		if zeroCount != 0 {
-			est = m * math.Log(m/float64(zeroCount))
-		}
-	} else if est > 143165576.533 {
-		correctionAux := float64(math.MaxInt32)
-		est = -correctionAux * math.Log(1.0-est/correctionAux)
+	if est <= m*2.5 && zeroCount != 0 {
+		est = m * math.Log(m/float64(zeroCount))
 	}
 	return int(est)
 }

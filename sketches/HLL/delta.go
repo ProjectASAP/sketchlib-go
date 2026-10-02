@@ -6,8 +6,7 @@ type RegisterUpdate struct {
 	Value uint8
 }
 
-// RegisterDelta is the native Go representation of a sparse HLL register delta.
-// No proto dependency.
+// RegisterDelta is the set of registers that increased between two HLLs.
 type RegisterDelta struct {
 	Updates []RegisterUpdate
 }
