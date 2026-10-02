@@ -181,6 +181,12 @@ func InitKLLWithSeed(k int, seed int64) *KLLSketch {
 	return InitWithSeed(k, defaultM, seed)
 }
 
+// K returns the accuracy parameter k.
+func (s *KLLSketch) K() int { return s.k }
+
+// M returns the minimum level capacity m.
+func (s *KLLSketch) M() int { return s.m }
+
 func (s *KLLSketch) TypeName() string {
 	return "kll"
 }
