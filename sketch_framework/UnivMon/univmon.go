@@ -1,433 +1,390 @@
+// Package univmon implements UnivMon (Liu et al., SIGCOMM 2016): a pyramid of
+// layers, each a CountL2HH plus a heap of its heaviest keys, from which L1, L2,
+// entropy and cardinality are estimated.
 package univmon
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"math"
-	"math/bits"
+	"slices"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/wire/asapv1"
 )
 
-type UnivSketch struct {
-	k           int // topK
-	row         int
-	col         int
-	layer       int
-	enableTopK  bool
-	cs_layers   []*CountSketchUniv
-	HH_layers   []*common.TopKHeap
-	bucket_size int64
+// MaxLayerSize is the deepest pyramid: the layer finder and the query
+// recurrences shift a 64-bit key hash right by up to layerSize-1.
+const MaxLayerSize = 64
+
+// bottomLayerFinder is the seed index of the hash that picks a key's deepest
+// layer.
+const bottomLayerFinder = 19
+
+// UpdateMode records which update a pyramid has taken; the first update picks
+// it, and it selects the query recurrence.
+type UpdateMode uint8
+
+const (
+	// UpdateModeUnset is the mode of a pyramid no update has reached.
+	UpdateModeUnset UpdateMode = iota
+	// UpdateModeStandard updates every layer from 0 to the key's bottom layer.
+	UpdateModeStandard
+	// UpdateModeTerminal updates only the key's bottom layer.
+	UpdateModeTerminal
+)
+
+// UnivMon is a pyramid of layerSize layers, each a sketchRow x sketchCol
+// CountL2HH hashing at its layer index and a heap of at most heapSize keys of
+// type K.
+type UnivMon[K asapv1.HeapKey] struct {
+	heapSize, sketchRow, sketchCol, layerSize int
+
+	layers            []*CountL2HH
+	heaps             []*hhHeap[K]
+	bucketSize        uint64
+	updateMode        UpdateMode
+	candidateComplete []bool
 }
 
-// NewUnivSketchPyramid creates a UnivSketch with pyramid structure (different sizes for Elephant vs Mice layers)
-func NewUnivSketchPyramid(k, row, col, layer int) (us *UnivSketch, err error) {
-	us = &UnivSketch{
-		k:           k,
-		row:         row,
-		col:         col,
-		layer:       layer,
-		enableTopK:  true,
-		bucket_size: 0,
+func checkShape(heapSize, sketchRow, sketchCol, layerSize int) error {
+	if heapSize <= 0 || layerSize <= 0 {
+		return fmt.Errorf("univmon: heap size %d and layer count %d must be positive", heapSize, layerSize)
 	}
-
-	us.cs_layers = make([]*CountSketchUniv, layer)
-	us.HH_layers = make([]*common.TopKHeap, layer)
-
-	// Initialize Layers
-	if layer <= ELEPHANT_LAYER {
-		for i := 0; i < layer; i++ {
-			us.cs_layers[i], _ = NewCountSketchUniv(CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT)
-		}
-		for i := 0; i < layer; i++ {
-			us.HH_layers[i] = common.NewTopKHeap(k)
-		}
-	} else {
-		for i := 0; i < ELEPHANT_LAYER; i++ {
-			us.cs_layers[i], _ = NewCountSketchUniv(CS_ROW_NO_Univ_ELEPHANT, CS_COL_NO_Univ_ELEPHANT)
-		}
-		for i := 0; i < ELEPHANT_LAYER; i++ {
-			us.HH_layers[i] = common.NewTopKHeap(TOPK_SIZE)
-		}
-		for i := ELEPHANT_LAYER; i < layer; i++ {
-			us.cs_layers[i], _ = NewCountSketchUniv(CS_ROW_NO_Univ_MICE, CS_COL_NO_Univ_MICE)
-		}
-		for i := ELEPHANT_LAYER; i < layer; i++ {
-			us.HH_layers[i] = common.NewTopKHeap(TOPK_SIZE_MICE)
-		}
+	if layerSize > MaxLayerSize {
+		return fmt.Errorf("univmon: layer count %d exceeds %d", layerSize, MaxLayerSize)
 	}
-
-	return us, nil
+	if uint64(heapSize) > math.MaxUint32 {
+		return fmt.Errorf("univmon: heap size %d exceeds u32", heapSize)
+	}
+	return checkDimensions(sketchRow, sketchCol)
 }
 
-func (us *UnivSketch) Free() {
-	us.bucket_size = 0
-	for i := 0; i < us.layer; i++ {
-		us.cs_layers[i].CleanCountSketchUniv()
-		if us.HH_layers[i] != nil {
-			us.HH_layers[i].Clean()
-		}
+// NewUnivMon returns an empty pyramid of layerSize layers.
+func NewUnivMon[K asapv1.HeapKey](heapSize, sketchRow, sketchCol, layerSize int) (*UnivMon[K], error) {
+	if err := checkShape(heapSize, sketchRow, sketchCol, layerSize); err != nil {
+		return nil, err
 	}
+	u := &UnivMon[K]{
+		heapSize: heapSize, sketchRow: sketchRow, sketchCol: sketchCol, layerSize: layerSize,
+		layers:            make([]*CountL2HH, layerSize),
+		heaps:             make([]*hhHeap[K], layerSize),
+		candidateComplete: make([]bool, layerSize),
+	}
+	for i := range layerSize {
+		u.layers[i], _ = NewCountL2HH(sketchRow, sketchCol, i)
+		u.heaps[i] = newHHHeap[K](heapSize, heapSize)
+		u.candidateComplete[i] = true
+	}
+	return u, nil
 }
 
-// --- Internal Helper ---
+// HeapSize returns each layer's heap capacity.
+func (u *UnivMon[K]) HeapSize() int { return u.heapSize }
 
-func findBottomLayerNum(hash uint64, layer int) int {
-	if layer <= 1 {
-		return 0
-	}
-	bitsToCheck := layer - 1 // bits [1..layer-1]
-	if bitsToCheck < 63 {
-		mask := (uint64(1) << bitsToCheck) - 1
-		zeroBits := (^(hash >> 1)) & mask
-		if zeroBits == 0 {
-			return layer - 1
-		}
-		return bits.TrailingZeros64(zeroBits)
-	}
-	for l := 1; l < layer; l++ {
-		if ((hash >> l) & 1) == 0 {
+// SketchRow returns each layer's row count.
+func (u *UnivMon[K]) SketchRow() int { return u.sketchRow }
+
+// SketchCol returns each layer's column count.
+func (u *UnivMon[K]) SketchCol() int { return u.sketchCol }
+
+// LayerSize returns the number of layers.
+func (u *UnivMon[K]) LayerSize() int { return u.layerSize }
+
+// BucketSize returns the total weight inserted.
+func (u *UnivMon[K]) BucketSize() uint64 { return u.bucketSize }
+
+// Mode returns the update mode.
+func (u *UnivMon[K]) Mode() UpdateMode { return u.updateMode }
+
+// CandidatesComplete reports, per layer, whether the heap still holds every
+// key the layer received.
+func (u *UnivMon[K]) CandidatesComplete() []bool { return slices.Clone(u.candidateComplete) }
+
+// HeapEntries returns the layer's heap entries in descending count, then
+// asapv1.CompareHeapKeys order.
+func (u *UnivMon[K]) HeapEntries(layer int) []asapv1.HeapEntry[K] {
+	es := slices.Clone(u.heaps[layer].entries)
+	asapv1.SortHeapEntries(es)
+	return es
+}
+
+// LayerEstimate returns the layer's CountL2HH estimate for key.
+func (u *UnivMon[K]) LayerEstimate(layer int, key K) float64 {
+	return u.layers[layer].Estimate([]byte(keyID(key)))
+}
+
+// LayerL2 returns the layer's CountL2HH L2 estimate.
+func (u *UnivMon[K]) LayerL2(layer int) float64 { return u.layers[layer].L2() }
+
+// BottomLayerForHash returns the deepest layer a key whose bottom-layer hash
+// is hash reaches: one less than the lowest l >= 1 with bit l clear.
+func BottomLayerForHash(hash uint64, layerSize int) int {
+	for l := 1; l < layerSize; l++ {
+		if (hash>>l)&1 == 0 {
 			return l - 1
 		}
 	}
-	return layer - 1
+	return layerSize - 1
 }
 
-// --- Main Update Logic ---
+func bottomLayerHash(id string) uint64 { return common.HashIt(bottomLayerFinder, []byte(id)) }
 
-func (us *UnivSketch) updateLayersNoTopK(hash uint64, value int64, bottomLayer int) {
-	us.cs_layers[0].UpdateWithHash(hash, value)
-	for l := 1; l <= bottomLayer; l++ {
-		us.cs_layers[l].UpdateWithHashNoL2(hash, value)
+func (u *UnivMon[K]) begin(value int64, mode UpdateMode) error {
+	if value < 0 {
+		return fmt.Errorf("univmon: update weight %d is negative", value)
 	}
-}
-
-func (us *UnivSketch) updateLayersWithTopK(hash uint64, value int64, bottomLayer int, key string) {
-	median := us.cs_layers[0].UpdateAndEstimateHash(hash, value)
-	us.HH_layers[0].Update(key, median)
-	for l := 1; l <= bottomLayer; l++ {
-		median = us.cs_layers[l].UpdateAndEstimateHashNoL2(hash, value)
-		us.HH_layers[l].Update(key, median)
+	if u.updateMode != UpdateModeUnset && u.updateMode != mode {
+		return errors.New("univmon: standard and terminal-only updates do not mix")
 	}
-}
-
-func (us *UnivSketch) SetTopKEnabled(enabled bool) {
-	us.enableTopK = enabled
-}
-
-// Update inserts a value into the sketch.
-func (us *UnivSketch) Update(input *common.SketchInput, value int64) {
-	if input == nil || value == 0 {
-		return
+	if u.bucketSize > math.MaxUint64-uint64(value) {
+		return errors.New("univmon: total weight overflows u64")
 	}
-	us.bucket_size += value
-
-	bottomLayer := findBottomLayerNum(input.Hash, us.layer)
-	if !us.enableTopK {
-		us.updateLayersNoTopK(input.Hash, value, bottomLayer)
-		return
-	}
-
-	us.updateLayersWithTopK(input.Hash, value, bottomLayer, string(input.Bytes))
-}
-
-// UpdateWithHashOnly is a fast path for stream updates that do not require key-aware TopK tracking.
-func (us *UnivSketch) UpdateWithHashOnly(hash uint64, value int64) {
-	if value == 0 {
-		return
-	}
-	us.bucket_size += value
-	us.updateLayersNoTopK(hash, value, findBottomLayerNum(hash, us.layer))
-}
-
-// TypeName returns the sketch type name.
-func (us *UnivSketch) TypeName() string {
-	return "univmon"
-}
-
-// InsertWithHash implements common.Sketch.
-func (us *UnivSketch) InsertWithHash(hash uint64) {
-	us.UpdateWithHashOnly(hash, 1)
-}
-
-// QueryWithHash provides access to cardinality/sum estimates via the interface.
-func (us *UnivSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
-	switch q {
-	case common.QueryCardinality:
-		return us.GetCardinality(), nil
-	case common.QuerySum:
-		return us.cs_layers[0].QueryWithHash(q, hash)
-	case common.QueryFrequency:
-		return us.cs_layers[0].QueryWithHash(q, hash)
-	case common.QuerySum2: // FIX: ADD THIS CASE
-		// Retrieve L2 from the first CountSketch layer
-		return us.cs_layers[0].QueryWithHash(q, hash)
-	default:
-		return 0, common.ErrUnsupportedQuery
-	}
-}
-
-// Merge combines another common.Sketch into this one.
-func (us *UnivSketch) Merge(other common.Sketch) error {
-	o, ok := other.(*UnivSketch)
-	if !ok {
-		return fmt.Errorf("cannot merge: incompatible sketch type (expected *UnivSketch)")
-	}
-
-	if us.layer != o.layer {
-		return fmt.Errorf("univmon: layer mismatch (%d vs %d)", us.layer, o.layer)
-	}
-
-	us.bucket_size += o.bucket_size
-
-	for i := 0; i < us.layer; i++ {
-		// A. Merge CountSketch Layer
-		// This now calls the FIXED CountSketchUniv.Merge which handles L2 correctly
-		if err := us.cs_layers[i].Merge(o.cs_layers[i]); err != nil {
-			return fmt.Errorf("error merging CS layer %d: %v", i, err)
-		}
-
-		// B. Merge TopK Heaps Manually
-		if !us.enableTopK {
-			continue
-		}
-		for _, item := range o.HH_layers[i].Heap {
-			index, found := us.HH_layers[i].Find(item.Key)
-			if found {
-				currentCount := us.HH_layers[i].Heap[index].Count
-				us.HH_layers[i].Update(item.Key, currentCount+item.Count)
-			} else {
-				us.HH_layers[i].Update(item.Key, item.Count)
-			}
-		}
-	}
-
+	u.updateMode = mode
+	u.bucketSize += uint64(value)
 	return nil
 }
 
-// --- Merging Logic ---
-
-// // MergeWith combines another UnivSketch into this one.
-// func (us *UnivSketch) MergeWith(other *UnivSketch) {
-// 	if us.layer != other.layer {
-// 		// Ideally return error, but signature follows legacy void style
-// 		fmt.Println("Error: UnivSketch layer mismatch in MergeWith")
-// 		return
-// 	}
-
-// 	us.bucket_size += other.bucket_size
-
-// 	for i := 0; i < us.layer; i++ {
-// 		// 1. Merge CountSketch layers (Sum counters)
-// 		// We can cast to common.Sketch or call Merge directly if accessible
-// 		err := us.cs_layers[i].Merge(other.cs_layers[i])
-// 		if err != nil {
-// 			fmt.Println("Error merging CS layer:", err)
-// 		}
-
-// 		// 2. Merge TopK Heaps
-// 		// Since common.TopKHeap doesn't have a "Sum-Merge", we implement it manually here.
-// 		// We create a new temporary heap to consolidate counts.
-// 		newHeap := common.NewTopKHeap(us.HH_layers[i].K) // Assuming K is accessible/same
-
-// 		// Add items from this sketch
-// 		for _, item := range us.HH_layers[i].Heap {
-// 			newHeap.Update(item.Key, item.Count)
-// 		}
-
-// 		// Add items from other sketch (Summing counts if key exists)
-// 		for _, item := range other.HH_layers[i].Heap {
-// 			index, found := newHeap.Find(item.Key)
-// 			if found {
-// 				// Sum existing count with new count
-// 				currentCount := newHeap.Heap[index].Count
-// 				newHeap.Update(item.Key, currentCount+item.Count)
-// 			} else {
-// 				// Insert new item
-// 				newHeap.Update(item.Key, item.Count)
-// 			}
-// 		}
-
-// 		// Replace the heap for this layer
-// 		us.HH_layers[i] = newHeap
-// 	}
-// }
-
-// --- Query Functions ---
-
-func (us *UnivSketch) calcGSumHeuristic(g func(float64) float64, isCard bool) float64 {
-	Y := make([]float64, us.layer)
-	var coe float64 = 1
-	var tmp float64 = 0
-
-	Y[us.layer-1] = 0
-	l2_val, _ := us.cs_layers[us.layer-1].QueryWithHash(common.QuerySum2, 0)
-	var threshold int64 = int64(l2_val * 0.01)
-	if !isCard {
-		threshold = 0
+func (u *UnivMon[K]) updateLayer(i int, key K, id string, value int64) {
+	l := u.layers[i]
+	h := l.hash([]byte(id))
+	l.insert(h, value)
+	if !u.heaps[i].update(key, id, toInt64(l.estimate(h))) {
+		u.candidateComplete[i] = false
 	}
-
-	for _, item := range us.HH_layers[us.layer-1].Heap {
-		if item.Count > threshold {
-			tmp += g(float64(item.Count))
-		}
-	}
-	Y[us.layer-1] = tmp
-
-	for i := (us.layer - 2); i >= 0; i-- {
-		tmp = 0
-		l2_val, _ = us.cs_layers[i].QueryWithHash(common.QuerySum2, 0)
-		threshold = int64(l2_val * 0.01)
-		if !isCard {
-			threshold = 0
-		}
-
-		for _, item := range us.HH_layers[i].Heap {
-			if item.Count > threshold {
-				h := common.Hash64([]byte(item.Key))
-				bit := (h >> (i + 1)) & 1
-				coe = 1 - 2*float64(bit)
-				tmp += coe * g(float64(item.Count))
-			}
-		}
-		Y[i] = 2*Y[i+1] + tmp
-	}
-
-	return Y[0]
 }
 
-func (us *UnivSketch) GetEntropy() float64 {
-	if us.bucket_size == 0 {
+// Insert adds a non-negative weight for key to every layer from 0 to the
+// key's bottom layer. It fails on a negative weight, on a pyramid FastInsert
+// has updated, and when the total weight would overflow.
+func (u *UnivMon[K]) Insert(key K, value int64) error {
+	if err := u.begin(value, UpdateModeStandard); err != nil {
+		return err
+	}
+	id := keyID(key)
+	bottom := BottomLayerForHash(bottomLayerHash(id), u.layerSize)
+	for i := 0; i <= bottom; i++ {
+		u.updateLayer(i, key, id, value)
+	}
+	return nil
+}
+
+// FastInsert adds a non-negative weight for key to the key's bottom layer
+// only. It fails on a negative weight, on a pyramid Insert has updated, and
+// when the total weight would overflow.
+func (u *UnivMon[K]) FastInsert(key K, value int64) error {
+	if err := u.begin(value, UpdateModeTerminal); err != nil {
+		return err
+	}
+	id := keyID(key)
+	u.updateLayer(BottomLayerForHash(bottomLayerHash(id), u.layerSize), key, id, value)
+	return nil
+}
+
+// toInt64 converts f to int64 truncating toward zero, saturating at the int64
+// range, with NaN as 0.
+func toInt64(f float64) int64 {
+	switch {
+	case f != f:
+		return 0
+	case f >= math.MaxInt64:
+		return math.MaxInt64
+	case f <= math.MinInt64:
+		return math.MinInt64
+	default:
+		return int64(f)
+	}
+}
+
+func (u *UnivMon[K]) heavyThreshold(l2 float64, complete bool) int64 {
+	if complete {
 		return 0
 	}
-	tmp := us.calcGSumHeuristic(func(x float64) float64 {
+	return toInt64(l2 / math.Sqrt(float64(u.heapSize)))
+}
+
+// candidate is a key, by ID, and its frequency estimate.
+type candidate struct {
+	id    string
+	count int64
+}
+
+// recurrence returns Y[0] of Y[last] = sum g(c), Y[i] = 2Y[i+1] + sum s(c)g(c),
+// over each layer's candidates above its threshold, where s(c) is +1 or -1 by
+// bit i+1 of the key's bottom-layer hash.
+func (u *UnivMon[K]) recurrence(g func(float64) float64, candidates [][]candidate, thresholds []int64) float64 {
+	last := u.layerSize - 1
+	var y float64
+	for i := last; i >= 0; i-- {
+		var tmp float64
+		for _, c := range candidates[i] {
+			if c.count <= thresholds[i] {
+				continue
+			}
+			if i == last {
+				tmp += g(float64(c.count))
+				continue
+			}
+			bit := (bottomLayerHash(c.id) >> (i + 1)) & 1
+			tmp += (1 - 2*float64(bit)) * g(float64(c.count))
+		}
+		if i == last {
+			y = tmp
+		} else {
+			y = 2*y + tmp
+		}
+	}
+	return y
+}
+
+// CalcGSum estimates the sum of g over every key's frequency. With isCard set,
+// a layer whose candidate set is incomplete counts only keys above
+// l2/sqrt(heapSize).
+func (u *UnivMon[K]) CalcGSum(g func(float64) float64, isCard bool) float64 {
+	if u.bucketSize == 0 {
+		return 0
+	}
+	if u.updateMode == UpdateModeTerminal {
+		candidates, thresholds := u.terminalCandidates()
+		return u.recurrence(g, candidates, thresholds)
+	}
+	candidates := make([][]candidate, u.layerSize)
+	thresholds := make([]int64, u.layerSize)
+	for i, h := range u.heaps {
+		for _, id := range h.ids {
+			candidates[i] = append(candidates[i], candidate{id, toInt64(u.layers[i].Estimate([]byte(id)))})
+		}
+		if isCard {
+			thresholds[i] = u.heavyThreshold(u.layers[i].L2(), u.candidateComplete[i])
+		}
+	}
+	return u.recurrence(g, candidates, thresholds)
+}
+
+// terminalCandidates rebuilds each layer's logical candidate set from the
+// terminal strata at and below it, keeping the heapSize largest, with its
+// threshold over the logical L2 of those strata.
+func (u *UnivMon[K]) terminalCandidates() ([][]candidate, []int64) {
+	logical := make([][]candidate, u.layerSize)
+	thresholds := make([]int64, u.layerSize)
+	cumulative := make(map[string]int64)
+	suffixComplete := true
+	var suffixL2 float64
+	for level := u.layerSize - 1; level >= 0; level-- {
+		suffixComplete = suffixComplete && u.candidateComplete[level]
+		l2 := u.layers[level].L2()
+		suffixL2 += l2 * l2
+		for _, id := range u.heaps[level].ids {
+			count := toInt64(u.layers[level].Estimate([]byte(id)))
+			if old, ok := cumulative[id]; !ok || count > old {
+				cumulative[id] = count
+			}
+		}
+		retained := make([]candidate, 0, len(cumulative))
+		for id, count := range cumulative {
+			retained = append(retained, candidate{id, count})
+		}
+		slices.SortFunc(retained, func(a, b candidate) int {
+			if c := cmp.Compare(b.count, a.count); c != 0 {
+				return c
+			}
+			if c := cmp.Compare(bottomLayerHash(a.id), bottomLayerHash(b.id)); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.id, b.id)
+		})
+		complete := suffixComplete && len(retained) <= u.heapSize
+		thresholds[level] = u.heavyThreshold(math.Sqrt(suffixL2), complete)
+		retained = retained[:min(len(retained), u.heapSize)]
+		cumulative = make(map[string]int64, len(retained))
+		for _, c := range retained {
+			cumulative[c.id] = c.count
+		}
+		logical[level] = retained
+	}
+	return logical, thresholds
+}
+
+// CalcL1 returns the total weight inserted.
+func (u *UnivMon[K]) CalcL1() float64 { return float64(u.bucketSize) }
+
+// CalcL2 returns the estimated L2 norm.
+func (u *UnivMon[K]) CalcL2() float64 {
+	return math.Sqrt(u.CalcGSum(func(x float64) float64 { return x * x }, false))
+}
+
+// CalcEntropy returns the estimated Shannon entropy, in bits.
+func (u *UnivMon[K]) CalcEntropy() float64 {
+	if u.bucketSize == 0 {
+		return 0
+	}
+	sum := u.CalcGSum(func(x float64) float64 {
 		if x > 0 {
 			return x * math.Log2(x)
 		}
 		return 0
 	}, false)
-	return math.Log2(float64(us.bucket_size)) - tmp/float64(us.bucket_size)
+	total := float64(u.bucketSize)
+	return math.Log2(total) - sum/total
 }
 
-func (us *UnivSketch) GetCardinality() float64 {
-	return us.calcGSumHeuristic(func(x float64) float64 { return 1 }, true)
+// CalcCard returns the estimated number of distinct keys.
+func (u *UnivMon[K]) CalcCard() float64 {
+	return u.CalcGSum(func(float64) float64 { return 1 }, true)
 }
 
-// GetL1 returns the total signed update mass tracked by UnivMon.
-func (us *UnivSketch) GetL1() float64 {
-	return float64(us.bucket_size)
-}
-
-func (us *UnivSketch) QueryTopK(K int) *common.TopKHeap {
-	topk := common.NewTopKHeap(K)
-
-	for i := (us.layer - 1); i >= 0; i-- {
-		l2_val, _ := us.cs_layers[i].QueryWithHash(common.QuerySum2, 0)
-		var threshold int64 = int64(l2_val * 0.01)
-
-		for _, item := range us.HH_layers[i].Heap {
-			if item.Count > threshold {
-				topk.Update(item.Key, item.Count)
+// Merge adds o into u: the counters, then each layer's heap rebuilt from both
+// heaps' keys at their merged estimates. It fails unless the shapes match and
+// the update modes agree or one is unset.
+func (u *UnivMon[K]) Merge(o *UnivMon[K]) error {
+	if u.layerSize != o.layerSize || u.sketchRow != o.sketchRow || u.sketchCol != o.sketchCol || u.heapSize != o.heapSize {
+		return fmt.Errorf("univmon: merging %d layers of %dx%d, heap %d, with %d layers of %dx%d, heap %d",
+			u.layerSize, u.sketchRow, u.sketchCol, u.heapSize, o.layerSize, o.sketchRow, o.sketchCol, o.heapSize)
+	}
+	mode := u.updateMode
+	switch {
+	case mode == UpdateModeUnset:
+		mode = o.updateMode
+	case o.updateMode != UpdateModeUnset && o.updateMode != mode:
+		return errors.New("univmon: standard and terminal-only pyramids do not merge")
+	}
+	if u.bucketSize > math.MaxUint64-o.bucketSize {
+		return errors.New("univmon: merged total weight overflows u64")
+	}
+	u.updateMode = mode
+	u.bucketSize += o.bucketSize
+	for i := range u.layerSize {
+		var keys []K
+		var ids []string
+		seen := make(map[string]bool)
+		for _, h := range []*hhHeap[K]{u.heaps[i], o.heaps[i]} {
+			for j, id := range h.ids {
+				if !seen[id] {
+					seen[id] = true
+					keys = append(keys, h.entries[j].Key)
+					ids = append(ids, id)
+				}
 			}
 		}
-	}
-	return topk
-}
-
-func (us *UnivSketch) GetMemoryKB() float64 {
-	var total_topk float64 = 0
-	for i := 0; i < us.layer; i++ {
-		total_topk += us.HH_layers[i].GetMemoryBytes()
-	}
-	csSize := float64(CS_COL_NO_Univ_ELEPHANT) * float64(CS_ROW_NO_Univ_ELEPHANT) * float64(us.layer) * 8
-	return (csSize + total_topk) / 1024
-}
-
-type topKHeapSnapshot struct {
-	Heap []common.Item
-	K    int
-}
-
-type univSketchSnapshot struct {
-	K          int
-	Row        int
-	Col        int
-	Layer      int
-	BucketSize int64
-	CSLayers   [][]byte
-	HHLayers   []topKHeapSnapshot
-}
-
-// SerializeToBytes serializes UnivSketch into bytes.
-func (us *UnivSketch) SerializeToBytes() ([]byte, error) {
-	csLayers := make([][]byte, len(us.cs_layers))
-	for i, cs := range us.cs_layers {
-		b, err := cs.SerializeToBytes()
-		if err != nil {
-			return nil, err
+		complete := u.candidateComplete[i] && o.candidateComplete[i] && len(ids) <= u.heapSize
+		u.layers[i].merge(o.layers[i])
+		u.heaps[i].clear()
+		for j, id := range ids {
+			u.heaps[i].update(keys[j], id, toInt64(u.layers[i].Estimate([]byte(id))))
 		}
-		csLayers[i] = b
+		u.candidateComplete[i] = complete
 	}
-
-	hhLayers := make([]topKHeapSnapshot, len(us.HH_layers))
-	for i, hh := range us.HH_layers {
-		if hh == nil {
-			continue
-		}
-		heapCp := append([]common.Item(nil), hh.Heap...)
-		hhLayers[i] = topKHeapSnapshot{
-			Heap: heapCp,
-			K:    hh.K,
-		}
-	}
-
-	return common.EncodeToBytes(univSketchSnapshot{
-		K:          us.k,
-		Row:        us.row,
-		Col:        us.col,
-		Layer:      us.layer,
-		BucketSize: us.bucket_size,
-		CSLayers:   csLayers,
-		HHLayers:   hhLayers,
-	})
+	return nil
 }
 
-// DeserializeUnivSketchFromBytes restores UnivSketch from serialized bytes.
-func DeserializeUnivSketchFromBytes(data []byte) (*UnivSketch, error) {
-	var snap univSketchSnapshot
-	if err := common.DecodeFromBytes(data, &snap); err != nil {
-		return nil, err
+// Free resets u to an empty pyramid of the same shape.
+func (u *UnivMon[K]) Free() {
+	u.bucketSize = 0
+	u.updateMode = UpdateModeUnset
+	for i := range u.layerSize {
+		u.layers[i].clear()
+		u.heaps[i].clear()
+		u.candidateComplete[i] = true
 	}
-	if snap.Layer <= 0 {
-		return nil, errors.New("invalid snapshot: layer must be positive")
-	}
-	if len(snap.CSLayers) != snap.Layer || len(snap.HHLayers) != snap.Layer {
-		return nil, errors.New("invalid snapshot: layer payload mismatch")
-	}
-
-	us := &UnivSketch{
-		k:           snap.K,
-		row:         snap.Row,
-		col:         snap.Col,
-		layer:       snap.Layer,
-		enableTopK:  true,
-		bucket_size: snap.BucketSize,
-		cs_layers:   make([]*CountSketchUniv, snap.Layer),
-		HH_layers:   make([]*common.TopKHeap, snap.Layer),
-	}
-
-	for i := 0; i < snap.Layer; i++ {
-		cs, err := DeserializeCountSketchUnivFromBytes(snap.CSLayers[i])
-		if err != nil {
-			return nil, err
-		}
-		us.cs_layers[i] = cs
-
-		hh := common.NewTopKHeap(snap.HHLayers[i].K)
-		hh.Heap = append([]common.Item(nil), snap.HHLayers[i].Heap...)
-		hh.RecomputeMemory()
-		us.HH_layers[i] = hh
-	}
-
-	return us, nil
 }

@@ -110,9 +110,8 @@ func countMinCellState(s *countminsketch.CountMinSketch) *cmpb.CountMinState {
 	return st
 }
 
-// cellToProto converts a HydraCounter into a HydraCell proto: Count-Min and
-// Count Sketch cells through countMinCellState and countSketchState, every
-// other cell through the inner sketch's SerializePortable.
+// cellToProto converts a Count-Min or Count Sketch HydraCounter into a
+// HydraCell proto; other cells have no protobuf encoding.
 func cellToProto(c HydraCounter) (*hydrapb.HydraCell, error) {
 	switch ct := c.(type) {
 	case *countMinCounter:
@@ -132,13 +131,7 @@ func cellToProto(c HydraCounter) (*hydrapb.HydraCell, error) {
 		return nil, fmt.Errorf("KLL cells have no protobuf encoding")
 
 	case *univCounter:
-		env, err := ct.s.SerializePortable()
-		if err != nil {
-			return nil, err
-		}
-		return &hydrapb.HydraCell{
-			Sketch: &hydrapb.HydraCell_Univmon{Univmon: env.GetUnivmon()},
-		}, nil
+		return nil, errors.New("hydra: UnivMon cells have no protobuf encoding")
 
 	default:
 		return nil, fmt.Errorf("unknown HydraCounter type %T", c)

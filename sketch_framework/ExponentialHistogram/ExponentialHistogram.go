@@ -346,7 +346,7 @@ type HybridSketch struct {
 	isSketch   bool
 	mapCounts  map[uint64]uint64
 	l2         float64
-	univSketch *univmon.UnivSketch
+	univSketch *univmon.UnivMon[uint64]
 
 	k, row, col, layer int
 	maxMapSize         int
@@ -367,7 +367,7 @@ func NewHybridSketch(k, row, col, layer, maxMapSize int) *HybridSketch {
 
 func (h *HybridSketch) InsertWithHash(hash uint64) {
 	if h.isSketch {
-		h.univSketch.InsertWithHash(hash)
+		_ = h.univSketch.Insert(hash, 1)
 		return
 	}
 
@@ -384,11 +384,12 @@ func (h *HybridSketch) promoteToSketch() {
 	if h.isSketch {
 		return
 	}
-	sk, _ := univmon.NewUnivSketchPyramid(h.k, h.row, h.col, h.layer)
+	sk, err := univmon.NewUnivMon[uint64](h.k, h.row, h.col, h.layer)
+	if err != nil {
+		panic(err)
+	}
 	for hash, count := range h.mapCounts {
-		for i := uint64(0); i < count; i++ {
-			sk.InsertWithHash(hash)
-		}
+		_ = sk.Insert(hash, int64(count))
 	}
 	h.univSketch = sk
 	h.mapCounts = nil
@@ -397,15 +398,14 @@ func (h *HybridSketch) promoteToSketch() {
 
 func (h *HybridSketch) GetL2() float64 {
 	if h.isSketch {
-		l2, _ := h.univSketch.QueryWithHash(common.QuerySum2, 0)
-		return l2
+		return h.univSketch.LayerL2(0)
 	}
 	return math.Sqrt(h.l2)
 }
 
 func (h *HybridSketch) GetL2Sq() float64 {
 	if h.isSketch {
-		l2, _ := h.univSketch.QueryWithHash(common.QuerySum2, 0)
+		l2 := h.univSketch.LayerL2(0)
 		return l2 * l2
 	}
 	return h.l2
@@ -446,7 +446,16 @@ func (h *HybridSketch) Merge(other common.Sketch) error {
 func (h *HybridSketch) TypeName() string { return "HybridSketch" }
 func (h *HybridSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
 	if h.isSketch {
-		return h.univSketch.QueryWithHash(q, hash)
+		switch q {
+		case common.QueryFrequency, common.QuerySum:
+			return h.univSketch.LayerEstimate(0, hash), nil
+		case common.QuerySum2:
+			return h.univSketch.LayerL2(0), nil
+		case common.QueryCardinality:
+			return h.univSketch.CalcCard(), nil
+		default:
+			return 0, common.ErrUnsupportedQuery
+		}
 	}
 	switch q {
 	case common.QueryFrequency:

@@ -113,8 +113,8 @@ func decodeCounter(counterType HydraCounterType, data []byte) (HydraCounter, err
 		}
 		return &kllCounter{s: s}, nil
 	case HydraCounterUniversal:
-		s, err := univmon.DeserializeUnivSketchFromBytes(data)
-		if err != nil {
+		s := new(univmon.UnivMon[string])
+		if err := s.UnmarshalASAPv1(data); err != nil {
 			return nil, err
 		}
 		return &univCounter{s: s}, nil
@@ -325,11 +325,12 @@ func (c *kllCounter) TopK(int) []Pair                   { return nil }
 // UnivMon counter
 
 type univCounter struct {
-	s *univmon.UnivSketch
+	s       *univmon.UnivMon[string]
+	topKOff bool
 }
 
 func NewHydraUnivMonCounter(topK, row, col, layer int) (HydraCounter, error) {
-	s, err := univmon.NewUnivSketchPyramid(topK, row, col, layer)
+	s, err := univmon.NewUnivMon[string](topK, row, col, layer)
 	if err != nil {
 		return nil, err
 	}
@@ -338,17 +339,16 @@ func NewHydraUnivMonCounter(topK, row, col, layer int) (HydraCounter, error) {
 
 func (c *univCounter) CounterType() HydraCounterType { return HydraCounterUniversal }
 func (c *univCounter) Clone() (HydraCounter, error)  { return cloneCounter(c) }
+
+// Insert adds a positive count for value; UnivMon takes no negative weight.
 func (c *univCounter) Insert(value *common.SketchInput, count int64) {
-	if value == nil || count == 0 {
+	if value == nil || count <= 0 {
 		return
 	}
-	c.s.Update(value, count)
+	_ = c.s.Insert(string(value.Bytes), count)
 }
-func (c *univCounter) InsertWithHash(_ *common.SketchInput, hash uint64, count int64) {
-	if count == 0 {
-		return
-	}
-	c.s.UpdateWithHashOnly(hash, count)
+func (c *univCounter) InsertWithHash(value *common.SketchInput, _ uint64, count int64) {
+	c.Insert(value, count)
 }
 func (c *univCounter) Query(q HydraQuery) (float64, error) {
 	switch q.Kind {
@@ -356,26 +356,15 @@ func (c *univCounter) Query(q HydraQuery) (float64, error) {
 		if q.Value == nil {
 			return 0, errors.New("frequency query needs value")
 		}
-		v, err := c.s.QueryWithHash(common.QueryFrequency, q.Value.Hash)
-		if err != nil {
-			return 0, err
-		}
-		return v, nil
+		return c.s.LayerEstimate(0, string(q.Value.Bytes)), nil
 	case HydraQueryCardinality:
-		return c.s.GetCardinality(), nil
+		return c.s.CalcCard(), nil
 	case HydraQueryL1Norm:
-		return c.s.GetL1(), nil
+		return c.s.CalcL1(), nil
 	case HydraQueryL2Norm:
-		v, err := c.s.QueryWithHash(common.QuerySum2, 0)
-		if err != nil {
-			return 0, err
-		}
-		if v < 0 {
-			return 0, nil
-		}
-		return math.Sqrt(v), nil
+		return c.s.CalcL2(), nil
 	case HydraQueryEntropy:
-		return c.s.GetEntropy(), nil
+		return c.s.CalcEntropy(), nil
 	default:
 		return 0, errors.New("univmon query kind not supported")
 	}
@@ -387,13 +376,19 @@ func (c *univCounter) Merge(other HydraCounter) error {
 	}
 	return c.s.Merge(o.s)
 }
-func (c *univCounter) SerializeToBytes() ([]byte, error) { return c.s.SerializeToBytes() }
-func (c *univCounter) SetTopKEnabled(enabled bool)       { c.s.SetTopKEnabled(enabled) }
+func (c *univCounter) SerializeToBytes() ([]byte, error) { return c.s.MarshalASAPv1() }
+func (c *univCounter) SetTopKEnabled(enabled bool)       { c.topKOff = !enabled }
+
+// TopK returns the k heaviest keys of layer 0's heap.
 func (c *univCounter) TopK(k int) []Pair {
-	hh := c.s.QueryTopK(k)
-	out := make([]Pair, 0, len(hh.Heap))
-	for _, item := range hh.Heap {
-		out = append(out, Pair{Key: item.Key, Value: item.Count})
+	if c.topKOff {
+		return nil
+	}
+	es := c.s.HeapEntries(0)
+	es = es[:max(0, min(k, len(es)))]
+	out := make([]Pair, 0, len(es))
+	for _, e := range es {
+		out = append(out, Pair{Key: e.Key, Value: e.Count})
 	}
 	return out
 }

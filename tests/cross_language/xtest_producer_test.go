@@ -1,11 +1,10 @@
 // xtest_producer — Cross-language integration test: Go producer side.
 //
-// Inserts synthetic data into two sketch types, serializes each as a portable
-// protobuf SketchEnvelope, and writes the binary files to $XTEST_DIR.
+// Inserts synthetic data into a Hydra sketch, serializes it as a portable
+// protobuf SketchEnvelope, and writes the binary file to $XTEST_DIR.
 //
 // Output files:
 //
-//	univmon.pb      UnivMonState      (layered CS + TopK heaps)
 //	hydra.pb        HydraState        (CM-cell grid)
 //
 // Usage:
@@ -23,7 +22,6 @@ import (
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	hydrasketch "github.com/ProjectASAP/sketchlib-go/sketch_framework/HydraSketch"
-	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
 )
 
 func TestXtestProducer(t *testing.T) {
@@ -38,22 +36,6 @@ func TestXtestProducer(t *testing.T) {
 	t.Log("=======================================================")
 	t.Log("  sketchlib-go → xtest_producer")
 	t.Log("=======================================================")
-
-	// -----------------------------------------------------------------------
-	// UnivMon
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[UnivMon] Step 1/3 — Create sketch (k=32, row=5, col=512, layer=8)")
-	um, err := univmon.NewUnivSketchPyramid(32, 5, 512, 8)
-	tcheck(t, "new univmon", err)
-
-	t.Log("[UnivMon] Step 2/3 — Insert 10 000 distinct keys")
-	for i := 0; i < 10_000; i++ {
-		um.Update(common.FromString(fmt.Sprintf("um:%d", i)), 1)
-	}
-	card := um.GetCardinality()
-	t.Logf("[UnivMon] Step 3/3 — cardinality≈%.0f (expect ~10000)", card)
-	writeEnvelope(t, outDir, "univmon.pb", tmust(um.SerializePortable()))
 
 	// -----------------------------------------------------------------------
 	// HydraSketch (CountMin cells, D=4, W=4)
@@ -88,7 +70,7 @@ func TestXtestProducer(t *testing.T) {
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 2 sketches written to " + outDir)
+	t.Log("  Producer complete — 1 sketch written to " + outDir)
 	t.Log("=======================================================")
 }
 

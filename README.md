@@ -235,7 +235,7 @@ Design constraints:
 | **HyperLogLog**          | Sketch    | • Cardinality (Distinct Count)                                                                                               | Specialized probabilistic sketch for unique counting.                           |
 | **KLLSketch**            | Sketch    | • Quantile Estimation<br>• Rank Estimation<br>• CDF<br>• Total Count                                                         | Compact summary for percentile and rank queries.                                |
 | **ExponentialHistogram** | Sketch    | • Bucket-based Distribution<br>• Quantile Estimation<br>• Cumulative Bucket Counts<br>• Scale Adjustment                     | OpenTelemetry-compatible exponential bucketing with adaptive precision.         |
-| **UnivMon**              | Framework | • Entropy<br>• Cardinality<br>• Heavy Hitters / Top-K<br>• L2 Norm (Intermediate)<br>• Frequency Estimation                  | Universal Monitor using layered CountSketchUniv for multi-metric queries.       |
+| **UnivMon**              | Framework | • Entropy<br>• Cardinality<br>• Heavy Hitters / Top-K<br>• L2 Norm (Intermediate)<br>• Frequency Estimation                  | Universal Monitor using layered CountL2HH for multi-metric queries.             |
 | **HydraSketch**          | Framework | • Adaptive Sketch Selection<br>• Multi-sketch Composition<br>• Unified Query Interface<br>• Dynamic Strategy Switching       | Adaptive framework that selects optimal sketches based on workload and data.    |
 | **HashLayer**            | Framework | • Dispatcher (Vector Result)                                                                                                 | Broadcasts inserts and queries to multiple sketches and returns vector results. |
 
@@ -282,7 +282,7 @@ A **multi-layer sketch framework** for computing diverse statistical metrics fro
 
 * Built on a **layered CountSketch architecture**
 * Each layer captures different frequency scales
-* Uses shared pre-hashed insertion across all layers
+* Each layer hashes a key at its own seed; one more hash picks the deepest layer the key reaches
 * Numeric execution is fully decoupled from semantic queries
 
 **Supported Metrics**

@@ -323,9 +323,15 @@ func BenchmarkSketch_Merge_Coco(b *testing.B) {
 }
 
 func BenchmarkSketch_Merge_UnivMon(b *testing.B) {
-	s1, _ := univmon.NewUnivSketchPyramid(univK, 5, 200, 3)
-	s2, _ := univmon.NewUnivSketchPyramid(univK, 5, 200, 3)
-	fillSketchString(s2, 100)
+	s1, _ := univmon.NewUnivMon[uint64](univK, 5, 200, 3)
+	s2, _ := univmon.NewUnivMon[uint64](univK, 5, 200, 3)
+	for i := range 100 {
+		key := uint64(i)
+		if i < len(stream) {
+			key = uint64(stream[i].F)
+		}
+		_ = s2.Insert(key, 1)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
