@@ -1,10 +1,13 @@
 package hydrasketch
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
+	"strconv"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
@@ -12,9 +15,10 @@ import (
 	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
 	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
 	kll "github.com/ProjectASAP/sketchlib-go/sketches/KLL"
+	"github.com/ProjectASAP/sketchlib-go/wire/asapv1"
 )
 
-// HydraCounterType mirrors sketchlib-rust Hydra counter variants.
+// HydraCounterType names a Hydra counter variant.
 type HydraCounterType string
 
 const (
@@ -25,7 +29,7 @@ const (
 	HydraCounterUniversal HydraCounterType = "universal"
 )
 
-// HydraQueryKind mirrors sketchlib-rust Hydra query variants.
+// HydraQueryKind is the statistic a HydraQuery asks for.
 type HydraQueryKind int
 
 const (
@@ -73,234 +77,227 @@ func EntropyQuery() HydraQuery {
 	return HydraQuery{Kind: HydraQueryEntropy}
 }
 
-// HydraCounter is the counter abstraction per Hydra cell.
+// HydraCounter is the sketch in each Hydra cell. The set of counters is
+// closed: the constructors in this package return the only implementations.
 type HydraCounter interface {
 	CounterType() HydraCounterType
 	Clone() (HydraCounter, error)
-	Insert(value *common.SketchInput, count int64)
-	InsertWithHash(value *common.SketchInput, hash uint64, count int64)
+	Insert(value *common.SketchInput, count int64) error
 	Query(q HydraQuery) (float64, error)
 	Merge(other HydraCounter) error
-	SerializeToBytes() ([]byte, error)
-	SetTopKEnabled(enabled bool)
-	TopK(k int) []Pair
+	sealed()
 }
 
-func decodeCounter(counterType HydraCounterType, data []byte) (HydraCounter, error) {
-	switch counterType {
-	case HydraCounterCM:
-		s, err := countminsketch.DeserializeCountMinSketchFromBytes(data)
-		if err != nil {
-			return nil, err
-		}
-		return &countMinCounter{s: s}, nil
-	case HydraCounterCS:
-		s, err := countsketch.DeserializeCountSketchFromBytes(data)
-		if err != nil {
-			return nil, err
-		}
-		return &countSketchCounter{s: s}, nil
-	case HydraCounterHLL:
-		s, err := hll.DeserializeHyperLogLogFromBytes(data)
-		if err != nil {
-			return nil, err
-		}
-		return &hllCounter{s: s}, nil
-	case HydraCounterKLL:
-		s, err := kll.DeserializeKLLSketchFromBytes(data)
-		if err != nil {
-			return nil, err
-		}
-		return &kllCounter{s: s}, nil
-	case HydraCounterUniversal:
-		s := new(univmon.UnivMon[string])
-		if err := s.UnmarshalASAPv1(data); err != nil {
-			return nil, err
-		}
-		return &univCounter{s: s}, nil
-	default:
-		return nil, fmt.Errorf("unknown hydra counter type: %s", counterType)
-	}
+var errNilValue = errors.New("hydra: nil value")
+
+func unsupported(c HydraCounter, q HydraQuery) error {
+	return fmt.Errorf("hydra: %s counter does not support query kind %d", c.CounterType(), q.Kind)
 }
 
-func cloneCounter(c HydraCounter) (HydraCounter, error) {
-	b, err := c.SerializeToBytes()
-	if err != nil {
-		return nil, err
-	}
-	return decodeCounter(c.CounterType(), b)
+func mismatch(c, other HydraCounter) error {
+	return fmt.Errorf("hydra: cannot merge a %s counter into a %s counter", other.CounterType(), c.CounterType())
 }
 
-func inputToFloat64(v *common.SketchInput) float64 {
-	if v == nil {
-		return 0
-	}
-	if len(v.Bytes) >= 8 {
-		return math.Float64frombits(binary.NativeEndian.Uint64(v.Bytes[:8]))
-	}
-	return float64(v.Hash)
-}
-
-// CountMin counter
-
+// countMinCounter is a fast-mode Count-Min matrix.
 type countMinCounter struct {
 	s *countminsketch.CountMinSketch
 }
 
+// NewHydraCountMinCounter returns an empty rows x cols Count-Min counter.
 func NewHydraCountMinCounter(rows, cols int) (HydraCounter, error) {
-	s, err := countminsketch.WithDimensions(rows, cols)
+	s, err := countminsketch.NewCountMinSketch(rows, cols)
 	if err != nil {
 		return nil, err
 	}
 	return &countMinCounter{s: s}, nil
 }
 
+func (c *countMinCounter) sealed()                       {}
 func (c *countMinCounter) CounterType() HydraCounterType { return HydraCounterCM }
-func (c *countMinCounter) Clone() (HydraCounter, error)  { return cloneCounter(c) }
-func (c *countMinCounter) Insert(value *common.SketchInput, count int64) {
-	if value == nil || count == 0 {
-		return
+
+func (c *countMinCounter) Clone() (HydraCounter, error) {
+	b, err := c.s.MarshalASAPv1()
+	if err != nil {
+		return nil, err
+	}
+	s := new(countminsketch.CountMinSketch)
+	if err := s.UnmarshalASAPv1(b); err != nil {
+		return nil, err
+	}
+	return &countMinCounter{s: s}, nil
+}
+
+func (c *countMinCounter) Insert(value *common.SketchInput, count int64) error {
+	if value == nil {
+		return errNilValue
 	}
 	c.s.UpdateWeight(value, float64(count))
+	return nil
 }
-func (c *countMinCounter) InsertWithHash(_ *common.SketchInput, hash uint64, count int64) {
-	if count == 0 {
-		return
-	}
-	c.s.FastInsertWeightWithHashValue(hash, float64(count))
-}
+
 func (c *countMinCounter) Query(q HydraQuery) (float64, error) {
-	if q.Kind != HydraQueryFrequency || q.Value == nil {
-		return 0, errors.New("count-min only supports frequency query")
+	if q.Kind != HydraQueryFrequency {
+		return 0, unsupported(c, q)
 	}
-	return c.s.QueryWithHash(common.QueryFrequency, q.Value.Hash)
+	if q.Value == nil {
+		return 0, errNilValue
+	}
+	return c.s.Estimate(q.Value), nil
 }
+
 func (c *countMinCounter) Merge(other HydraCounter) error {
 	o, ok := other.(*countMinCounter)
 	if !ok {
-		return errors.New("counter type mismatch")
+		return mismatch(c, other)
 	}
 	return c.s.Merge(o.s)
 }
-func (c *countMinCounter) SerializeToBytes() ([]byte, error) { return c.s.SerializeToBytes() }
-func (c *countMinCounter) SetTopKEnabled(bool)               {}
-func (c *countMinCounter) TopK(int) []Pair                   { return nil }
 
-// CountSketch counter
-
+// countSketchCounter is a fast-mode Count Sketch matrix of int32 counters.
 type countSketchCounter struct {
 	s *countsketch.CountSketch
 }
 
+// NewHydraCountSketchCounter returns an empty rows x cols Count Sketch counter
+// of int32 counters in fast mode; cols must be a power of two.
 func NewHydraCountSketchCounter(rows, cols int) (HydraCounter, error) {
-	s, err := countsketch.WithDimensions(rows, cols)
+	s, err := countsketch.NewCountSketch(rows, cols)
 	if err != nil {
+		return nil, err
+	}
+	s.CounterType, s.Mode = countsketch.CounterInt32, countsketch.ModeFast
+	return &countSketchCounter{s: s}, nil
+}
+
+func (c *countSketchCounter) sealed()                       {}
+func (c *countSketchCounter) CounterType() HydraCounterType { return HydraCounterCS }
+
+func (c *countSketchCounter) Clone() (HydraCounter, error) {
+	b, err := c.s.MarshalASAPv1()
+	if err != nil {
+		return nil, err
+	}
+	s := new(countsketch.CountSketch)
+	if err := s.UnmarshalASAPv1(b); err != nil {
 		return nil, err
 	}
 	return &countSketchCounter{s: s}, nil
 }
 
-func (c *countSketchCounter) CounterType() HydraCounterType { return HydraCounterCS }
-func (c *countSketchCounter) Clone() (HydraCounter, error)  { return cloneCounter(c) }
-func (c *countSketchCounter) Insert(value *common.SketchInput, count int64) {
-	if value == nil || count == 0 {
-		return
+func (c *countSketchCounter) Insert(value *common.SketchInput, count int64) error {
+	if value == nil {
+		return errNilValue
 	}
 	c.s.UpdateWeight(value, float64(count))
+	return nil
 }
-func (c *countSketchCounter) InsertWithHash(_ *common.SketchInput, hash uint64, count int64) {
-	if count == 0 {
-		return
-	}
-	c.s.FastInsertWeightWithHashValue(hash, float64(count))
-}
+
 func (c *countSketchCounter) Query(q HydraQuery) (float64, error) {
-	if q.Kind != HydraQueryFrequency || q.Value == nil {
-		return 0, errors.New("count-sketch only supports frequency query")
+	if q.Kind != HydraQueryFrequency {
+		return 0, unsupported(c, q)
 	}
-	return c.s.QueryWithHash(common.QueryFrequency, q.Value.Hash)
+	if q.Value == nil {
+		return 0, errNilValue
+	}
+	return c.s.Estimate(q.Value), nil
 }
+
 func (c *countSketchCounter) Merge(other HydraCounter) error {
 	o, ok := other.(*countSketchCounter)
 	if !ok {
-		return errors.New("counter type mismatch")
+		return mismatch(c, other)
 	}
 	return c.s.Merge(o.s)
 }
-func (c *countSketchCounter) SerializeToBytes() ([]byte, error) { return c.s.SerializeToBytes() }
-func (c *countSketchCounter) SetTopKEnabled(bool)               {}
-func (c *countSketchCounter) TopK(int) []Pair                   { return nil }
 
-// HLL counter
-
+// hllCounter is a precision-14 Ertl-MLE HyperLogLog.
 type hllCounter struct {
 	s *hll.HyperLogLog
 }
 
+// NewHydraHLLCounter returns an empty HyperLogLog counter.
 func NewHydraHLLCounter() HydraCounter {
-	return &hllCounter{s: hll.New()}
+	return &hllCounter{s: hll.NewHyperLogLog()}
 }
 
+func (c *hllCounter) sealed()                       {}
 func (c *hllCounter) CounterType() HydraCounterType { return HydraCounterHLL }
-func (c *hllCounter) Clone() (HydraCounter, error)  { return cloneCounter(c) }
-func (c *hllCounter) Insert(value *common.SketchInput, count int64) {
+
+func (c *hllCounter) Clone() (HydraCounter, error) {
+	b, err := c.s.MarshalASAPv1()
+	if err != nil {
+		return nil, err
+	}
+	s := new(hll.HyperLogLog)
+	if err := s.UnmarshalASAPv1(b); err != nil {
+		return nil, err
+	}
+	return &hllCounter{s: s}, nil
+}
+
+// Insert records value once, whatever count is.
+func (c *hllCounter) Insert(value *common.SketchInput, _ int64) error {
 	if value == nil {
-		return
+		return errNilValue
 	}
 	c.s.Update(value)
+	return nil
 }
-func (c *hllCounter) InsertWithHash(_ *common.SketchInput, hash uint64, count int64) {
-	if count == 0 {
-		return
-	}
-	c.s.InsertWithHash(hash)
-}
+
 func (c *hllCounter) Query(q HydraQuery) (float64, error) {
 	if q.Kind != HydraQueryCardinality {
-		return 0, errors.New("hll only supports cardinality query")
+		return 0, unsupported(c, q)
 	}
 	return float64(c.s.Estimate()), nil
 }
+
 func (c *hllCounter) Merge(other HydraCounter) error {
 	o, ok := other.(*hllCounter)
 	if !ok {
-		return errors.New("counter type mismatch")
+		return mismatch(c, other)
 	}
 	return c.s.Merge(o.s)
 }
-func (c *hllCounter) SerializeToBytes() ([]byte, error) { return c.s.SerializeToBytes() }
-func (c *hllCounter) SetTopKEnabled(bool)               {}
-func (c *hllCounter) TopK(int) []Pair                   { return nil }
 
-// KLL counter
-
+// kllCounter is a KLL sketch of float64 values.
 type kllCounter struct {
 	s *kll.KLLSketch
 }
 
-func NewHydraKLLCounter(k int) (HydraCounter, error) {
-	s, err := kll.NewKLLSketch(k)
-	if err != nil {
-		return nil, err
-	}
-	return &kllCounter{s: s}, nil
+// NewHydraKLLCounter returns an empty KLL counter with accuracy k and minimum
+// level capacity m, clamped as kll.Init clamps them.
+func NewHydraKLLCounter(k, m int) HydraCounter {
+	return &kllCounter{s: kll.Init(k, m)}
 }
 
+func (c *kllCounter) sealed()                       {}
 func (c *kllCounter) CounterType() HydraCounterType { return HydraCounterKLL }
-func (c *kllCounter) Clone() (HydraCounter, error)  { return cloneCounter(c) }
-func (c *kllCounter) Insert(value *common.SketchInput, count int64) {
-	if value == nil || count <= 0 {
-		return
+
+func (c *kllCounter) Clone() (HydraCounter, error) {
+	e := asapv1.NewEncoder()
+	if err := c.s.EncodeASAPv1Payload(e); err != nil {
+		return nil, err
 	}
-	v := inputToFloat64(value)
-	for i := int64(0); i < count; i++ {
-		c.s.Update(v)
+	return decodeKLLCell(uint32(c.s.K()), uint32(c.s.M()), asapv1.NewDecoder(e.Bytes()))
+}
+
+// Insert adds value's float64 count times; value must carry a float64.
+func (c *kllCounter) Insert(value *common.SketchInput, count int64) error {
+	if value == nil {
+		return errNilValue
 	}
+	if !value.HasFloat64 {
+		return errors.New("hydra: a KLL counter takes float64 values")
+	}
+	if count < 0 {
+		return fmt.Errorf("hydra: a KLL counter takes no negative count, got %d", count)
+	}
+	for range count {
+		c.s.Update(value.Float64)
+	}
+	return nil
 }
-func (c *kllCounter) InsertWithHash(value *common.SketchInput, _ uint64, count int64) {
-	// KLL requires value semantics; follow Rust behavior and fallback to normal insert.
-	c.Insert(value, count)
-}
+
 func (c *kllCounter) Query(q HydraQuery) (float64, error) {
 	switch q.Kind {
 	case HydraQueryQuantile:
@@ -308,55 +305,62 @@ func (c *kllCounter) Query(q HydraQuery) (float64, error) {
 	case HydraQueryCDF:
 		return c.s.CDF().Quantile(q.Threshold), nil
 	default:
-		return 0, errors.New("kll only supports quantile/cdf query")
+		return 0, unsupported(c, q)
 	}
 }
+
 func (c *kllCounter) Merge(other HydraCounter) error {
 	o, ok := other.(*kllCounter)
 	if !ok {
-		return errors.New("counter type mismatch")
+		return mismatch(c, other)
 	}
 	return c.s.Merge(o.s)
 }
-func (c *kllCounter) SerializeToBytes() ([]byte, error) { return c.s.SerializeToBytes() }
-func (c *kllCounter) SetTopKEnabled(bool)               {}
-func (c *kllCounter) TopK(int) []Pair                   { return nil }
 
-// UnivMon counter
-
-type univCounter struct {
-	s       *univmon.UnivMon[string]
-	topKOff bool
+// univMonCounter is a UnivMon pyramid whose heaps hold keys of type K.
+type univMonCounter[K asapv1.HeapKey] struct {
+	s *univmon.UnivMon[K]
 }
 
-func NewHydraUnivMonCounter(topK, row, col, layer int) (HydraCounter, error) {
-	s, err := univmon.NewUnivMon[string](topK, row, col, layer)
+// NewHydraUnivMonCounter returns an empty UnivMon counter of layerSize layers,
+// each a sketchRow x sketchCol CountL2HH and a heap of heapSize keys of type K.
+func NewHydraUnivMonCounter[K asapv1.HeapKey](heapSize, sketchRow, sketchCol, layerSize int) (HydraCounter, error) {
+	s, err := univmon.NewUnivMon[K](heapSize, sketchRow, sketchCol, layerSize)
 	if err != nil {
 		return nil, err
 	}
-	return &univCounter{s: s}, nil
+	return &univMonCounter[K]{s: s}, nil
 }
 
-func (c *univCounter) CounterType() HydraCounterType { return HydraCounterUniversal }
-func (c *univCounter) Clone() (HydraCounter, error)  { return cloneCounter(c) }
+func (c *univMonCounter[K]) sealed()                       {}
+func (c *univMonCounter[K]) CounterType() HydraCounterType { return HydraCounterUniversal }
 
-// Insert adds a positive count for value; UnivMon takes no negative weight.
-func (c *univCounter) Insert(value *common.SketchInput, count int64) {
-	if value == nil || count <= 0 {
-		return
+func (c *univMonCounter[K]) Clone() (HydraCounter, error) {
+	b, err := c.s.MarshalASAPv1()
+	if err != nil {
+		return nil, err
 	}
-	_ = c.s.Insert(string(value.Bytes), count)
+	s := new(univmon.UnivMon[K])
+	if err := s.UnmarshalASAPv1(b); err != nil {
+		return nil, err
+	}
+	return &univMonCounter[K]{s: s}, nil
 }
-func (c *univCounter) InsertWithHash(value *common.SketchInput, _ uint64, count int64) {
-	c.Insert(value, count)
+
+// Insert adds count for value's key, converted as inputKey converts it.
+func (c *univMonCounter[K]) Insert(value *common.SketchInput, count int64) error {
+	if value == nil {
+		return errNilValue
+	}
+	key, err := inputKey[K](value)
+	if err != nil {
+		return err
+	}
+	return c.s.Insert(key, count)
 }
-func (c *univCounter) Query(q HydraQuery) (float64, error) {
+
+func (c *univMonCounter[K]) Query(q HydraQuery) (float64, error) {
 	switch q.Kind {
-	case HydraQueryFrequency:
-		if q.Value == nil {
-			return 0, errors.New("frequency query needs value")
-		}
-		return c.s.LayerEstimate(0, string(q.Value.Bytes)), nil
 	case HydraQueryCardinality:
 		return c.s.CalcCard(), nil
 	case HydraQueryL1Norm:
@@ -366,29 +370,60 @@ func (c *univCounter) Query(q HydraQuery) (float64, error) {
 	case HydraQueryEntropy:
 		return c.s.CalcEntropy(), nil
 	default:
-		return 0, errors.New("univmon query kind not supported")
+		return 0, unsupported(c, q)
 	}
 }
-func (c *univCounter) Merge(other HydraCounter) error {
-	o, ok := other.(*univCounter)
+
+func (c *univMonCounter[K]) Merge(other HydraCounter) error {
+	o, ok := other.(*univMonCounter[K])
 	if !ok {
-		return errors.New("counter type mismatch")
+		return mismatch(c, other)
 	}
 	return c.s.Merge(o.s)
 }
-func (c *univCounter) SerializeToBytes() ([]byte, error) { return c.s.MarshalASAPv1() }
-func (c *univCounter) SetTopKEnabled(enabled bool)       { c.topKOff = !enabled }
 
-// TopK returns the k heaviest keys of layer 0's heap.
-func (c *univCounter) TopK(k int) []Pair {
-	if c.topKOff {
-		return nil
+// inputKey converts v to a key of type K: a string from its bytes (its Hash in
+// hex when it has none), a []byte from its bytes, a float from its float64, an
+// integer from its 8 native-endian bytes when the value fits K.
+func inputKey[K asapv1.HeapKey](v *common.SketchInput) (K, error) {
+	var key K
+	rv := reflect.ValueOf(&key).Elem()
+	switch rv.Kind() {
+	case reflect.String:
+		if v.Bytes == nil {
+			rv.SetString(strconv.FormatUint(v.Hash, 16))
+		} else {
+			rv.SetString(string(v.Bytes))
+		}
+		return key, nil
+	case reflect.Slice:
+		rv.SetBytes(bytes.Clone(v.Bytes))
+		return key, nil
+	case reflect.Float32, reflect.Float64:
+		if !v.HasFloat64 {
+			return key, errors.New("hydra: a float-keyed UnivMon counter takes float64 values")
+		}
+		if rv.Kind() == reflect.Float32 && float64(float32(v.Float64)) != v.Float64 && !math.IsNaN(v.Float64) {
+			return key, fmt.Errorf("hydra: %v is not exact as a float32 key", v.Float64)
+		}
+		rv.SetFloat(v.Float64)
+		return key, nil
 	}
-	es := c.s.HeapEntries(0)
-	es = es[:max(0, min(k, len(es)))]
-	out := make([]Pair, 0, len(es))
-	for _, e := range es {
-		out = append(out, Pair{Key: e.Key, Value: e.Count})
+	if len(v.Bytes) != 8 {
+		return key, fmt.Errorf("hydra: an integer key takes 8 value bytes, got %d", len(v.Bytes))
 	}
-	return out
+	u := binary.NativeEndian.Uint64(v.Bytes)
+	switch rv.Kind() {
+	case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if rv.OverflowInt(int64(u)) {
+			return key, fmt.Errorf("hydra: %d overflows a %s key", int64(u), rv.Type())
+		}
+		rv.SetInt(int64(u))
+	default:
+		if rv.OverflowUint(u) {
+			return key, fmt.Errorf("hydra: %d overflows a %s key", u, rv.Type())
+		}
+		rv.SetUint(u)
+	}
+	return key, nil
 }

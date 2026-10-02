@@ -5,12 +5,11 @@ go 1.24.0
 toolchain go1.24.9
 
 require (
-	github.com/golang/glog v1.2.5
 	github.com/google/gopacket v1.1.19
 	github.com/prometheus/prometheus v0.307.1
 	github.com/stretchr/testify v1.11.1
 	github.com/zeebo/xxh3 v1.1.0
-	google.golang.org/protobuf v1.36.11
+	golang.org/x/sys v0.36.0
 )
 
 require (
@@ -24,7 +23,7 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	golang.org/x/net v0.44.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

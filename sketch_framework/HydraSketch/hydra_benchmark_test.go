@@ -11,13 +11,12 @@ import (
 )
 
 var (
-	hydraCAIDAOnce   sync.Once
-	hydraCAIDAKeys   []string
-	hydraCAIDAHashes []uint64
-	hydraCAIDAErr    error
+	hydraCAIDAOnce sync.Once
+	hydraCAIDAKeys []string
+	hydraCAIDAErr  error
 )
 
-func loadHydraCAIDA(b *testing.B) ([]string, []uint64) {
+func loadHydraCAIDA(b *testing.B) []string {
 	b.Helper()
 	hydraCAIDAOnce.Do(func() {
 		file := "../../testdata/caida/equinix-nyc.dirA.20181220-130200.UTC.anon.pcap.gz"
@@ -27,114 +26,75 @@ func loadHydraCAIDA(b *testing.B) ([]string, []uint64) {
 			return
 		}
 		keys := make([]string, len(samples))
-		hashes := make([]uint64, len(samples))
 		var ip [4]byte
 		for i, s := range samples {
 			binary.BigEndian.PutUint32(ip[:], uint32(s.F))
 			keys[i] = fmt.Sprintf("%08x", ip)
-			hashes[i] = common.Hash64(ip[:])
 		}
 		hydraCAIDAKeys = keys
-		hydraCAIDAHashes = hashes
 	})
 	if hydraCAIDAErr != nil {
 		b.Skipf("Skipping benchmark (CAIDA unavailable): %v", hydraCAIDAErr)
 	}
-	if len(hydraCAIDAKeys) == 0 || len(hydraCAIDAHashes) == 0 {
+	if len(hydraCAIDAKeys) == 0 {
 		b.Skip("Skipping benchmark (CAIDA empty)")
 	}
-	return hydraCAIDAKeys, hydraCAIDAHashes
+	return hydraCAIDAKeys
 }
 
-func mustNewHydra(tb testing.TB, enableTopK bool) *Hydra {
-	tb.Helper()
-	h, err := NewHydra(HydraConfig{
-		D:                   4,
-		W:                   64,
-		CounterType:         HydraCounterUniversal,
-		UniversalLayer:      4,
-		UniversalRow:        3,
-		UniversalCol:        512,
-		UniversalTopK:       64,
-		EnableGlobalCounter: true,
-	})
+func newBenchHydra(b *testing.B) *Hydra {
+	b.Helper()
+	counter, err := NewHydraUnivMonCounter[string](64, 3, 512, 4)
 	if err != nil {
-		tb.Fatalf("new hydra: %v", err)
+		b.Fatal(err)
 	}
-	if !enableTopK {
-		h.SetTopKEnabled(false)
+	h, err := NewHydra(4, 64, []string{"src"}, counter)
+	if err != nil {
+		b.Fatal(err)
 	}
 	return h
 }
 
 func BenchmarkHydra_Update_CAIDA(b *testing.B) {
-	keys, _ := loadHydraCAIDA(b)
+	keys := loadHydraCAIDA(b)
 	n := len(keys)
-	h := mustNewHydra(b, true)
+	h := newBenchHydra(b)
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		k := keys[i%n]
-		h.UpdateValue(k, common.FromString(k), 1)
+		_ = h.Update([]string{k}, common.FromString(k), 1)
 	}
 }
 
-func BenchmarkHydra_UpdateWithHash_CAIDA(b *testing.B) {
-	_, hashes := loadHydraCAIDA(b)
-	n := len(hashes)
-	h := mustNewHydra(b, false)
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		h.UpdateWithHash(hashes[i%n], 1)
-	}
-}
-
-func BenchmarkHydra_QueryFrequency_CAIDA(b *testing.B) {
-	keys, _ := loadHydraCAIDA(b)
+func BenchmarkHydra_QueryCardinality_CAIDA(b *testing.B) {
+	keys := loadHydraCAIDA(b)
 	n := len(keys)
-
-	h := mustNewHydra(b, true)
+	h := newBenchHydra(b)
 	for _, k := range keys {
-		h.UpdateValue(k, common.FromString(k), 1)
+		_ = h.Update([]string{k}, common.FromString(k), 1)
 	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		k := keys[i%n]
-		_ = h.QueryFrequency([]string{k}, common.FromString(k))
+		_, _ = h.QueryKey([]*string{Eq(keys[i%n])}, CardinalityQuery())
 	}
 }
 
-func BenchmarkHydra_TopK_CAIDA(b *testing.B) {
-	keys, _ := loadHydraCAIDA(b)
-	h := mustNewHydra(b, true)
+func BenchmarkHydra_MarshalASAPv1_CAIDA(b *testing.B) {
+	keys := loadHydraCAIDA(b)
+	h := newBenchHydra(b)
 	for _, k := range keys {
-		h.UpdateValue(k, common.FromString(k), 1)
+		_ = h.Update([]string{k}, common.FromString(k), 1)
 	}
 
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = h.TopK(100)
-	}
-}
-
-func BenchmarkHydra_Serialize_CAIDA(b *testing.B) {
-	keys, _ := loadHydraCAIDA(b)
-	h := mustNewHydra(b, true)
-	for _, k := range keys {
-		h.UpdateValue(k, common.FromString(k), 1)
-	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := h.SerializeToBytes(); err != nil {
-			b.Fatalf("serialize failed: %v", err)
+		if _, err := h.MarshalASAPv1(); err != nil {
+			b.Fatalf("marshal failed: %v", err)
 		}
 	}
 }

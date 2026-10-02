@@ -236,7 +236,7 @@ Design constraints:
 | **KLLSketch**            | Sketch    | • Quantile Estimation<br>• Rank Estimation<br>• CDF<br>• Total Count                                                         | Compact summary for percentile and rank queries.                                |
 | **ExponentialHistogram** | Sketch    | • Bucket-based Distribution<br>• Quantile Estimation<br>• Cumulative Bucket Counts<br>• Scale Adjustment                     | OpenTelemetry-compatible exponential bucketing with adaptive precision.         |
 | **UnivMon**              | Framework | • Entropy<br>• Cardinality<br>• Heavy Hitters / Top-K<br>• L2 Norm (Intermediate)<br>• Frequency Estimation                  | Universal Monitor using layered CountL2HH for multi-metric queries.             |
-| **HydraSketch**          | Framework | • Adaptive Sketch Selection<br>• Multi-sketch Composition<br>• Unified Query Interface<br>• Dynamic Strategy Switching       | Adaptive framework that selects optimal sketches based on workload and data.    |
+| **HydraSketch**          | Framework | • Subpopulation queries over named key columns<br>• Frequency, cardinality, quantiles, L1 / L2 / entropy by counter<br>• Merge | rows × cols grid of Count-Min, Count Sketch, HLL, KLL or UnivMon counters; median of rows. |
 | **HashLayer**            | Framework | • Dispatcher (Vector Result)                                                                                                 | Broadcasts inserts and queries to multiple sketches and returns vector results. |
 
 ---
@@ -310,38 +310,21 @@ A **multi-layer sketch framework** for computing diverse statistical metrics fro
 
 ### HydraSketch
 
-An **adaptive multi-sketch composition framework** designed for heterogeneous and evolving query workloads.
-
-**Design Philosophy**
-
-* No single sketch is optimal for all data distributions or queries
-* Sketch selection should adapt dynamically to workload characteristics
+Hydra (Manousis et al., VLDB 2022): a `rows × cols` grid of counters over a fixed schema of named key columns.
 
 **Design & Execution**
 
-* Composes multiple sketches under a unified interface
-* Uses pre-hashed insertion to fan-out data efficiently
-* Supports **runtime strategy switching** at query time
-* Separates cost modeling, execution, and query semantics
-
-**Core Capabilities**
-
-* Adaptive sketch selection based on data and query patterns
-* Unified query interface across heterogeneous sketches
-* Dynamic strategy switching without reinsertion
-* Cost–benefit optimization for performance vs accuracy trade-offs
-
-**Architectural Notes**
-
-* Generalizes concepts from UnivMon and ElasticSketch
-* Treats sketches as interchangeable execution units
-* Designed as a research-oriented framework for adaptive sketching
+* Each record supplies one value per key column and fans out into the `2^D - 1` subpopulations it belongs to
+* A subpopulation is encoded as `label:value` pairs joined by `;` (with `\`, `:` and `;` escaped) and hashed to one column per row
+* Every cell is a clone of one prototype counter: Count-Min, Count Sketch, HyperLogLog, KLL or UnivMon
+* A query constrains any non-empty subset of the columns and returns the median of the rows' estimates
+* Grids with equal dimensions, counter variant and schema merge cell by cell
+* `MarshalASAPv1` / `UnmarshalASAPv1` encode the grid as ASAPv1 kinds `0x07 0x00`–`0x07 0x04`
 
 **Typical Use Cases**
 
-* Mixed workloads (frequency + cardinality + quantiles)
-* Systems with evolving query distributions
-* Experimentation with adaptive sketch strategies
+* Per-subpopulation frequency, cardinality and quantile queries from one ingestion stream
+* Telemetry with multi-dimensional labels
 
 ---
 
@@ -361,5 +344,5 @@ An **adaptive multi-sketch composition framework** designed for heterogeneous an
 | KLL Quantile          | ✅           | ✅           | Prehashed insert<br>Merge correctness                                | Fixed buffer<br>Lazy compaction        |
 | Exponential Histogram | ✅           | ✅           | Exponential bucketing<br>Scale adjustment<br>No allocation           | Bucket compression<br>Adaptive scaling |
 | UnivMon               | ✅           | ✅          | Layered CountSketch<br>Multi-metric support                          | Memory tuning<br>Query fusion          |
-| HydraSketch           | ✅          | ✅          | Framework design<br>Sketch composition                               | Strategy optimization<br>Cost modeling |
+| HydraSketch           | ✅          | ✅          | Labelled subkey fan-out<br>Five counter variants                     | —                                      |
 | ElasticSketch         | ✅           | 🟡           | Heavy table over an i32 Count-Min light layer<br>Weighted insert (`InsertN`)<br>Heavy-table expand / compress | Throughput tuning |
