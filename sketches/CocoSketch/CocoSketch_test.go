@@ -94,29 +94,6 @@ func TestCocoHashAdapterRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCocoSerializeRoundTrip(t *testing.T) {
-	cs, _ := NewCocoSketch(4, 128)
-	cs.Insert("topic:alpha", 13)
-	cs.Insert("topic:beta", 8)
-
-	data, err := cs.SerializeToBytes()
-	if err != nil {
-		t.Fatalf("serialize failed: %v", err)
-	}
-
-	restored, err := DeserializeCocoSketchFromBytes(data)
-	if err != nil {
-		t.Fatalf("deserialize failed: %v", err)
-	}
-
-	if got := restored.Estimate("topic:alpha"); got < 13 {
-		t.Fatalf("expected restored alpha >=13, got %d", got)
-	}
-	if got := restored.Estimate("topic:beta"); got < 8 {
-		t.Fatalf("expected restored beta >=8, got %d", got)
-	}
-}
-
 func ExampleCocoSketch_Insert() {
 	cs, _ := NewCocoSketch(4, 64)
 	cs.Insert("user:42", 5)

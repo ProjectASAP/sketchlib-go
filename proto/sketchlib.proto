@@ -36,7 +36,6 @@ import "kll/kll.proto";
 import "ddsketch/ddsketch.proto";
 import "univmon/univmon.proto";
 import "hydra/hydra.proto";
-import "cocosketch/cocosketch.proto";
 import "elasticsketch/elasticsketch.proto";
 
 option go_package = "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;sketch_envelopepb";
@@ -53,7 +52,7 @@ message SketchEnvelope {
   // the highest version they understand.
   //   1 = CountMin, Count, HLL, KLL, DDSketch
   //   2 = UnivMon, Hydra (reserved)
-  //   3 = CocoSketch, ElasticSketch (reserved)
+  //   3 = ElasticSketch (reserved)
   uint32 format_version = 1;
 
   // Library and build info of the producing side.
@@ -73,10 +72,10 @@ message SketchEnvelope {
     DDSketchState    ddsketch     = 14;
     UnivMonState     univmon      = 15;
     HydraState       hydra        = 16;
-    CocoSketchState  coco         = 17;
     ElasticState     elastic      = 18;
   }
 
+  reserved 17;
   reserved 19 to 31;  // Reserved for future sketch types.
 
   // Geometric / NitroSketch sampling probability for the producing sketch.

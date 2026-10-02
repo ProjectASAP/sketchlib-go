@@ -11,7 +11,7 @@ import (
 )
 
 type cocoBucket struct {
-	Hash   uint64
+	Key    string
 	Val    uint64
 	HasKey bool
 }
@@ -60,23 +60,34 @@ func (c *CocoSketch) TypeName() string {
 	return "CocoSketch"
 }
 
-func (c *CocoSketch) hashIndex(row int, hash uint64) int {
-	return int(common.DeriveIndex(hash, row, uint32(c.length)))
+// hashIndex is key's column in row: its xxh3 hash under seed list entry row,
+// modulo length.
+func (c *CocoSketch) hashIndex(row int, key string) int {
+	return int(common.HashIt(row, []byte(key)) % uint64(c.length))
 }
 
-func (c *CocoSketch) insertKeyValue(hash uint64, v uint64) {
+// hashKey is the key under which the hash-only methods count hash.
+func hashKey(hash uint64) string {
+	return strconv.FormatUint(hash, 16)
+}
+
+// insertKeyValue adds v to key's bucket if one of its d buckets holds it, else
+// claims the first free one, else adds v to the smallest and elects key with
+// probability v/val.
+func (c *CocoSketch) insertKeyValue(key string, v uint64) {
 
 	minRow := c.d
 	minVal := ^uint64(0)
+	var free *cocoBucket
 
 	for i := 0; i < c.d; i++ {
 
-		idx := c.hashIndex(i, hash)
+		idx := c.hashIndex(i, key)
 		b := &c.table[i][idx]
 
 		if b.HasKey {
 
-			if b.Hash == hash {
+			if b.Key == key {
 				b.Val += v
 				return
 			}
@@ -86,31 +97,35 @@ func (c *CocoSketch) insertKeyValue(hash uint64, v uint64) {
 				minRow = i
 			}
 
-		} else {
-
-			b.Hash = hash
-			b.Val = v
-			b.HasKey = true
-			return
+		} else if free == nil {
+			free = b
 		}
+	}
+
+	if free != nil {
+		free.Key = key
+		free.Val = v
+		free.HasKey = true
+		return
 	}
 
 	if minRow >= c.d {
 		minRow = 0
 	}
 
-	idx := c.hashIndex(minRow, hash)
+	idx := c.hashIndex(minRow, key)
 	b := &c.table[minRow][idx]
 
 	b.Val += v
 
 	if float64(v)/float64(b.Val) > c.rng.Float64() {
-		b.Hash = hash
+		b.Key = key
 	}
 }
 
+// InsertWithHash counts one occurrence of the key hashKey(hash).
 func (c *CocoSketch) InsertWithHash(hash uint64) {
-	c.insertKeyValue(hash, 1)
+	c.insertKeyValue(hashKey(hash), 1)
 }
 
 func (c *CocoSketch) Insert(key string, v uint64) {
@@ -119,31 +134,30 @@ func (c *CocoSketch) Insert(key string, v uint64) {
 		return
 	}
 
-	hash := common.Hash64([]byte(key))
-	c.insertKeyValue(hash, v)
+	c.insertKeyValue(key, v)
 }
 
+// EstimateHash estimates the key hashKey(hash).
 func (c *CocoSketch) EstimateHash(hash uint64) uint64 {
+	return c.Estimate(hashKey(hash))
+}
+
+// Estimate sums the buckets key maps to that hold key.
+func (c *CocoSketch) Estimate(key string) uint64 {
 
 	total := uint64(0)
 
 	for i := 0; i < c.d; i++ {
 
-		idx := c.hashIndex(i, hash)
+		idx := c.hashIndex(i, key)
 		b := c.table[i][idx]
 
-		if b.HasKey && b.Hash == hash {
+		if b.HasKey && b.Key == key {
 			total += b.Val
 		}
 	}
 
 	return total
-}
-
-func (c *CocoSketch) Estimate(partialKey string) uint64 {
-
-	hash := common.Hash64([]byte(partialKey))
-	return c.EstimateHash(hash)
 }
 
 func (c *CocoSketch) EstimateWithUDF(partialKey string, udf func(full, partial string) bool) uint64 {
@@ -159,9 +173,7 @@ func (c *CocoSketch) EstimateWithUDF(partialKey string, udf func(full, partial s
 				continue
 			}
 
-			keyStr := strconv.FormatUint(b.Hash, 16)
-
-			if udf(keyStr, partialKey) {
+			if udf(b.Key, partialKey) {
 				total += b.Val
 			}
 		}
@@ -201,7 +213,7 @@ func (c *CocoSketch) Merge(other common.Sketch) error {
 			b := o.table[i][j]
 
 			if b.HasKey {
-				c.insertKeyValue(b.Hash, b.Val)
+				c.insertKeyValue(b.Key, b.Val)
 			}
 		}
 	}
@@ -216,53 +228,4 @@ func (c *CocoSketch) Clear() {
 			c.table[i][j] = cocoBucket{}
 		}
 	}
-}
-
-type cocoSnapshot struct {
-	D     int
-	W     int
-	Table [][]cocoBucket
-}
-
-func (c *CocoSketch) SerializeToBytes() ([]byte, error) {
-
-	table := make([][]cocoBucket, c.d)
-
-	for i := 0; i < c.d; i++ {
-		table[i] = append([]cocoBucket(nil), c.table[i]...)
-	}
-
-	return common.EncodeToBytes(cocoSnapshot{
-		D:     c.d,
-		W:     c.length,
-		Table: table,
-	})
-}
-
-func DeserializeCocoSketchFromBytes(data []byte) (*CocoSketch, error) {
-
-	var snap cocoSnapshot
-
-	if err := common.DecodeFromBytes(data, &snap); err != nil {
-		return nil, err
-	}
-
-	if snap.D <= 0 || snap.W <= 0 {
-		return nil, errors.New("invalid snapshot dimensions")
-	}
-
-	tableStore, err := storage.Vector2DFrom2D[cocoBucket](snap.Table)
-	if err != nil {
-		return nil, err
-	}
-
-	src := rand.NewSource(time.Now().UnixNano())
-
-	return &CocoSketch{
-		d:          snap.D,
-		length:     snap.W,
-		tableStore: tableStore,
-		table:      tableStore.As2D(),
-		rng:        rand.New(src),
-	}, nil
 }

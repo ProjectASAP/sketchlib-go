@@ -1,6 +1,6 @@
 # Cross-Language Integration Test
 
-Verifies that all nine sketch types serialise correctly from **sketchlib-go** (Go producer)
+Verifies that eight sketch types serialise correctly from **sketchlib-go** (Go producer)
 and deserialise correctly in **sketchlib-rust** (Rust consumer) using the shared
 protobuf wire format defined in `proto/sketchlib.proto`.
 
@@ -13,7 +13,6 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 | `ddsketch.pb` | DDSketch (alpha=0.01) | `p50 ≈ 5000`, `p99 ≈ 9900` |
 | `hll.pb` | HyperLogLog (DataFusion, p=14) | `cardinality ≈ 50 000` |
 | `countsketch.pb` | CountSketch (3 × 512, float64) | `freq("cs:hot") ≥ 200` |
-| `coco.pb` | CocoSketch (d=5, width=128) | `estimate("coco:hot") ≥ 500` |
 | `elastic.pb` | ElasticSketch (64 heavy buckets) | `estimate("elephant") ≥ 900` |
 | `univmon.pb` | UnivMon (8 layers, CS 3 × 2048) | `g-sum cardinality ∈ [1 000, 15 000]` |
 | `hydra.pb` | HydraSketch (4 × 4 CM cells) | `freq("hydra:42") ≥ 51` |
@@ -24,7 +23,7 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 sketchlib-go/
   tests/cross_language/
     run_test.sh          ← orchestrates both phases
-    producer_test.go     ← Go test that writes the 9 .pb files (no binary)
+    producer_test.go     ← Go test that writes the 8 .pb files (no binary)
     README.md            ← this file
 
 sketchlib-rust/
@@ -92,7 +91,6 @@ KLL.SerializePortable()             →  kll.pb       →  decode + quantile que
 DDSketch.SerializePortable()        →  ddsketch.pb  →  decode + quantile query
 HyperLogLog.SerializePortable()     →  hll.pb       →  decode + DataFusion estimate
 CountSketch.SerializePortable()     →  countsketch.pb → decode + median signed freq
-CocoSketch.SerializePortable()      →  coco.pb      →  decode + DeriveIndex lookup
 ElasticSketch.SerializePortable()   →  elastic.pb   →  decode + heavy/light query
 UnivSketch.SerializePortable()      →  univmon.pb   →  decode + g-sum cardinality
 Hydra.SerializePortable()           →  hydra.pb     →  decode + xorshift route + CM min
@@ -107,7 +105,7 @@ Seed roles:
 
 | Seed index | Value | Used by |
 |------------|-------|---------|
-| 0 | `0xcafe3553` | `Hash64` — CountMin, CountSketch, CocoSketch, UnivMon heap |
+| 0 | `0xcafe3553` | `Hash64` — CountMin, CountSketch, UnivMon heap |
 | 5 | `0x6a09e667` | `CanonicalHashSeed` — HLL insert, ElasticSketch |
 | 6 | `0xbb67ae85` | `defaultHydraSeed` — Hydra cell routing |
 
