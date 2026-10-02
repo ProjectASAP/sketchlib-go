@@ -73,43 +73,6 @@ type CountSketch struct {
 	hashWriteForeign bool
 }
 
-func (s *CountSketch) rehydrateStorage() error {
-	if s.Rows <= 0 || s.Cols <= 0 {
-		return errors.New("invalid snapshot dimensions")
-	}
-	if s.Cols&(s.Cols-1) != 0 {
-		return errors.New("invalid snapshot: cols must be power-of-two")
-	}
-	if len(s.Count) != s.Rows {
-		return errors.New("invalid snapshot matrix row count")
-	}
-	for r := 0; r < s.Rows; r++ {
-		if len(s.Count[r]) != s.Cols {
-			return errors.New("invalid snapshot matrix col count")
-		}
-	}
-	if len(s.L2) != s.Rows {
-		return errors.New("invalid snapshot l2 size")
-	}
-
-	if s.TopK == nil {
-		s.TopK = common.NewTopKHeap(TOPK_SIZE)
-	}
-	if s.SS == nil {
-		s.SS = spacesaving.NewSpaceSaving(TOPK_SIZE)
-	}
-
-	countStore, err := storage.NewFlatVector2DFrom2D(s.Count)
-	if err != nil {
-		return err
-	}
-
-	s.countStore = countStore
-	s.Count = countStore.As2D()
-	s.bitsPerRow = uint(bits.TrailingZeros(uint(s.Cols)))
-	return nil
-}
-
 // NewCountSketch creates the float64-counter CountSketch.
 // Usage:
 //
@@ -683,21 +646,4 @@ func (s *CountSketch) Flush(emit func(common.DeltaUpdate)) {
 		emit(common.DeltaUpdate{Row: row, Col: col, Value: val})
 		s.SetCell(row, col, 0)
 	})
-}
-
-// SerializeToBytes serializes CountSketch into bytes.
-func (s *CountSketch) SerializeToBytes() ([]byte, error) {
-	return common.EncodeToBytes(s)
-}
-
-// DeserializeCountSketchFromBytes restores CountSketch from serialized bytes.
-func DeserializeCountSketchFromBytes(data []byte) (*CountSketch, error) {
-	var s CountSketch
-	if err := common.DecodeFromBytes(data, &s); err != nil {
-		return nil, err
-	}
-	if err := s.rehydrateStorage(); err != nil {
-		return nil, err
-	}
-	return &s, nil
 }

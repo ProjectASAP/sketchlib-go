@@ -15,8 +15,8 @@ package spacesaving
 // Candidates cost: O(k) — return all tracked key strings.
 type SpaceSaving struct {
 	k     int
-	heap  []ssEntry          // binary min-heap ordered by count
-	index map[string]int     // key → heap position for O(1) lookup
+	heap  []ssEntry      // binary min-heap ordered by count
+	index map[string]int // key → heap position for O(1) lookup
 }
 
 type ssEntry struct {
@@ -89,24 +89,6 @@ func (ss *SpaceSaving) K() int { return ss.k }
 func (ss *SpaceSaving) Reset() {
 	ss.heap = ss.heap[:0]
 	ss.index = make(map[string]int, ss.k)
-}
-
-// GobEncode implements encoding.GobEncoder.
-// SpaceSaving state is ephemeral (rebuilt on subsequent inserts), so we encode
-// only the capacity k. The tracked entries are not persisted.
-func (ss *SpaceSaving) GobEncode() ([]byte, error) {
-	return []byte{byte(ss.k >> 24), byte(ss.k >> 16), byte(ss.k >> 8), byte(ss.k)}, nil
-}
-
-// GobDecode implements encoding.GobDecoder.
-// Restores the capacity k and initialises an empty tracker.
-func (ss *SpaceSaving) GobDecode(data []byte) error {
-	if len(data) == 4 {
-		ss.k = int(data[0])<<24 | int(data[1])<<16 | int(data[2])<<8 | int(data[3])
-	}
-	ss.heap = make([]ssEntry, 0, ss.k)
-	ss.index = make(map[string]int, ss.k)
-	return nil
 }
 
 // heapifyUp bubbles entry at index i up until the min-heap property holds.

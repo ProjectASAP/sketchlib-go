@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-
-	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
 type Number interface {
@@ -220,49 +218,6 @@ func (v *Vector2D[T]) FastQueryAggregate(
 		acc = aggFn(acc, r, v.At(r, c))
 	}
 	return acc
-}
-
-type vector2DSnapshot[T any] struct {
-	Data     []T
-	Rows     int
-	Cols     int
-	MaskBits uint
-	Mask     uint64
-	HashMode MatrixHashMode
-}
-
-func (v *Vector2D[T]) SerializeToBytes() ([]byte, error) {
-	return common.EncodeToBytes(vector2DSnapshot[T]{
-		Data:     v.data,
-		Rows:     v.rows,
-		Cols:     v.cols,
-		MaskBits: v.maskBits,
-		Mask:     v.mask,
-		HashMode: v.hashMode,
-	})
-}
-
-func DeserializeVector2DFromBytes[T any](data []byte) (*Vector2D[T], error) {
-	var snap vector2DSnapshot[T]
-	if err := common.DecodeFromBytes(data, &snap); err != nil {
-		return nil, err
-	}
-	if snap.Rows <= 0 || snap.Cols <= 0 {
-		return nil, errors.New("invalid dimensions")
-	}
-	if len(snap.Data) != snap.Rows*snap.Cols {
-		return nil, errors.New("invalid data size")
-	}
-
-	v, err := InitVector2D[T](snap.Rows, snap.Cols)
-	if err != nil {
-		return nil, err
-	}
-	copy(v.data, snap.Data)
-	v.maskBits = snap.MaskBits
-	v.mask = snap.Mask
-	v.hashMode = snap.HashMode
-	return v, nil
 }
 
 // Compatibility aliases/wrappers for existing float64 sketch code paths.

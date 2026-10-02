@@ -1,9 +1,6 @@
 package storage
 
-import (
-	"encoding/json"
-	"testing"
-)
+import "testing"
 
 func TestVector1D_BasicOps(t *testing.T) {
 	traceTest(t)
@@ -133,23 +130,5 @@ func TestVector1D_SwapSortAndUpdateOneCounter(t *testing.T) {
 	v.SortBy(func(a, b int) int { return a - b })
 	if got := v.AsSlice(); got[0] != 2 || got[1] != 3 || got[2] != 11 {
 		t.Fatalf("SortBy failed: %+v", got)
-	}
-}
-
-func TestVector1D_JSONRoundTrip(t *testing.T) {
-	traceTest(t)
-	in := Vector1DFromVec([]int{4, 5, 6})
-	raw, err := json.Marshal(in)
-	if err != nil {
-		t.Fatalf("marshal failed: %v", err)
-	}
-
-	var out Vector1D[int]
-	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("unmarshal failed: %v", err)
-	}
-	got := out.AsSlice()
-	if len(got) != 3 || got[0] != 4 || got[2] != 6 {
-		t.Fatalf("json round-trip mismatch: %+v", got)
 	}
 }

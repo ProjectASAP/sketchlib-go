@@ -41,33 +41,6 @@ func TestFlatVector2D_From2D(t *testing.T) {
 	}
 }
 
-func TestVector2D_SerializeRoundTrip(t *testing.T) {
-	traceTest(t)
-	m, err := Vector2DFromFn[float64](2, 3, func(r, c int) float64 {
-		return float64(r*10 + c)
-	})
-	if err != nil {
-		t.Fatalf("from_fn: %v", err)
-	}
-
-	data, err := m.SerializeToBytes()
-	if err != nil {
-		t.Fatalf("serialize: %v", err)
-	}
-
-	out, err := DeserializeVector2DFromBytes[float64](data)
-	if err != nil {
-		t.Fatalf("deserialize: %v", err)
-	}
-
-	if out.Rows() != 2 || out.Cols() != 3 {
-		t.Fatalf("metadata mismatch after round-trip")
-	}
-	if out.At(1, 2) != 12 {
-		t.Fatalf("value mismatch after round-trip: got=%v want=12", out.At(1, 2))
-	}
-}
-
 func TestVector2D_RowSliceAndIndex(t *testing.T) {
 	traceTest(t)
 	m, err := InitVector2D[int](2, 4)

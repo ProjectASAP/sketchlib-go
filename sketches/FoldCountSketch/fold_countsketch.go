@@ -51,27 +51,6 @@ func NewFoldCountSketchFull(rows, fullCols int) (*FoldCountSketch, error) {
 	return NewFoldCountSketch(rows, fullCols, 0)
 }
 
-func (s *FoldCountSketch) rehydrate() error {
-	if s.Rows <= 0 || s.FullCols <= 0 || s.FoldCols <= 0 {
-		return errors.New("invalid folded count-sketch dimensions")
-	}
-	if s.FullCols&(s.FullCols-1) != 0 {
-		return errors.New("invalid folded count-sketch fullCols")
-	}
-	if s.FoldCols != s.FullCols>>s.FoldLevel {
-		return errors.New("invalid folded count-sketch foldCols")
-	}
-	if len(s.Cells) != s.Rows*s.FoldCols {
-		return errors.New("invalid folded count-sketch cell count")
-	}
-	if len(s.L2) != s.Rows {
-		return errors.New("invalid folded count-sketch norm size")
-	}
-	s.bitsPerRow = uint(bits.TrailingZeros(uint(s.FullCols)))
-	s.mask = uint64(s.FullCols - 1)
-	return nil
-}
-
 func (s *FoldCountSketch) TypeName() string { return "fold_countsketch" }
 
 func (s *FoldCountSketch) RowCount() int  { return s.Rows }
@@ -293,21 +272,6 @@ func (s *FoldCountSketch) Reset() {
 		s.Cells[i].Clear()
 	}
 	clear(s.L2)
-}
-
-func (s *FoldCountSketch) SerializeToBytes() ([]byte, error) {
-	return common.EncodeToBytes(s)
-}
-
-func DeserializeFoldCountSketchFromBytes(data []byte) (*FoldCountSketch, error) {
-	var s FoldCountSketch
-	if err := common.DecodeFromBytes(data, &s); err != nil {
-		return nil, err
-	}
-	if err := s.rehydrate(); err != nil {
-		return nil, err
-	}
-	return &s, nil
 }
 
 func (s *FoldCountSketch) scatterInto(target *FoldCountSketch) {

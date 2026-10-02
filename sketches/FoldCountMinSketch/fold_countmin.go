@@ -53,27 +53,6 @@ func NewFoldCountMinSketchFull(rows, fullCols int) (*FoldCountMinSketch, error) 
 	return NewFoldCountMinSketch(rows, fullCols, 0)
 }
 
-func (s *FoldCountMinSketch) rehydrate() error {
-	if s.Rows <= 0 || s.FullCols <= 0 || s.FoldCols <= 0 {
-		return errors.New("invalid folded count-min dimensions")
-	}
-	if s.FullCols&(s.FullCols-1) != 0 {
-		return errors.New("invalid folded count-min fullCols")
-	}
-	if s.FoldCols != s.FullCols>>s.FoldLevel {
-		return errors.New("invalid folded count-min foldCols")
-	}
-	if len(s.Cells) != s.Rows*s.FoldCols {
-		return errors.New("invalid folded count-min cell count")
-	}
-	if len(s.L1) != s.Rows || len(s.L2) != s.Rows {
-		return errors.New("invalid folded count-min norm sizes")
-	}
-	s.bitsPerRow = uint(bits.TrailingZeros(uint(s.FullCols)))
-	s.mask = uint64(s.FullCols - 1)
-	return nil
-}
-
 func (s *FoldCountMinSketch) TypeName() string { return "fold_countmin" }
 
 func (s *FoldCountMinSketch) RowCount() int  { return s.Rows }
@@ -278,21 +257,6 @@ func (s *FoldCountMinSketch) Reset() {
 	}
 	clear(s.L1)
 	clear(s.L2)
-}
-
-func (s *FoldCountMinSketch) SerializeToBytes() ([]byte, error) {
-	return common.EncodeToBytes(s)
-}
-
-func DeserializeFoldCountMinSketchFromBytes(data []byte) (*FoldCountMinSketch, error) {
-	var s FoldCountMinSketch
-	if err := common.DecodeFromBytes(data, &s); err != nil {
-		return nil, err
-	}
-	if err := s.rehydrate(); err != nil {
-		return nil, err
-	}
-	return &s, nil
 }
 
 func (s *FoldCountMinSketch) scatterInto(target *FoldCountMinSketch) {
