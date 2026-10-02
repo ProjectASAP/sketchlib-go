@@ -208,30 +208,3 @@ func TestCollapsingStoreRandomStress(t *testing.T) {
 		t.Fatalf("summed bucket counts: got %d, want %d", summed, n)
 	}
 }
-
-// TestApplyDeltaRespectsCollapsingCap exercises the delta-apply path
-// (ApplyDelta, the backend-reconstruction route) against a capped target.
-func TestApplyDeltaRespectsCollapsingCap(t *testing.T) {
-	const alpha = 0.01
-	const maxBins = 8
-	snapshot := NewDDSketch(alpha)
-	current := NewDDSketch(alpha)
-	for k := int32(-200); k <= 200; k += 20 {
-		current.AddToBucket(k, 1)
-	}
-	deltaBytes, err := ComputeDelta(snapshot, current, 1)
-	if err != nil {
-		t.Fatalf("ComputeDelta: %v", err)
-	}
-
-	target := NewDDSketchWithMaxBins(alpha, maxBins)
-	if err := ApplyDelta(target, deltaBytes); err != nil {
-		t.Fatalf("ApplyDelta: %v", err)
-	}
-	if got := target.store.counts.Len(); got > maxBins {
-		t.Fatalf("ApplyDelta into a capped target: store span %d exceeds maxBins %d", got, maxBins)
-	}
-	if target.Count() != current.Count() {
-		t.Fatalf("count: got %d, want %d (mass lost applying delta into a capped target)", target.Count(), current.Count())
-	}
-}

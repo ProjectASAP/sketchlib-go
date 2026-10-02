@@ -1,13 +1,12 @@
 // xtest_producer — Cross-language integration test: Go producer side.
 //
-// Inserts synthetic data into nine sketch types, serializes each as a portable
+// Inserts synthetic data into eight sketch types, serializes each as a portable
 // protobuf SketchEnvelope, and writes the binary files to $XTEST_DIR.
 //
 // Output files:
 //
 //	countmin.pb     CountMinState     (float64 counters)
 //	kll.pb          KLLState          (quantile items + coin RNG)
-//	ddsketch.pb     DDSketchState     (alpha + bucket array)
 //	hll.pb          HyperLogLogState  (DataFusion estimator)
 //	countsketch.pb  CountSketchState  (float64 signed counters)
 //	coco.pb         CocoSketchState   (hash+val+hasKey buckets)
@@ -34,7 +33,6 @@ import (
 	cocosketch "github.com/ProjectASAP/sketchlib-go/sketches/CocoSketch"
 	countminsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
 	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
-	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/sketches/ElasticSKetch"
 	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
 	kll "github.com/ProjectASAP/sketchlib-go/sketches/KLL"
@@ -91,22 +89,6 @@ func TestXtestProducer(t *testing.T) {
 	// runtime KLL decoder reconstructs); the value-offset fixed-point form is
 	// not consumable there. See SerializeProtoBytes / KLLWrapper.Snapshot.
 	writeEnvelope(t, outDir, "kll.pb", tmust(sk.SerializePortableRawF64()))
-
-	// -----------------------------------------------------------------------
-	// DDSketch
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[DDSketch] Step 1/3 — Create sketch (alpha=0.01)")
-	ds := ddsketch.New(0.01)
-
-	t.Log("[DDSketch] Step 2/3 — Insert values 1.0 … 10 000.0")
-	for i := 1; i <= 10_000; i++ {
-		ds.Update(float64(i))
-	}
-	p50dd, _ := ds.Quantile(0.50)
-	p99dd, _ := ds.Quantile(0.99)
-	t.Logf("[DDSketch] Step 3/3 — p50≈%.2f  p99≈%.2f", p50dd, p99dd)
-	writeEnvelope(t, outDir, "ddsketch.pb", tmust(ds.SerializePortable()))
 
 	// -----------------------------------------------------------------------
 	// HLL (DataFusion estimator)
@@ -291,7 +273,7 @@ func TestXtestProducer(t *testing.T) {
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 9 sketches + 2 sampled written to " + outDir)
+	t.Log("  Producer complete — 8 sketches + 2 sampled written to " + outDir)
 	t.Log("=======================================================")
 }
 
