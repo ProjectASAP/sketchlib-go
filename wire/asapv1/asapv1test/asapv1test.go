@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -76,30 +77,34 @@ func window(b []byte, i int) []byte {
 	return b[max(0, min(i, len(b))-8):min(len(b), i+24)]
 }
 
-// CheckMarshal fails t unless m marshals to the fixture name.
-func CheckMarshal(t testing.TB, name string, m asapv1.Marshaler) {
+// CheckGolden checks a codec against the fixture name: known marshals to it,
+// it unmarshals into a fresh value equal to known, and that value re-marshals
+// to it. eq compares states; nil means reflect.DeepEqual.
+func CheckGolden[T any, P interface {
+	*T
+	asapv1.Marshaler
+	asapv1.Unmarshaler
+}](t testing.TB, name string, known P, eq func(got, want P) bool) {
 	t.Helper()
-	got, err := m.MarshalASAPv1()
+	want := Golden(t, name)
+	got, err := known.MarshalASAPv1()
 	if err != nil {
 		t.Fatalf("%s: MarshalASAPv1: %v", name, err)
 	}
-	Equal(t, got, Golden(t, name))
-}
-
-// CheckRoundTrip unmarshals the fixture name into u and fails t unless u
-// re-marshals to the same bytes.
-func CheckRoundTrip(t testing.TB, name string, u interface {
-	asapv1.Marshaler
-	asapv1.Unmarshaler
-}) {
-	t.Helper()
-	want := Golden(t, name)
-	if err := u.UnmarshalASAPv1(want); err != nil {
+	Equal(t, got, want)
+	fresh := P(new(T))
+	if err := fresh.UnmarshalASAPv1(want); err != nil {
 		t.Fatalf("%s: UnmarshalASAPv1: %v", name, err)
 	}
-	got, err := u.MarshalASAPv1()
+	if eq == nil {
+		eq = func(got, want P) bool { return reflect.DeepEqual(got, want) }
+	}
+	if !eq(fresh, known) {
+		t.Fatalf("%s: decoded state differs\n got: %+v\nwant: %+v", name, fresh, known)
+	}
+	again, err := fresh.MarshalASAPv1()
 	if err != nil {
 		t.Fatalf("%s: re-MarshalASAPv1: %v", name, err)
 	}
-	Equal(t, got, want)
+	Equal(t, again, want)
 }

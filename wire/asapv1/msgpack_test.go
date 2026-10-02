@@ -294,11 +294,86 @@ func TestSkip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, in := range []string{"", "c1", "92 01", "dd ffffffff", "df ffffffff", "c6 ffffffff", "81 01"} {
+	for _, in := range []string{"", "c1", "92 01", "dd ffffffff", "df ffffffff", "c6 ffffffff", "81 01", "92 dc0002 01"} {
 		d := NewDecoder(mustHex(t, in))
 		d.Skip()
 		if d.Finish() == nil {
 			t.Errorf("Skip(%q) succeeded", in)
 		}
+	}
+}
+
+func TestStrUTF8(t *testing.T) {
+	for _, s := range []string{"\xff", "a\xc3", "\xed\xa0\x80"} {
+		e := NewEncoder()
+		e.Str(s)
+		if e.Err() == nil {
+			t.Errorf("Encoder.Str(%q) recorded no error", s)
+		}
+		raw := append([]byte{0xa0 | byte(len(s))}, s...)
+		d := NewDecoder(raw)
+		d.Str()
+		if d.Finish() == nil {
+			t.Errorf("Decoder.Str accepted %x", raw)
+		}
+	}
+	for _, s := range []string{"", "héllo", "日本"} {
+		d := NewDecoder(encoded(func(e *Encoder) { e.Str(s) }))
+		if got := d.Str(); got != s || d.Finish() != nil {
+			t.Errorf("Str round trip of %q = %q (%v)", s, got, d.Err())
+		}
+	}
+}
+
+func TestEncoderKeepsFirstError(t *testing.T) {
+	e := NewEncoder()
+	e.Array(-1)
+	first := e.Err()
+	if first == nil || len(e.Bytes()) != 0 {
+		t.Fatalf("Array(-1) = %x, err %v", e.Bytes(), first)
+	}
+	e.Map(-5)
+	e.Str("\xff")
+	if e.Err() != first {
+		t.Fatalf("Err = %v, want first error %v", e.Err(), first)
+	}
+	e = NewEncoder()
+	e.Map(-1)
+	if e.Err() == nil {
+		t.Fatal("Map(-1) recorded no error")
+	}
+}
+
+func TestRaw(t *testing.T) {
+	inner := encoded(func(e *Encoder) {
+		e.Array(2)
+		EncodeInts(e, []int64{-1, 300})
+		e.Str("x")
+	})
+	outer := encoded(func(e *Encoder) {
+		e.Array(2)
+		e.Raw(inner)
+		e.Uint(7)
+	})
+	d := NewDecoder(outer)
+	d.ExpectArray(2)
+	got := d.Raw()
+	if v := d.Uint(); v != 7 || d.Finish() != nil {
+		t.Fatalf("value after Raw = %d (%v)", v, d.Err())
+	}
+	if !bytes.Equal(got, inner) {
+		t.Fatalf("Raw = %x, want %x", got, inner)
+	}
+
+	for _, bad := range [][]byte{nil, {0x92, 0x01}, {0x01, 0x02}, {0xc1}} {
+		e := NewEncoder()
+		e.Raw(bad)
+		if e.Err() == nil || len(e.Bytes()) != 0 {
+			t.Errorf("Encoder.Raw(%x) = %x, err %v", bad, e.Bytes(), e.Err())
+		}
+	}
+	d = NewDecoder([]byte{0x92, 0x01})
+	if b := d.Raw(); b != nil || d.Err() == nil {
+		t.Errorf("Decoder.Raw on a truncated array = %x, err %v", b, d.Err())
 	}
 }

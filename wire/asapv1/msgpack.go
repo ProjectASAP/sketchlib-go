@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"unicode/utf8"
 )
 
 // Unsigned is the set of unsigned integer types the slice helpers accept.
@@ -17,9 +18,11 @@ type Signed interface {
 }
 
 // Encoder writes the MessagePack subset ASAPv1 uses, choosing every family and
-// width exactly as rmp_serde does.
+// width exactly as rmp_serde does. It keeps the first error, which Err reports;
+// the bytes are invalid once an error is recorded.
 type Encoder struct {
 	buf []byte
+	err error
 }
 
 // NewEncoder returns an empty Encoder.
@@ -28,6 +31,16 @@ func NewEncoder() *Encoder { return &Encoder{buf: make([]byte, 0, 64)} }
 // Bytes returns the encoded bytes.
 func (e *Encoder) Bytes() []byte { return e.buf }
 
+// Err returns the first error the Encoder hit, or nil.
+func (e *Encoder) Err() error { return e.err }
+
+// Fail records err as the Encoder's error unless one is already recorded.
+func (e *Encoder) Fail(err error) {
+	if e.err == nil {
+		e.err = err
+	}
+}
+
 // Array writes an array header for n elements.
 func (e *Encoder) Array(n int) { e.header(n, 0x90, 15, 0xdc, 0xdd) }
 
@@ -35,6 +48,10 @@ func (e *Encoder) Array(n int) { e.header(n, 0x90, 15, 0xdc, 0xdd) }
 func (e *Encoder) Map(n int) { e.header(n, 0x80, 15, 0xde, 0xdf) }
 
 func (e *Encoder) header(n int, fix byte, fixMax int, m16, m32 byte) {
+	if n < 0 || uint64(n) > math.MaxUint32 {
+		e.Fail(fmt.Errorf("asapv1: container length %d out of range", n))
+		return
+	}
 	switch {
 	case n <= fixMax:
 		e.buf = append(e.buf, fix|byte(n))
@@ -112,9 +129,17 @@ func (e *Encoder) Bool(v bool) {
 // Nil writes nil (0xc0).
 func (e *Encoder) Nil() { e.buf = append(e.buf, 0xc0) }
 
-// Str writes s as a str at its minimal width.
+// Str writes s as a str at its minimal width. s must be valid UTF-8.
 func (e *Encoder) Str(s string) {
+	if !utf8.ValidString(s) {
+		e.Fail(fmt.Errorf("asapv1: str %q is not valid UTF-8", s))
+		return
+	}
 	n := len(s)
+	if uint64(n) > math.MaxUint32 {
+		e.Fail(fmt.Errorf("asapv1: str of %d bytes exceeds 4 GiB", n))
+		return
+	}
 	switch {
 	case n <= 31:
 		e.buf = append(e.buf, 0xa0|byte(n))
@@ -133,6 +158,10 @@ func (e *Encoder) Str(s string) {
 // Bin writes b as a bin at its minimal width.
 func (e *Encoder) Bin(b []byte) {
 	n := len(b)
+	if uint64(n) > math.MaxUint32 {
+		e.Fail(fmt.Errorf("asapv1: bin of %d bytes exceeds 4 GiB", n))
+		return
+	}
 	switch {
 	case n <= math.MaxUint8:
 		e.buf = append(e.buf, 0xc4, byte(n))
@@ -142,6 +171,17 @@ func (e *Encoder) Bin(b []byte) {
 	default:
 		e.buf = append(e.buf, 0xc6)
 		e.buf = binary.BigEndian.AppendUint32(e.buf, uint32(n))
+	}
+	e.buf = append(e.buf, b...)
+}
+
+// Raw appends b, which must be exactly one encoded value.
+func (e *Encoder) Raw(b []byte) {
+	d := NewDecoder(b)
+	d.Skip()
+	if err := d.Finish(); err != nil {
+		e.Fail(fmt.Errorf("asapv1: raw value: %w", err))
+		return
 	}
 	e.buf = append(e.buf, b...)
 }
@@ -419,7 +459,7 @@ func (d *Decoder) Nil() bool {
 	return false
 }
 
-// Str reads a str.
+// Str reads a str, which must be valid UTF-8.
 func (d *Decoder) Str() string {
 	b, ok := d.next()
 	if !ok {
@@ -439,7 +479,12 @@ func (d *Decoder) Str() string {
 		d.failf("expected str, got 0x%02x at offset %d", b, d.pos-1)
 		return ""
 	}
-	return string(d.take(int(n)))
+	raw := d.take(int(n))
+	if raw != nil && !utf8.Valid(raw) {
+		d.failf("str at offset %d is not valid UTF-8", d.pos-len(raw))
+		return ""
+	}
+	return string(raw)
 }
 
 // Bin reads a bin and returns a copy of its bytes.
@@ -469,17 +514,18 @@ func (d *Decoder) Bin() []byte {
 
 // Skip reads past one complete value of any type.
 func (d *Decoder) Skip() {
-	for pending := 1; pending > 0 && d.err == nil; pending-- {
+	for pending := uint64(1); pending > 0 && d.err == nil; pending-- {
 		b, ok := d.next()
 		if !ok {
 			return
 		}
+		var entries uint64
 		switch {
 		case b <= 0x7f || b >= 0xe0 || b == 0xc0 || b == 0xc2 || b == 0xc3:
 		case b&0xf0 == 0x80:
-			pending += 2 * int(b&0x0f)
+			entries = 2 * uint64(b&0x0f)
 		case b&0xf0 == 0x90:
-			pending += int(b & 0x0f)
+			entries = uint64(b & 0x0f)
 		case b&0xe0 == 0xa0:
 			d.take(int(b & 0x1f))
 		case b == 0xcc || b == 0xd0:
@@ -497,17 +543,32 @@ func (d *Decoder) Skip() {
 		case b == 0xc6 || b == 0xdb:
 			d.take(int(d.be(4)))
 		case b == 0xdc:
-			pending += int(d.be(2))
+			entries = d.be(2)
 		case b == 0xdd:
-			pending += int(d.be(4))
+			entries = d.be(4)
 		case b == 0xde:
-			pending += 2 * int(d.be(2))
+			entries = 2 * d.be(2)
 		case b == 0xdf:
-			pending += 2 * int(d.be(4))
+			entries = 2 * d.be(4)
 		default:
 			d.failf("unsupported msgpack type 0x%02x at offset %d", b, d.pos-1)
 		}
+		if d.err == nil && pending-1+entries > uint64(len(d.buf)-d.pos) {
+			d.failf("container at offset %d holds more values than the remaining %d bytes", d.pos, len(d.buf)-d.pos)
+		}
+		pending += entries
 	}
+}
+
+// Raw reads past one complete value and returns its encoded bytes, which
+// alias the input.
+func (d *Decoder) Raw() []byte {
+	start := d.pos
+	d.Skip()
+	if d.err != nil {
+		return nil
+	}
+	return d.buf[start:d.pos]
 }
 
 // DecodeUints reads an array of non-negative integers, each of which must fit T.

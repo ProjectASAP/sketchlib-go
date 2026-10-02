@@ -101,7 +101,7 @@ func TestEncodeRejectsLongKind(t *testing.T) {
 }
 
 func TestOpen(t *testing.T) {
-	md := NewMetadataWriter()
+	md := NewMetadataWriter(1)
 	md.Uint("k", 7)
 	p := NewEncoder()
 	p.Array(1)
@@ -126,5 +126,23 @@ func TestOpen(t *testing.T) {
 	bad, _ := Encode(KindKLL, []byte{0x90}, p.Bytes())
 	if _, _, err := Open(bad, KindKLL); err == nil {
 		t.Error("Open accepted an array as metadata")
+	}
+}
+
+func TestMarshalReturnsPayloadError(t *testing.T) {
+	p := NewEncoder()
+	p.Array(1)
+	p.Str("\xff")
+	if _, err := Marshal(KindCoco, NewMetadataWriter(1), p); err == nil {
+		t.Fatal("Marshal ignored the payload error")
+	}
+	p = NewEncoder()
+	p.Array(0)
+	b, err := Marshal(KindCoco, NewMetadataWriter(1), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, m, pl, err := Split(b); err != nil || !bytes.Equal(m, NewMetadataWriter(1).Bytes()) || !bytes.Equal(pl, []byte{0x90}) {
+		t.Fatalf("Marshal = %x (%v)", b, err)
 	}
 }

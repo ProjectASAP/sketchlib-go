@@ -26,6 +26,30 @@ type Unmarshaler interface {
 	UnmarshalASAPv1(b []byte) error
 }
 
+// PayloadEncoder is implemented by a sketch type whose payload can be carried
+// as one element of another sketch's payload.
+type PayloadEncoder interface {
+	EncodeASAPv1Payload(e *Encoder) error
+}
+
+// PayloadDecoder is implemented by a pointer to a sketch type whose payload
+// can be carried as one element of another sketch's payload.
+type PayloadDecoder interface {
+	DecodeASAPv1Payload(md *MetadataReader, d *Decoder) error
+}
+
+// Marshal frames the metadata and payload in an envelope tagged with kind, or
+// returns the first error either recorded.
+func Marshal(kind KindID, md *MetadataWriter, payload *Encoder) ([]byte, error) {
+	if err := md.Err(); err != nil {
+		return nil, err
+	}
+	if err := payload.Err(); err != nil {
+		return nil, err
+	}
+	return Encode(kind, md.Bytes(), payload.Bytes())
+}
+
 // Encode frames metadata and payload in an envelope tagged with kind.
 func Encode(kind KindID, metadata, payload []byte) ([]byte, error) {
 	if len(kind) > math.MaxUint8 {

@@ -7,9 +7,6 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
-// MetadataVersion is the metadata schema version every map opens with.
-const MetadataVersion = 1
-
 // HashProfile is the identified set of hash constants a sketch was built with.
 // Its values form the hash-spec group of the metadata.
 type HashProfile struct {
@@ -40,38 +37,44 @@ func StandardProfile() HashProfile {
 type SeedIndex int
 
 const (
-	// NoSeedIndex carries no seed-index key, for a sketch whose hash index is
+	// SeedIndexNone carries no seed-index key, for a sketch whose hash index is
 	// fixed by its algorithm.
-	NoSeedIndex SeedIndex = iota
-	// CanonicalSeedIndex carries canonical_seed_index.
-	CanonicalSeedIndex
-	// MatrixSeedIndex carries matrix_seed_index.
-	MatrixSeedIndex
+	SeedIndexNone SeedIndex = iota
+	// SeedIndexCanonical carries canonical_seed_index.
+	SeedIndexCanonical
+	// SeedIndexMatrix carries matrix_seed_index.
+	SeedIndexMatrix
 )
 
-func (p HashProfile) seedIndex(idx SeedIndex) (key string, value uint32) {
+func (p HashProfile) seedIndex(idx SeedIndex) (key string, value uint32, err error) {
 	switch idx {
-	case CanonicalSeedIndex:
-		return "canonical_seed_index", p.CanonicalSeedIndex
-	case MatrixSeedIndex:
-		return "matrix_seed_index", p.MatrixSeedIndex
+	case SeedIndexNone:
+		return "", 0, nil
+	case SeedIndexCanonical:
+		return "canonical_seed_index", p.CanonicalSeedIndex, nil
+	case SeedIndexMatrix:
+		return "matrix_seed_index", p.MatrixSeedIndex, nil
 	}
-	return "", 0
+	return "", 0, fmt.Errorf("asapv1: unknown SeedIndex %d", idx)
 }
 
 // MetadataWriter builds a metadata map. Keys are written in call order, which
-// must be the kind's canonical order.
+// must be the kind's canonical order. It keeps the first error, which Err
+// reports.
 type MetadataWriter struct {
 	body Encoder
 	n    int
 }
 
 // NewMetadataWriter returns a writer that has written metadata_version.
-func NewMetadataWriter() *MetadataWriter {
+func NewMetadataWriter(version uint8) *MetadataWriter {
 	w := &MetadataWriter{}
-	w.Uint("metadata_version", MetadataVersion)
+	w.Uint("metadata_version", uint64(version))
 	return w
 }
+
+// Err returns the first error, or nil.
+func (w *MetadataWriter) Err() error { return w.body.err }
 
 // Field writes key and returns the Encoder, on which the caller writes exactly
 // one value.
@@ -107,7 +110,10 @@ func (w *MetadataWriter) HashSpec(p HashProfile, idx SeedIndex) {
 	w.Str("seed_derivation", p.SeedDerivation)
 	w.Str("input_encoding", p.InputEncoding)
 	EncodeUints(w.Field("seed_list"), p.SeedList)
-	if key, v := p.seedIndex(idx); key != "" {
+	key, v, err := p.seedIndex(idx)
+	if err != nil {
+		w.body.Fail(err)
+	} else if key != "" {
 		w.Uint(key, uint64(v))
 	}
 }
@@ -123,14 +129,15 @@ func (w *MetadataWriter) Bytes() []byte {
 // consumes its key. It keeps the first error: after a failure accessors return
 // zero values, and Finish reports the error.
 type MetadataReader struct {
-	keys   []string
-	values map[string][]byte
-	used   map[string]bool
-	err    error
+	keys    []string
+	values  map[string][]byte
+	used    map[string]bool
+	version uint8
+	err     error
 }
 
-// ReadMetadata parses a metadata map and checks its metadata_version. Keys
-// must be str and unique.
+// ReadMetadata parses a metadata map and consumes its metadata_version, which
+// must be present and fit uint8. Keys must be str and unique.
 func ReadMetadata(b []byte) (*MetadataReader, error) {
 	d := NewDecoder(b)
 	n := d.Map()
@@ -151,13 +158,20 @@ func ReadMetadata(b []byte) (*MetadataReader, error) {
 	if err := d.Finish(); err != nil {
 		return nil, fmt.Errorf("asapv1: metadata: %w", err)
 	}
-	if v := r.Uint64("metadata_version"); r.err == nil && v != MetadataVersion {
-		return nil, fmt.Errorf("asapv1: unsupported metadata_version %d", v)
-	}
-	if r.err != nil {
+	if r.version = r.Uint8("metadata_version"); r.err != nil {
 		return nil, r.err
 	}
 	return r, nil
+}
+
+// Version returns the metadata_version.
+func (r *MetadataReader) Version() uint8 { return r.version }
+
+// ExpectVersion fails unless the metadata_version is one of accepted.
+func (r *MetadataReader) ExpectVersion(accepted ...uint8) {
+	if r.err == nil && !slices.Contains(accepted, r.version) {
+		r.fail(fmt.Errorf("asapv1: unsupported metadata_version %d, want one of %v", r.version, accepted))
+	}
 }
 
 func (r *MetadataReader) fail(err error) {
@@ -265,7 +279,10 @@ func (r *MetadataReader) HashSpec(p HashProfile, idx SeedIndex) {
 	if r.err == nil && !slices.Equal(seeds, p.SeedList) {
 		r.fail(fmt.Errorf("asapv1: metadata seed_list %#x, want %#x", seeds, p.SeedList))
 	}
-	if key, v := p.seedIndex(idx); key != "" {
+	key, v, err := p.seedIndex(idx)
+	if err != nil {
+		r.fail(err)
+	} else if key != "" {
 		r.ExpectUint(key, uint64(v))
 	}
 }

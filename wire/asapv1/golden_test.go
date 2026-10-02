@@ -20,8 +20,8 @@ type hllState struct {
 }
 
 func (s *hllState) MarshalASAPv1() ([]byte, error) {
-	md := asapv1.NewMetadataWriter()
-	md.HashSpec(asapv1.StandardProfile(), asapv1.CanonicalSeedIndex)
+	md := asapv1.NewMetadataWriter(1)
+	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexCanonical)
 	md.Uint("precision", uint64(bits.TrailingZeros(uint(len(s.Registers)))))
 	p := asapv1.NewEncoder()
 	if s.Kind == asapv1.KindHLLHIP {
@@ -34,7 +34,7 @@ func (s *hllState) MarshalASAPv1() ([]byte, error) {
 		p.Array(1)
 		p.Bin(s.Registers)
 	}
-	return asapv1.Encode(s.Kind, md.Bytes(), p.Bytes())
+	return asapv1.Marshal(s.Kind, md, p)
 }
 
 func (s *hllState) UnmarshalASAPv1(b []byte) error {
@@ -49,7 +49,8 @@ func (s *hllState) UnmarshalASAPv1(b []byte) error {
 	if err != nil {
 		return err
 	}
-	md.HashSpec(asapv1.StandardProfile(), asapv1.CanonicalSeedIndex)
+	md.ExpectVersion(1)
+	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexCanonical)
 	precision := md.Uint8("precision")
 	if err := md.Finish(); err != nil {
 		return err
@@ -86,8 +87,8 @@ type matrixState struct {
 }
 
 func (s *matrixState) MarshalASAPv1() ([]byte, error) {
-	md := asapv1.NewMetadataWriter()
-	md.HashSpec(asapv1.StandardProfile(), asapv1.MatrixSeedIndex)
+	md := asapv1.NewMetadataWriter(1)
+	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)
 	md.Uint("rows", uint64(s.Rows))
 	md.Uint("cols", uint64(s.Cols))
 	md.Str("counter_type", s.CounterType)
@@ -99,7 +100,7 @@ func (s *matrixState) MarshalASAPv1() ([]byte, error) {
 	} else {
 		asapv1.EncodeInts(p, s.Ints)
 	}
-	return asapv1.Encode(s.Kind, md.Bytes(), p.Bytes())
+	return asapv1.Marshal(s.Kind, md, p)
 }
 
 func (s *matrixState) UnmarshalASAPv1(b []byte) error {
@@ -112,7 +113,8 @@ func (s *matrixState) UnmarshalASAPv1(b []byte) error {
 		return err
 	}
 	out := matrixState{Kind: kind}
-	md.HashSpec(asapv1.StandardProfile(), asapv1.MatrixSeedIndex)
+	md.ExpectVersion(1)
+	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)
 	out.Rows = md.Uint32("rows")
 	out.Cols = md.Uint32("cols")
 	out.CounterType = md.Str("counter_type")
@@ -143,6 +145,7 @@ func (s *matrixState) UnmarshalASAPv1(b []byte) error {
 }
 
 type kllState struct {
+	Kind     asapv1.KindID
 	K, M     uint32
 	ItemType string
 	Seed     *uint64
@@ -152,15 +155,16 @@ type kllState struct {
 	Coin     [3]uint64
 }
 
-func (s *kllState) MarshalASAPv1() ([]byte, error) {
-	md := asapv1.NewMetadataWriter()
+func (s *kllState) writeMetadata(md *asapv1.MetadataWriter) {
 	md.Uint("k", uint64(s.K))
 	md.Uint("m", uint64(s.M))
 	md.Str("item_type", s.ItemType)
 	if s.Seed != nil {
 		md.Uint("seed", *s.Seed)
 	}
-	p := asapv1.NewEncoder()
+}
+
+func (s *kllState) EncodeASAPv1Payload(p *asapv1.Encoder) error {
 	p.Array(3)
 	asapv1.EncodeUints(p, s.Levels)
 	if s.ItemType == "f64" {
@@ -169,15 +173,12 @@ func (s *kllState) MarshalASAPv1() ([]byte, error) {
 		asapv1.EncodeInts(p, s.Ints)
 	}
 	asapv1.EncodeUints(p, s.Coin[:])
-	return asapv1.Encode(asapv1.KindKLL, md.Bytes(), p.Bytes())
+	return p.Err()
 }
 
-func (s *kllState) UnmarshalASAPv1(b []byte) error {
-	md, p, err := asapv1.Open(b, asapv1.KindKLL)
-	if err != nil {
-		return err
-	}
-	var out kllState
+func (s *kllState) DecodeASAPv1Payload(md *asapv1.MetadataReader, p *asapv1.Decoder) error {
+	out := kllState{Kind: s.Kind}
+	md.ExpectVersion(1)
 	out.K = md.Uint32("k")
 	out.M = md.Uint32("m")
 	out.ItemType = md.Str("item_type")
@@ -197,6 +198,163 @@ func (s *kllState) UnmarshalASAPv1(b []byte) error {
 	}
 	p.ExpectArray(3)
 	out.Coin = [3]uint64{p.Uint(), p.Uint(), uint64(p.Uint32())}
+	if err := p.Err(); err != nil {
+		return err
+	}
+	*s = out
+	return nil
+}
+
+func (s *kllState) MarshalASAPv1() ([]byte, error) {
+	md := asapv1.NewMetadataWriter(1)
+	s.writeMetadata(md)
+	p := asapv1.NewEncoder()
+	if err := s.EncodeASAPv1Payload(p); err != nil {
+		return nil, err
+	}
+	return asapv1.Marshal(s.Kind, md, p)
+}
+
+func (s *kllState) UnmarshalASAPv1(b []byte) error {
+	kind, metadata, payload, err := asapv1.Split(b)
+	if err != nil {
+		return err
+	}
+	if kind != asapv1.KindKLL && kind != asapv1.KindKLLDynamic {
+		return fmt.Errorf("kind_id %v is not KLL", kind)
+	}
+	md, err := asapv1.ReadMetadata(metadata)
+	if err != nil {
+		return err
+	}
+	out := kllState{Kind: kind}
+	p := asapv1.NewDecoder(payload)
+	if err := out.DecodeASAPv1Payload(md, p); err != nil {
+		return err
+	}
+	if err := p.Finish(); err != nil {
+		return err
+	}
+	*s = out
+	return nil
+}
+
+// kllGrid carries KLL payloads as the elements of its own payload, with the
+// cells' k, m and item_type held once in its metadata.
+type kllGrid struct {
+	K, M     uint32
+	ItemType string
+	Cells    []kllState
+}
+
+func (g *kllGrid) MarshalASAPv1() ([]byte, error) {
+	md := asapv1.NewMetadataWriter(1)
+	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexNone)
+	md.Uint("counter_k", uint64(g.K))
+	md.Uint("counter_m", uint64(g.M))
+	md.Str("counter_item_type", g.ItemType)
+	p := asapv1.NewEncoder()
+	p.Array(1)
+	p.Array(len(g.Cells))
+	for i := range g.Cells {
+		if err := g.Cells[i].EncodeASAPv1Payload(p); err != nil {
+			return nil, err
+		}
+	}
+	return asapv1.Marshal(asapv1.KindHydraKLL, md, p)
+}
+
+func (g *kllGrid) UnmarshalASAPv1(b []byte) error {
+	md, p, err := asapv1.Open(b, asapv1.KindHydraKLL)
+	if err != nil {
+		return err
+	}
+	out := kllGrid{}
+	md.ExpectVersion(1)
+	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexNone)
+	out.K = md.Uint32("counter_k")
+	out.M = md.Uint32("counter_m")
+	out.ItemType = md.Str("counter_item_type")
+	if err := md.Finish(); err != nil {
+		return err
+	}
+	cell := asapv1.NewMetadataWriter(1)
+	(&kllState{K: out.K, M: out.M, ItemType: out.ItemType}).writeMetadata(cell)
+	p.ExpectArray(1)
+	out.Cells = make([]kllState, p.Array())
+	for i := range out.Cells {
+		cellMD, err := asapv1.ReadMetadata(cell.Bytes())
+		if err != nil {
+			return err
+		}
+		out.Cells[i].Kind = asapv1.KindKLL
+		if err := out.Cells[i].DecodeASAPv1Payload(cellMD, p); err != nil {
+			return fmt.Errorf("cell %d: %w", i, err)
+		}
+	}
+	if err := p.Finish(); err != nil {
+		return err
+	}
+	*g = out
+	return nil
+}
+
+type ddState struct {
+	Counts         []uint64
+	Offset         int64
+	Sum, Min, Max  float64
+	Signed         bool
+	NegativeCounts []uint64
+	NegativeOffset int64
+	ZeroCount      uint64
+	Alpha          float64
+}
+
+func (s *ddState) MarshalASAPv1() ([]byte, error) {
+	version, fields := uint8(1), 5
+	if s.Signed {
+		version, fields = 2, 8
+	}
+	md := asapv1.NewMetadataWriter(version)
+	md.Float64("alpha", s.Alpha)
+	p := asapv1.NewEncoder()
+	p.Array(fields)
+	asapv1.EncodeUints(p, s.Counts)
+	p.Int(s.Offset)
+	p.Float64(s.Sum)
+	p.Float64(s.Min)
+	p.Float64(s.Max)
+	if s.Signed {
+		asapv1.EncodeUints(p, s.NegativeCounts)
+		p.Int(s.NegativeOffset)
+		p.Uint(s.ZeroCount)
+	}
+	return asapv1.Marshal(asapv1.KindDDSketch, md, p)
+}
+
+func (s *ddState) UnmarshalASAPv1(b []byte) error {
+	md, p, err := asapv1.Open(b, asapv1.KindDDSketch)
+	if err != nil {
+		return err
+	}
+	md.ExpectVersion(1, 2)
+	out := ddState{Signed: md.Version() == 2, Alpha: md.Float64("alpha")}
+	if err := md.Finish(); err != nil {
+		return err
+	}
+	if out.Signed {
+		p.ExpectArray(8)
+	} else {
+		p.ExpectArray(5)
+	}
+	out.Counts = asapv1.DecodeUints[uint64](p)
+	out.Offset = p.Int()
+	out.Sum, out.Min, out.Max = p.Float64(), p.Float64(), p.Float64()
+	if out.Signed {
+		out.NegativeCounts = asapv1.DecodeUints[uint64](p)
+		out.NegativeOffset = p.Int()
+		out.ZeroCount = p.Uint()
+	}
 	if err := p.Finish(); err != nil {
 		return err
 	}
@@ -210,53 +368,94 @@ func p12Registers() []byte {
 	return r
 }
 
+func kllFixture(itemType string) *kllState {
+	seed := uint64(42)
+	s := &kllState{Kind: asapv1.KindKLL, K: 200, M: 8, ItemType: itemType, Seed: &seed,
+		Levels: []uint32{0, 50}, Coin: [3]uint64{42, 0, 0}}
+	for i := range 50 {
+		if itemType == "f64" {
+			s.Floats = append(s.Floats, float64(i+1))
+		} else {
+			s.Ints = append(s.Ints, int64(i+1))
+		}
+	}
+	return s
+}
+
 func TestGoldenFixtures(t *testing.T) {
 	csCounts := []int64{0, 127, 128, 65536, -1, -33, -32768, -2147483648}
-	seed := uint64(42)
-	kllInts := make([]int64, 50)
-	kllFloats := make([]float64, 50)
-	for i := range 50 {
-		kllInts[i] = int64(i + 1)
-		kllFloats[i] = float64(i + 1)
+	matrix := func(kind asapv1.KindID, cols uint32, counterType, mode string, ints []int64, floats []float64) *matrixState {
+		return &matrixState{Kind: kind, Rows: 2, Cols: cols, CounterType: counterType, Mode: mode, Ints: ints, Floats: floats}
 	}
-	cases := []struct {
-		name  string
-		known interface {
-			asapv1.Marshaler
-			asapv1.Unmarshaler
-		}
-		fresh interface {
-			asapv1.Marshaler
-			asapv1.Unmarshaler
-		}
-	}{
-		{"hll_classic_p12", &hllState{Kind: asapv1.KindHLLClassic, Registers: p12Registers()}, &hllState{}},
-		{"hll_ertl_mle_p12", &hllState{Kind: asapv1.KindHLLErtlMLE, Registers: p12Registers()}, &hllState{}},
-		{"hll_hip_p12", &hllState{Kind: asapv1.KindHLLHIP, Registers: p12Registers(), HIP: [3]float64{1.5, 2.5, 3.0}}, &hllState{}},
-		{"cms_i64_regular_2x3", &matrixState{Kind: asapv1.KindCountMin, Rows: 2, Cols: 3, CounterType: "i64", Mode: "regular",
-			Ints: []int64{0, 1, 127, 128, 300, 65536}}, &matrixState{}},
-		{"cms_f64_fast_2x3", &matrixState{Kind: asapv1.KindCountMin, Rows: 2, Cols: 3, CounterType: "f64", Mode: "fast",
-			Floats: []float64{0, 1.5, 2.25, 3.75, 4.125, 5.0625}}, &matrixState{}},
-		{"cs_i64_regular_2x4", &matrixState{Kind: asapv1.KindCountSketch, Rows: 2, Cols: 4, CounterType: "i64", Mode: "regular",
-			Ints: csCounts}, &matrixState{}},
-		{"cs_i64_fast_2x4", &matrixState{Kind: asapv1.KindCountSketch, Rows: 2, Cols: 4, CounterType: "i64", Mode: "fast",
-			Ints: csCounts}, &matrixState{}},
-		{"cs_i32_regular_2x4", &matrixState{Kind: asapv1.KindCountSketch, Rows: 2, Cols: 4, CounterType: "i32", Mode: "regular",
-			Ints: csCounts}, &matrixState{}},
-		{"kll_i64_k200", &kllState{K: 200, M: 8, ItemType: "i64", Seed: &seed, Levels: []uint32{0, 50}, Ints: kllInts,
-			Coin: [3]uint64{42, 0, 0}}, &kllState{}},
-		{"kll_f64_k200", &kllState{K: 200, M: 8, ItemType: "f64", Seed: &seed, Levels: []uint32{0, 50}, Floats: kllFloats,
-			Coin: [3]uint64{42, 0, 0}}, &kllState{}},
+	t.Run("hll_classic_p12", func(t *testing.T) {
+		asapv1test.CheckGolden(t, "hll_classic_p12", &hllState{Kind: asapv1.KindHLLClassic, Registers: p12Registers()}, nil)
+	})
+	t.Run("hll_ertl_mle_p12", func(t *testing.T) {
+		asapv1test.CheckGolden(t, "hll_ertl_mle_p12", &hllState{Kind: asapv1.KindHLLErtlMLE, Registers: p12Registers()}, nil)
+	})
+	t.Run("hll_hip_p12", func(t *testing.T) {
+		asapv1test.CheckGolden(t, "hll_hip_p12",
+			&hllState{Kind: asapv1.KindHLLHIP, Registers: p12Registers(), HIP: [3]float64{1.5, 2.5, 3.0}}, nil)
+	})
+	for name, known := range map[string]*matrixState{
+		"cms_i64_regular_2x3": matrix(asapv1.KindCountMin, 3, "i64", "regular", []int64{0, 1, 127, 128, 300, 65536}, nil),
+		"cms_f64_fast_2x3":    matrix(asapv1.KindCountMin, 3, "f64", "fast", nil, []float64{0, 1.5, 2.25, 3.75, 4.125, 5.0625}),
+		"cs_i64_regular_2x4":  matrix(asapv1.KindCountSketch, 4, "i64", "regular", csCounts, nil),
+		"cs_i64_fast_2x4":     matrix(asapv1.KindCountSketch, 4, "i64", "fast", csCounts, nil),
+		"cs_i32_regular_2x4":  matrix(asapv1.KindCountSketch, 4, "i32", "regular", csCounts, nil),
+	} {
+		t.Run(name, func(t *testing.T) { asapv1test.CheckGolden(t, name, known, nil) })
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			asapv1test.CheckMarshal(t, c.name, c.known)
-			asapv1test.CheckRoundTrip(t, c.name, c.fresh)
-			if !reflect.DeepEqual(c.fresh, c.known) {
-				t.Fatalf("decoded %+v, want %+v", c.fresh, c.known)
-			}
-		})
+	t.Run("kll_i64_k200", func(t *testing.T) { asapv1test.CheckGolden(t, "kll_i64_k200", kllFixture("i64"), nil) })
+	t.Run("kll_f64_k200", func(t *testing.T) { asapv1test.CheckGolden(t, "kll_f64_k200", kllFixture("f64"), nil) })
+	t.Run("ddsketch_positive_a001", func(t *testing.T) {
+		asapv1test.CheckGolden(t, "ddsketch_positive_a001", &ddState{Alpha: 0.01,
+			Counts: []uint64{1, 0, 127, 128, 300, 65536, 4294967296}, Offset: -40,
+			Sum: 2181071000.0, Min: 0.453125, Max: 0.5078125}, nil)
+	})
+	t.Run("ddsketch_signed_a001", func(t *testing.T) {
+		asapv1test.CheckGolden(t, "ddsketch_signed_a001", &ddState{Alpha: 0.01, Signed: true,
+			Counts: []uint64{3, 0, 2}, Offset: 310, Sum: 2523.90625, Min: -0.016, Max: 515.0,
+			NegativeCounts: []uint64{5, 1}, NegativeOffset: -208, ZeroCount: 7}, nil)
+	})
+}
+
+func TestNestedPayloads(t *testing.T) {
+	a, b := kllFixture("i64"), kllFixture("i64")
+	b.Seed, b.Levels, b.Ints, b.Coin = nil, []uint32{0, 2}, []int64{-5, 9}, [3]uint64{1, 2, 3}
+	a.Seed = nil
+	grid := &kllGrid{K: 200, M: 8, ItemType: "i64", Cells: []kllState{*a, *b}}
+	bytes, err := grid.MarshalASAPv1()
+	if err != nil {
+		t.Fatal(err)
 	}
+	var got kllGrid
+	if err := got.UnmarshalASAPv1(bytes); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(&got, grid) {
+		t.Fatalf("decoded %+v, want %+v", got, grid)
+	}
+
+	md, p, err := asapv1.Open(bytes, asapv1.KindHydraKLL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexNone)
+	md.Uint32("counter_k")
+	md.Uint32("counter_m")
+	md.Str("counter_item_type")
+	if err := md.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	p.ExpectArray(1)
+	p.ExpectArray(2)
+	first := p.Raw()
+	cellPayload := asapv1.NewEncoder()
+	if err := a.EncodeASAPv1Payload(cellPayload); err != nil {
+		t.Fatal(err)
+	}
+	asapv1test.Equal(t, first, cellPayload.Bytes())
 }
 
 func TestEveryFixtureIsWellFormed(t *testing.T) {
@@ -273,8 +472,11 @@ func TestEveryFixtureIsWellFormed(t *testing.T) {
 		if kind.Name() == "" {
 			t.Errorf("%s: kind_id %v is not in the registry", name, kind)
 		}
-		if _, err := asapv1.ReadMetadata(metadata); err != nil {
+		md, err := asapv1.ReadMetadata(metadata)
+		if err != nil {
 			t.Errorf("%s: %v", name, err)
+		} else if md.Version() == 0 {
+			t.Errorf("%s: metadata_version 0", name)
 		}
 		p := asapv1.NewDecoder(payload)
 		if p.Array(); p.Err() != nil {

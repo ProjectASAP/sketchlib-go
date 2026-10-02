@@ -25,7 +25,7 @@ func TestStandardProfile(t *testing.T) {
 }
 
 func TestMetadataWriterLayout(t *testing.T) {
-	w := NewMetadataWriter()
+	w := NewMetadataWriter(1)
 	w.Uint("k", 200)
 	w.Str("t", "f64")
 	got := w.Bytes()
@@ -34,11 +34,14 @@ func TestMetadataWriterLayout(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Bytes = %x, want %x", got, want)
 	}
+	if got := NewMetadataWriter(2).Bytes(); got[len(got)-1] != 0x02 {
+		t.Fatalf("NewMetadataWriter(2) = %x", got)
+	}
 }
 
 func TestHashSpecOrder(t *testing.T) {
-	w := NewMetadataWriter()
-	w.HashSpec(StandardProfile(), MatrixSeedIndex)
+	w := NewMetadataWriter(1)
+	w.HashSpec(StandardProfile(), SeedIndexMatrix)
 	w.Uint("rows", 2)
 	r, err := ReadMetadata(w.Bytes())
 	if err != nil {
@@ -49,8 +52,8 @@ func TestHashSpecOrder(t *testing.T) {
 	if strings.Join(r.keys, ",") != strings.Join(wantKeys, ",") {
 		t.Fatalf("keys = %v, want %v", r.keys, wantKeys)
 	}
-	for idx, want := range map[SeedIndex]string{NoSeedIndex: "seed_list", CanonicalSeedIndex: "canonical_seed_index", MatrixSeedIndex: "matrix_seed_index"} {
-		w := NewMetadataWriter()
+	for idx, want := range map[SeedIndex]string{SeedIndexNone: "seed_list", SeedIndexCanonical: "canonical_seed_index", SeedIndexMatrix: "matrix_seed_index"} {
+		w := NewMetadataWriter(1)
 		w.HashSpec(StandardProfile(), idx)
 		r, err := ReadMetadata(w.Bytes())
 		if err != nil {
@@ -63,7 +66,7 @@ func TestHashSpecOrder(t *testing.T) {
 }
 
 func hashSpecMetadata(p HashProfile, idx SeedIndex, extra func(w *MetadataWriter)) []byte {
-	w := NewMetadataWriter()
+	w := NewMetadataWriter(1)
 	w.HashSpec(p, idx)
 	if extra != nil {
 		extra(w)
@@ -72,7 +75,7 @@ func hashSpecMetadata(p HashProfile, idx SeedIndex, extra func(w *MetadataWriter
 }
 
 func TestMetadataReaderRoundTrip(t *testing.T) {
-	b := hashSpecMetadata(StandardProfile(), CanonicalSeedIndex, func(w *MetadataWriter) {
+	b := hashSpecMetadata(StandardProfile(), SeedIndexCanonical, func(w *MetadataWriter) {
 		w.Uint("precision", 12)
 		w.Int("offset", -3)
 		w.Float64("alpha", 0.01)
@@ -98,7 +101,7 @@ func TestMetadataReaderRoundTrip(t *testing.T) {
 		t.Fatal("Has")
 	}
 	seed := r.Uint64("seed")
-	r.HashSpec(StandardProfile(), CanonicalSeedIndex)
+	r.HashSpec(StandardProfile(), SeedIndexCanonical)
 	if err := r.Finish(); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +116,7 @@ func TestMetadataReaderRejects(t *testing.T) {
 	withProfile := func(edit func(p *HashProfile)) []byte {
 		p := StandardProfile()
 		edit(&p)
-		return hashSpecMetadata(p, MatrixSeedIndex, nil)
+		return hashSpecMetadata(p, SeedIndexMatrix, nil)
 	}
 	cases := map[string]struct {
 		b    []byte
@@ -126,24 +129,24 @@ func TestMetadataReaderRejects(t *testing.T) {
 		"other seed":             {withProfile(func(p *HashProfile) { p.SeedList[3]++ }), nil},
 		"short seed list":        {withProfile(func(p *HashProfile) { p.SeedList = p.SeedList[:19] }), nil},
 		"other matrix index":     {withProfile(func(p *HashProfile) { p.MatrixSeedIndex = 1 }), nil},
-		"wrong seed-index key":   {hashSpecMetadata(std, CanonicalSeedIndex, nil), nil},
-		"missing seed-index key": {hashSpecMetadata(std, NoSeedIndex, nil), nil},
-		"unknown key": {hashSpecMetadata(std, MatrixSeedIndex, func(w *MetadataWriter) {
+		"wrong seed-index key":   {hashSpecMetadata(std, SeedIndexCanonical, nil), nil},
+		"missing seed-index key": {hashSpecMetadata(std, SeedIndexNone, nil), nil},
+		"unknown key": {hashSpecMetadata(std, SeedIndexMatrix, func(w *MetadataWriter) {
 			w.Uint("extra", 1)
 		}), nil},
-		"missing key": {hashSpecMetadata(std, MatrixSeedIndex, nil), func(r *MetadataReader) {
+		"missing key": {hashSpecMetadata(std, SeedIndexMatrix, nil), func(r *MetadataReader) {
 			r.Uint32("rows")
 		}},
-		"wrong type": {hashSpecMetadata(std, MatrixSeedIndex, func(w *MetadataWriter) {
+		"wrong type": {hashSpecMetadata(std, SeedIndexMatrix, func(w *MetadataWriter) {
 			w.Str("rows", "2")
 		}), func(r *MetadataReader) { r.Uint32("rows") }},
-		"out of range": {hashSpecMetadata(std, MatrixSeedIndex, func(w *MetadataWriter) {
+		"out of range": {hashSpecMetadata(std, SeedIndexMatrix, func(w *MetadataWriter) {
 			w.Uint("precision", 256)
 		}), func(r *MetadataReader) { r.Uint8("precision") }},
-		"unexpected value": {hashSpecMetadata(std, MatrixSeedIndex, func(w *MetadataWriter) {
+		"unexpected value": {hashSpecMetadata(std, SeedIndexMatrix, func(w *MetadataWriter) {
 			w.Str("counter_type", "i32")
 		}), func(r *MetadataReader) { r.ExpectStr("counter_type", "i64") }},
-		"value not fully read": {hashSpecMetadata(std, MatrixSeedIndex, func(w *MetadataWriter) {
+		"value not fully read": {hashSpecMetadata(std, SeedIndexMatrix, func(w *MetadataWriter) {
 			EncodeUints(w.Field("arr"), []uint8{1, 2})
 		}), func(r *MetadataReader) { r.Field("arr", func(d *Decoder) { d.Array() }) }},
 	}
@@ -156,7 +159,7 @@ func TestMetadataReaderRejects(t *testing.T) {
 		if c.read != nil {
 			c.read(r)
 		}
-		r.HashSpec(std, MatrixSeedIndex)
+		r.HashSpec(std, SeedIndexMatrix)
 		if r.Finish() == nil {
 			t.Errorf("%s: accepted", name)
 		}
@@ -171,7 +174,7 @@ func TestReadMetadataRejects(t *testing.T) {
 		e.Uint(v)
 		return e.Bytes()
 	}
-	dup := NewMetadataWriter()
+	dup := NewMetadataWriter(1)
 	dup.Uint("k", 1)
 	dup.Uint("k", 2)
 	noVersion := NewEncoder()
@@ -183,28 +186,89 @@ func TestReadMetadataRejects(t *testing.T) {
 	intKey.Uint(1)
 	intKey.Uint(1)
 	cases := map[string][]byte{
-		"empty":              nil,
-		"array":              {0x90},
-		"metadata_version 0": versionAt(0),
-		"metadata_version 2": versionAt(2),
-		"no version":         noVersion.Bytes(),
-		"duplicate key":      dup.Bytes(),
-		"integer key":        intKey.Bytes(),
-		"truncated":          versionAt(1)[:5],
-		"trailing bytes":     append(versionAt(1), 0x00),
+		"empty":                nil,
+		"array":                {0x90},
+		"metadata_version 256": versionAt(256),
+		"no version":           noVersion.Bytes(),
+		"duplicate key":        dup.Bytes(),
+		"integer key":          intKey.Bytes(),
+		"truncated":            versionAt(1)[:5],
+		"trailing bytes":       append(versionAt(1), 0x00),
 	}
 	for name, b := range cases {
 		if _, err := ReadMetadata(b); err == nil {
 			t.Errorf("%s: ReadMetadata accepted %x", name, b)
 		}
 	}
-	if _, err := ReadMetadata(versionAt(1)); err != nil {
-		t.Errorf("ReadMetadata rejected a minimal map: %v", err)
+	for _, v := range []uint64{0, 1, 2, 255} {
+		r, err := ReadMetadata(versionAt(v))
+		if err != nil {
+			t.Errorf("ReadMetadata rejected metadata_version %d: %v", v, err)
+			continue
+		}
+		if r.Version() != uint8(v) || r.Finish() != nil {
+			t.Errorf("Version() = %d (%v), want %d", r.Version(), r.Err(), v)
+		}
+	}
+}
+
+func TestExpectVersion(t *testing.T) {
+	for _, c := range []struct {
+		version  uint8
+		accepted []uint8
+		ok       bool
+	}{
+		{1, []uint8{1}, true},
+		{2, []uint8{1, 2}, true},
+		{2, []uint8{1}, false},
+		{1, []uint8{2}, false},
+		{0, nil, false},
+	} {
+		r, err := ReadMetadata(NewMetadataWriter(c.version).Bytes())
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.ExpectVersion(c.accepted...)
+		if ok := r.Finish() == nil; ok != c.ok {
+			t.Errorf("version %d, accepted %v: ok = %v, want %v", c.version, c.accepted, ok, c.ok)
+		}
+	}
+}
+
+func TestUnknownSeedIndex(t *testing.T) {
+	w := NewMetadataWriter(1)
+	w.HashSpec(StandardProfile(), SeedIndex(7))
+	if w.Err() == nil {
+		t.Error("MetadataWriter accepted SeedIndex(7)")
+	}
+	if _, err := Marshal(KindHLLClassic, w, NewEncoder()); err == nil {
+		t.Error("Marshal ignored the metadata error")
+	}
+	r, err := ReadMetadata(hashSpecMetadata(StandardProfile(), SeedIndexNone, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.HashSpec(StandardProfile(), SeedIndex(-1))
+	if r.Finish() == nil {
+		t.Error("MetadataReader accepted SeedIndex(-1)")
+	}
+}
+
+func TestMetadataWriterRejectsInvalidUTF8(t *testing.T) {
+	w := NewMetadataWriter(1)
+	w.Str("key_type", "\xff")
+	if w.Err() == nil {
+		t.Fatal("MetadataWriter accepted an invalid UTF-8 value")
+	}
+	w = NewMetadataWriter(1)
+	w.Uint("\xc3", 1)
+	if w.Err() == nil {
+		t.Fatal("MetadataWriter accepted an invalid UTF-8 key")
 	}
 }
 
 func TestMetadataReaderKeepsFirstError(t *testing.T) {
-	r, err := ReadMetadata(NewMetadataWriter().Bytes())
+	r, err := ReadMetadata(NewMetadataWriter(1).Bytes())
 	if err != nil {
 		t.Fatal(err)
 	}

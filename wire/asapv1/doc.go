@@ -23,29 +23,30 @@
 // on error. MarshalASAPv1 fails for a state its own UnmarshalASAPv1 would
 // reject, so the encoder never emits bytes the decoder refuses.
 //
-// Marshal builds the metadata with a MetadataWriter (metadata_version first,
-// then HashSpec for a sketch that hashes, then the structural params in the
-// kind's canonical order), the payload with an Encoder, and frames both with
-// Encode:
+// MarshalASAPv1 builds the metadata with a MetadataWriter (metadata_version
+// first, then HashSpec for a sketch that hashes, then the structural params in
+// the kind's canonical order) and the payload with an Encoder, then frames
+// both with Marshal, which also returns any error either recorded:
 //
-//	md := asapv1.NewMetadataWriter()
-//	md.HashSpec(asapv1.StandardProfile(), asapv1.MatrixSeedIndex)
+//	md := asapv1.NewMetadataWriter(1)
+//	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)
 //	md.Uint("rows", uint64(s.rows))
 //	p := asapv1.NewEncoder()
 //	p.Array(1)
 //	asapv1.EncodeInts(p, s.counts)
-//	return asapv1.Encode(asapv1.KindCountMin, md.Bytes(), p.Bytes())
+//	return asapv1.Marshal(asapv1.KindCountMin, md, p)
 //
-// Unmarshal opens the envelope with Open (Split for a type that owns more than
-// one kind_id), validates the metadata with a MetadataReader, reads the
-// payload with a Decoder, and checks every structural invariant before
-// building state:
+// UnmarshalASAPv1 opens the envelope with Open (Split for a type that owns
+// more than one kind_id), validates the metadata with a MetadataReader, reads
+// the payload with a Decoder, and checks every structural invariant before
+// building state. The codec checks the metadata versions it accepts:
 //
 //	md, p, err := asapv1.Open(b, asapv1.KindCountMin)
 //	if err != nil {
 //		return err
 //	}
-//	md.HashSpec(asapv1.StandardProfile(), asapv1.MatrixSeedIndex)
+//	md.ExpectVersion(1)
+//	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)
 //	rows := md.Uint32("rows")
 //	if err := md.Finish(); err != nil {
 //		return err
@@ -56,17 +57,45 @@
 //		return err
 //	}
 //
-// MetadataReader and Decoder keep their first error, so a run of reads needs
-// one check at Finish. MetadataReader.Finish also rejects any key no accessor
-// consumed, and Decoder.Finish rejects trailing bytes.
+// Encoder, MetadataWriter, MetadataReader and Decoder keep their first error,
+// so a run of calls needs one check at the end. MetadataReader.Finish also
+// rejects any key no accessor consumed, and Decoder.Finish rejects trailing
+// bytes.
+//
+// # Nested sketches
+//
+// A sketch whose whole payload is carried as one element of another sketch's
+// payload (Hydra's KLL and UnivMon cells) also implements PayloadEncoder and,
+// through its pointer, PayloadDecoder:
+//
+//	func (s *T) EncodeASAPv1Payload(e *asapv1.Encoder) error
+//	func (s *T) DecodeASAPv1Payload(md *asapv1.MetadataReader, d *asapv1.Decoder) error
+//
+// EncodeASAPv1Payload writes the payload array alone. DecodeASAPv1Payload
+// reads exactly one payload array from d, validates md as the sketch's own
+// metadata and calls md.Finish, but not d.Finish. The parent builds md from
+// the params its own metadata carries, with NewMetadataWriter and
+// ReadMetadata. The sketch's MarshalASAPv1 and UnmarshalASAPv1 are written in
+// terms of the two hooks.
+//
+// Sketches inlined field by field (the base matrix of CMSHeap and CSHeap,
+// Elastic's light layer, UnivMon's layers) need no hook. EHSketchList carries
+// a variant's kind_id, metadata and payload verbatim: split them from
+// MarshalASAPv1 with Split, and rebuild with Encode before UnmarshalASAPv1.
+// Encoder.Raw and Decoder.Raw move one already-encoded value.
+//
+// # Encoding rules
 //
 // Encoder writes every integer in the uint family when it is non-negative and
 // in the int family otherwise, at the minimal width, and every float as
 // float64 unless the spec names float32. Fields the spec types as bin use
-// Encoder.Bin; every other byte sequence is an array.
+// Encoder.Bin; every other byte sequence is an array. A str must be valid
+// UTF-8: Encoder.Str records an error otherwise, and Decoder.Str rejects it.
 //
-// Golden tests use package asapv1test: for each fixture of the kind, the
-// fixture unmarshals to the known state and re-marshals to the same bytes
-// (CheckRoundTrip), and the known state marshals to the fixture
-// (CheckMarshal).
+// # Golden tests
+//
+// Golden tests use package asapv1test. For each fixture of the kind,
+// CheckGolden marshals the known state and compares it to the fixture,
+// unmarshals the fixture into a fresh value, compares that to the known state,
+// and re-marshals it.
 package asapv1
