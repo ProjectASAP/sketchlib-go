@@ -3,134 +3,141 @@ package elasticsketch
 import (
 	"errors"
 	"fmt"
-	"math/bits"
+	"math"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
 	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
-const defaultVoteFactor = 8.0
+// Lambda is the eviction threshold: a resident flow is replaced once its
+// negative votes reach Lambda times its positive votes.
+const Lambda int32 = 8
+
+// Light-layer dimensions used when Config leaves them zero.
 const (
-	elasticLightRows = 5
-	elasticLightCols = 2048
+	DefaultLightRows = 3
+	DefaultLightCols = 4096
 )
 
-// Config controls Rust-aligned ElasticSketch settings.
+// Config sizes the heavy table and the light Count-Min layer.
 type Config struct {
 	BucketCount int
+	LightRows   int
+	LightCols   int
 }
 
-type bucketSlot struct {
-	id    string
-	hash  uint64
-	count float64
-}
-
+// HeavyBucket is one slot of the heavy part. It holds a flow exactly while
+// VotePos is non-zero; Eviction marks that part of the flow's size lives in
+// the light layer.
 type HeavyBucket struct {
 	FlowID   string
-	VotePos  int
-	VoteNeg  int
+	VotePos  int32
+	VoteNeg  int32
 	Eviction bool
 }
 
-func newHeavyBucket() HeavyBucket {
-	return HeavyBucket{}
+func (b *HeavyBucket) vacant() bool { return b.VotePos == 0 }
+
+func (b *HeavyBucket) clear() {
+	b.FlowID = ""
+	b.VotePos = 0
+	b.VoteNeg = 0
 }
 
-func (b *HeavyBucket) evict(id string) {
-	b.FlowID = id
-	b.VotePos = 1
-	b.VoteNeg = 1
-	b.Eviction = true
+// FlowCount is a flow and its estimated size.
+type FlowCount struct {
+	FlowID string
+	Count  int
 }
 
-// ElasticSketch follows the Rust logic: one heavy bucket per index + CountMin light layer.
-// In Go, CountMinSketch is backed by storage.Vector2D-compatible flat storage,
-// while the heavy part follows the Rust Vec<HeavyBucket> layout directly.
+// ElasticSketch is a heavy hash table over flow ids, placed at the canonical
+// seed, backed by an int32 Count-Min light layer whose row r hashes at seed
+// index r and takes the lower 32 bits modulo the column count.
 type ElasticSketch struct {
-	cfg    Config
-	light  *storage.Vector2D[float64]
-	bktlen int
-
-	heavy []HeavyBucket
-	mask  uint64
-	bits  uint
+	heavy       []HeavyBucket
+	bktlen      int
+	light       *storage.Vector2D[int32]
+	staleCopies bool
 
 	mu sync.Mutex
 }
 
-// New creates a Rust-aligned Elastic sketch.
+// New creates an Elastic sketch with cfg.BucketCount heavy buckets over a
+// cfg.LightRows x cfg.LightCols light layer.
 func New(cfg Config) (*ElasticSketch, error) {
 	if err := cfg.normalize(); err != nil {
 		return nil, err
 	}
-
-	light, err := storage.InitVector2D[float64](elasticLightRows, elasticLightCols)
+	light, err := storage.InitVector2D[int32](cfg.LightRows, cfg.LightCols)
 	if err != nil {
 		return nil, err
 	}
-
-	heavy := make([]HeavyBucket, cfg.BucketCount)
-	for i := range heavy {
-		heavy[i] = newHeavyBucket()
-	}
-
-	es := &ElasticSketch{
-		cfg:    cfg,
-		light:  light,
+	return &ElasticSketch{
+		heavy:  make([]HeavyBucket, cfg.BucketCount),
 		bktlen: cfg.BucketCount,
-		heavy:  heavy,
-		mask:   uint64(elasticLightCols - 1),
-		bits:   uint(bits.TrailingZeros(uint(elasticLightCols))),
-	}
-	return es, nil
+		light:  light,
+	}, nil
 }
 
-// Insert registers a single occurrence for the provided key.
+func (cfg *Config) normalize() error {
+	if cfg.BucketCount <= 0 || cfg.BucketCount > math.MaxInt32 {
+		return fmt.Errorf("BucketCount must be in [1, %d], got %d", math.MaxInt32, cfg.BucketCount)
+	}
+	if cfg.LightRows == 0 {
+		cfg.LightRows = DefaultLightRows
+	}
+	if cfg.LightCols == 0 {
+		cfg.LightCols = DefaultLightCols
+	}
+	if cfg.LightRows < 0 || cfg.LightCols < 0 {
+		return fmt.Errorf("light layer dimensions must be positive, got %dx%d", cfg.LightRows, cfg.LightCols)
+	}
+	return nil
+}
+
+// Insert records one occurrence of key.
 func (es *ElasticSketch) Insert(key string) {
 	es.InsertN(key, 1)
 }
 
-// InsertN records count occurrences for the provided key.
-func (es *ElasticSketch) InsertN(key string, count int) {
-	if key == "" || count <= 0 {
+// InsertN records count occurrences of key in one step: a matching bucket
+// takes count positive votes, a non-matching one count negative votes, and a
+// takeover seats the arrival with count of each. Non-positive counts are ignored.
+func (es *ElasticSketch) InsertN(key string, count int32) {
+	if count <= 0 {
 		return
 	}
 	es.mu.Lock()
 	defer es.mu.Unlock()
-
-	for i := 0; i < count; i++ {
-		es.insertOne(key)
-	}
+	es.insertLocked(key, count)
 }
 
-// InsertInput inserts one event from common.SketchInput.
+// InsertInput inserts one event from common.SketchInput, keyed by its bytes,
+// which must be valid UTF-8 for the sketch to encode.
 func (es *ElasticSketch) InsertInput(input *common.SketchInput) {
 	es.InsertInputN(input, 1)
 }
 
-// InsertInputN inserts count events from common.SketchInput.
-func (es *ElasticSketch) InsertInputN(input *common.SketchInput, count int) {
-	if input == nil || len(input.Bytes) == 0 || count <= 0 {
+// InsertInputN inserts count events from common.SketchInput, keyed by its
+// bytes, which must be valid UTF-8 for the sketch to encode.
+func (es *ElasticSketch) InsertInputN(input *common.SketchInput, count int32) {
+	if input == nil {
 		return
 	}
 	es.InsertN(string(input.Bytes), count)
 }
 
-// InsertWithHash inserts one event from a pre-hashed value.
-// Rust Elastic has only string path; this is a Go adapter.
+// InsertWithHash inserts one event keyed by the hex form of hash.
 func (es *ElasticSketch) InsertWithHash(hash uint64) {
 	es.InsertWithHashN(hash, 1)
 }
 
-// InsertWithHashN inserts count events from pre-hashed value.
-func (es *ElasticSketch) InsertWithHashN(hash uint64, count int) {
-	if count <= 0 {
-		return
-	}
-	key := fmt.Sprintf("%016x", hash)
-	es.InsertN(key, count)
+// InsertWithHashN inserts count events keyed by the hex form of hash.
+func (es *ElasticSketch) InsertWithHashN(hash uint64, count int32) {
+	es.InsertN(fmt.Sprintf("%016x", hash), count)
 }
 
 func (es *ElasticSketch) QueryWithHash(q common.QueryType, hash uint64) (float64, error) {
@@ -144,38 +151,40 @@ func (es *ElasticSketch) TypeName() string {
 	return "elastic"
 }
 
-func (es *ElasticSketch) insertOne(id string) {
-	hash := common.HashIt(common.CanonicalHashSeed, []byte(id))
-	idx := int(hash % uint64(es.bktlen))
-
-	heavyBkt := &es.heavy[idx]
-	if heavyBkt.FlowID == "" && heavyBkt.VoteNeg == 0 && heavyBkt.VotePos == 0 {
-		heavyBkt.FlowID = id
-		heavyBkt.VotePos++
+func (es *ElasticSketch) insertLocked(id string, count int32) {
+	idx := es.bucketIndex(id)
+	if es.staleAt(idx) {
+		es.seatOverStaleCopy(idx, id, count)
+		return
+	}
+	b := &es.heavy[idx]
+	if b.vacant() {
+		b.FlowID = id
+		b.VotePos = count
+		b.VoteNeg = 0
+		return
+	}
+	if b.FlowID == id {
+		b.VotePos += count
 		return
 	}
 
-	if id == heavyBkt.FlowID {
-		heavyBkt.VotePos++
+	b.VoteNeg += count
+	if b.VoteNeg < Lambda*b.VotePos {
+		es.lightInsert(id, count)
 		return
 	}
 
-	heavyBkt.VoteNeg++
-	if heavyBkt.VotePos > 0 && float64(heavyBkt.VoteNeg)/float64(heavyBkt.VotePos) < defaultVoteFactor {
-		es.lightInsertHash(hash)
-		return
-	}
-
-	vote := heavyBkt.VotePos
-	evictedID := heavyBkt.FlowID
-	heavyBkt.evict(id)
-	for i := 0; i < vote; i++ {
-		// Intentionally mirrors current Rust behavior.
-		es.lightInsertHash(common.HashIt(common.CanonicalHashSeed, []byte(evictedID)))
-	}
+	evictedID, evictedVotes := b.FlowID, b.VotePos
+	b.FlowID = id
+	b.VotePos = count
+	b.VoteNeg = count
+	b.Eviction = true
+	es.lightInsert(evictedID, evictedVotes)
 }
 
-// Query returns the estimated count for key, following the Rust semantics.
+// Query returns the estimated count for id: the resident vote count, plus the
+// light layer whenever the bucket carries the eviction flag.
 func (es *ElasticSketch) Query(id string) int {
 	es.mu.Lock()
 	defer es.mu.Unlock()
@@ -183,23 +192,38 @@ func (es *ElasticSketch) Query(id string) int {
 }
 
 func (es *ElasticSketch) queryLocked(id string) int {
-	hash := common.HashIt(common.CanonicalHashSeed, []byte(id))
-	idx := int(hash % uint64(es.bktlen))
-
-	heavyBkt := es.heavy[idx]
-
-	if id == heavyBkt.FlowID {
-		if heavyBkt.Eviction {
-			lightResult := int(es.lightEstimateHash(hash))
-			return lightResult + heavyBkt.VotePos
+	b := &es.heavy[es.bucketIndex(id)]
+	if !b.vacant() && b.FlowID == id {
+		if b.Eviction {
+			return int(b.VotePos) + int(es.lightEstimate(id))
 		}
-		return heavyBkt.VotePos
+		return int(b.VotePos)
 	}
-
-	return int(es.lightEstimateHash(hash))
+	return int(es.lightEstimate(id))
 }
 
+// Merge merges other in, keeping elephants in the heavy part and adding the
+// light layers counter by counter.
 func (es *ElasticSketch) Merge(other common.Sketch) error {
+	return es.merge(other, func(dst, src []int32) {
+		for c := range dst {
+			dst[c] += src[c]
+		}
+	})
+}
+
+// MergeMax merges other in, keeping elephants in the heavy part and the larger
+// of each light counter pair. It requires the two sketches to have observed
+// disjoint flow sets.
+func (es *ElasticSketch) MergeMax(other *ElasticSketch) error {
+	return es.merge(other, func(dst, src []int32) {
+		for c := range dst {
+			dst[c] = max(dst[c], src[c])
+		}
+	})
+}
+
+func (es *ElasticSketch) merge(other common.Sketch, mergeRow func(dst, src []int32)) error {
 	o, ok := other.(*ElasticSketch)
 	if !ok {
 		return errors.New("cannot merge: incompatible sketch type")
@@ -208,13 +232,9 @@ func (es *ElasticSketch) Merge(other common.Sketch) error {
 		return errors.New("cannot merge: nil sketch")
 	}
 	if es == o {
-		return nil
-	}
-	if es.bktlen != o.bktlen {
-		return errors.New("cannot merge: different bucket count")
-	}
-	if es.light.Rows() != o.light.Rows() || es.light.Cols() != o.light.Cols() {
-		return errors.New("cannot merge: different light matrix dimensions")
+		es.mu.Lock()
+		o = es.cloneLocked()
+		es.mu.Unlock()
 	}
 
 	es.mu.Lock()
@@ -222,168 +242,247 @@ func (es *ElasticSketch) Merge(other common.Sketch) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	es.flushHeavyToLight()
-	oHeavy := make([]HeavyBucket, len(o.heavy))
-	copy(oHeavy, o.heavy)
+	if es.bktlen != o.bktlen {
+		return errors.New("cannot merge: different bucket count")
+	}
+	if es.light.Rows() != o.light.Rows() || es.light.Cols() != o.light.Cols() {
+		return errors.New("cannot merge: different light matrix dimensions")
+	}
 
+	losers := es.contestHeavyAgainst(o)
 	for r := 0; r < es.light.Rows(); r++ {
-		leftRow := es.light.RowSlice(r)
-		rightRow := o.light.RowSlice(r)
-		for c := 0; c < es.light.Cols(); c++ {
-			leftRow[c] += rightRow[c]
-		}
+		mergeRow(es.light.RowSlice(r), o.light.RowSlice(r))
 	}
-
-	for _, bucket := range oHeavy {
-		es.spillHeavyToLight(bucket)
+	for _, l := range losers {
+		es.lightInsert(l.id, l.votes)
 	}
-	es.resetHeavy()
-
 	return nil
 }
 
-// SerializeToBytes serializes ElasticSketch using a Rust-aligned state model.
-func (es *ElasticSketch) SerializeToBytes() ([]byte, error) {
+type spilled struct {
+	id    string
+	votes int32
+}
+
+// contestHeavyAgainst combines the two heavy parts bucket by bucket: a flow
+// both hold keeps its bucket with the votes summed, otherwise the larger
+// estimate wins. Every bucket ends up flagged; the losers are returned.
+func (es *ElasticSketch) contestHeavyAgainst(o *ElasticSketch) []spilled {
+	var losers []spilled
+	merged := make([]*HeavyBucket, len(es.heavy))
+	for idx := range es.heavy {
+		var mine, theirs *HeavyBucket
+		if !es.heavy[idx].vacant() && !es.staleAt(idx) {
+			b := es.heavy[idx]
+			mine = &b
+		}
+		if !o.heavy[idx].vacant() && !o.staleAt(idx) {
+			b := o.heavy[idx]
+			theirs = &b
+		}
+		switch {
+		case mine == nil:
+			merged[idx] = theirs
+		case theirs == nil:
+			merged[idx] = mine
+		case mine.FlowID == theirs.FlowID:
+			mine.VotePos += theirs.VotePos
+			mine.VoteNeg = max(mine.VoteNeg, theirs.VoteNeg)
+			merged[idx] = mine
+		default:
+			kept, lost := mine, theirs
+			if es.queryLocked(mine.FlowID) < o.queryLocked(theirs.FlowID) {
+				kept, lost = theirs, mine
+			}
+			losers = append(losers, spilled{lost.FlowID, lost.VotePos})
+			merged[idx] = kept
+		}
+	}
+	for idx, kept := range merged {
+		if kept != nil {
+			es.heavy[idx] = *kept
+		} else {
+			es.heavy[idx].clear()
+		}
+		es.heavy[idx].Eviction = true
+	}
+	es.staleCopies = false
+	return losers
+}
+
+// ExpandHeavy doubles the heavy table by appending a copy of itself. Every
+// resident then sits in both halves; the copy in the half it does not hash to
+// is stale and is dropped lazily.
+func (es *ElasticSketch) ExpandHeavy() error {
 	es.mu.Lock()
 	defer es.mu.Unlock()
-
-	lightBytes, err := es.light.SerializeToBytes()
-	if err != nil {
-		return nil, err
+	if es.bktlen > math.MaxInt32/2 {
+		return fmt.Errorf("heavy table of %d buckets cannot double within int32", es.bktlen)
 	}
-
-	type snapshot struct {
-		Config Config
-		Heavy  []HeavyBucket
-		Light  []byte
-	}
-
-	return common.EncodeToBytes(snapshot{
-		Config: es.cfg,
-		Heavy:  es.heavy,
-		Light:  lightBytes,
-	})
+	es.heavy = append(es.heavy, es.heavy...)
+	es.bktlen *= 2
+	es.staleCopies = true
+	return nil
 }
 
-// DeserializeElasticSketchFromBytes restores ElasticSketch state.
-func DeserializeElasticSketchFromBytes(data []byte) (*ElasticSketch, error) {
-	type snapshot struct {
-		Config Config
-		Heavy  []HeavyBucket
-		Light  []byte
+// CompressHeavy shrinks the heavy table by ratio, which must divide the
+// bucket count. New bucket j absorbs old buckets j, j+w', j+2w', ...; the
+// largest resident of each group keeps its bucket and the rest spill.
+func (es *ElasticSketch) CompressHeavy(ratio int) error {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	if ratio < 1 {
+		return fmt.Errorf("compression ratio must be at least 1, got %d", ratio)
+	}
+	if es.bktlen%ratio != 0 {
+		return fmt.Errorf("compression ratio %d must divide the bucket count %d", ratio, es.bktlen)
+	}
+	if ratio == 1 {
+		return nil
+	}
+	es.dropStaleCopies()
+
+	width := es.bktlen / ratio
+	winner := make([]int, width)
+	best := make([]int, width)
+	flagged := make([]bool, width)
+	for g := range winner {
+		winner[g] = -1
+	}
+	for idx := range es.heavy {
+		g := idx % width
+		if es.heavy[idx].vacant() {
+			flagged[g] = flagged[g] || es.heavy[idx].Eviction
+			continue
+		}
+		size := es.queryLocked(es.heavy[idx].FlowID)
+		if winner[g] < 0 || size > best[g] {
+			best[g] = size
+			winner[g] = idx
+		}
 	}
 
-	var snap snapshot
-	if err := common.DecodeFromBytes(data, &snap); err != nil {
-		return nil, err
+	compressed := make([]HeavyBucket, width)
+	var losers []spilled
+	for idx, b := range es.heavy {
+		g := idx % width
+		if b.vacant() {
+			continue
+		}
+		if winner[g] == idx {
+			compressed[g] = b
+		} else {
+			losers = append(losers, spilled{b.FlowID, b.VotePos})
+		}
 	}
-	if err := snap.Config.normalize(); err != nil {
-		return nil, err
+	for g := range compressed {
+		if compressed[g].vacant() && flagged[g] {
+			compressed[g].Eviction = true
+		}
 	}
-	if len(snap.Heavy) != snap.Config.BucketCount {
-		return nil, errors.New("invalid snapshot heavy bucket length")
-	}
-
-	light, err := storage.DeserializeVector2DFromBytes[float64](snap.Light)
-	if err != nil {
-		return nil, err
-	}
-
-	heavy := make([]HeavyBucket, len(snap.Heavy))
-	copy(heavy, snap.Heavy)
-
-	es := &ElasticSketch{
-		cfg:    snap.Config,
-		light:  light,
-		bktlen: snap.Config.BucketCount,
-		heavy:  heavy,
-		mask:   uint64(light.Cols() - 1),
-		bits:   light.MaskBits(),
-	}
-	return es, nil
-}
-
-func (cfg *Config) normalize() error {
-	if cfg.BucketCount <= 0 {
-		return fmt.Errorf("BucketCount must be positive")
+	es.heavy = compressed
+	es.bktlen = width
+	for _, l := range losers {
+		es.lightInsert(l.id, l.votes)
 	}
 	return nil
 }
 
-// debugBucketSlot exposes heavy-bucket state as a single-slot view for tests.
-func (es *ElasticSketch) debugBucketSlot(bucketIdx, slotIdx int) bucketSlot {
-	if bucketIdx < 0 || bucketIdx >= es.bktlen {
-		return bucketSlot{}
-	}
-	if slotIdx != 0 {
-		return bucketSlot{}
-	}
-	flow := es.heavy[bucketIdx].FlowID
-	return bucketSlot{
-		id:    flow,
-		hash:  common.HashIt(common.CanonicalHashSeed, []byte(flow)),
-		count: float64(es.heavy[bucketIdx].VotePos),
-	}
-}
-
-func (es *ElasticSketch) debugBucketVote(bucketIdx int) float64 {
-	if bucketIdx < 0 || bucketIdx >= es.bktlen {
-		return 0
-	}
-	return float64(es.heavy[bucketIdx].VoteNeg)
-}
-
-func (es *ElasticSketch) lightInsertHash(hash uint64) {
-	shift := uint(0)
-	for r := 0; r < es.light.Rows(); r++ {
-		c := int((hash >> shift) & es.mask)
-		if c >= es.light.Cols() {
-			c %= es.light.Cols()
+// HeavyHitters returns every flow in the heavy part whose estimate reaches
+// threshold, sorted by flow id.
+func (es *ElasticSketch) HeavyHitters(threshold int) []FlowCount {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	var out []FlowCount
+	for idx := range es.heavy {
+		if es.heavy[idx].vacant() || es.staleAt(idx) {
+			continue
 		}
-		es.light.Add(r, c, 1.0)
-		shift += es.bits
-	}
-}
-
-func (es *ElasticSketch) lightEstimateHash(hash uint64) float64 {
-	minVal := 0.0
-	shift := uint(0)
-	for r := 0; r < es.light.Rows(); r++ {
-		c := int((hash >> shift) & es.mask)
-		if c >= es.light.Cols() {
-			c %= es.light.Cols()
+		id := es.heavy[idx].FlowID
+		if size := es.queryLocked(id); size >= threshold {
+			out = append(out, FlowCount{id, size})
 		}
-		val := es.light.At(r, c)
-		if r == 0 || val < minVal {
-			minVal = val
+	}
+	slices.SortFunc(out, func(a, b FlowCount) int { return strings.Compare(a.FlowID, b.FlowID) })
+	return out
+}
+
+// FullBucketCount returns how many buckets hold a flow with more than t2
+// positive votes.
+func (es *ElasticSketch) FullBucketCount(t2 int32) int {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	n := 0
+	for i := range es.heavy {
+		if !es.heavy[i].vacant() && es.heavy[i].VotePos > t2 {
+			n++
 		}
-		shift += es.bits
 	}
-	return minVal
+	return n
 }
 
-func (es *ElasticSketch) lightInsertHashN(hash uint64, count int) {
-	for i := 0; i < count; i++ {
-		es.lightInsertHash(hash)
-	}
-}
-
-func (es *ElasticSketch) spillHeavyToLight(bucket HeavyBucket) {
-	if bucket.FlowID == "" || bucket.VotePos <= 0 {
+// dropStaleCopies empties every bucket holding a stale copy, keeping its
+// eviction flag set.
+func (es *ElasticSketch) dropStaleCopies() {
+	if !es.staleCopies {
 		return
 	}
-	hash := common.HashIt(common.CanonicalHashSeed, []byte(bucket.FlowID))
-	es.lightInsertHashN(hash, bucket.VotePos)
+	for idx := range es.heavy {
+		if es.staleAt(idx) {
+			es.heavy[idx].clear()
+			es.heavy[idx].Eviction = true
+		}
+	}
+	es.staleCopies = false
 }
 
-func (es *ElasticSketch) flushHeavyToLight() {
-	for _, bucket := range es.heavy {
-		es.spillHeavyToLight(bucket)
+// staleAt reports whether the bucket at idx holds a copy left by an expansion
+// whose resident now hashes elsewhere.
+func (es *ElasticSketch) staleAt(idx int) bool {
+	if !es.staleCopies {
+		return false
+	}
+	b := &es.heavy[idx]
+	return !b.vacant() && es.bucketIndex(b.FlowID) != idx
+}
+
+// seatOverStaleCopy replaces a stale copy with id, flagged.
+func (es *ElasticSketch) seatOverStaleCopy(idx int, id string, count int32) {
+	b := &es.heavy[idx]
+	b.FlowID = id
+	b.VotePos = count
+	b.VoteNeg = 0
+	b.Eviction = true
+}
+
+func (es *ElasticSketch) bucketIndex(id string) int {
+	return int(common.HashIt(common.CanonicalHashSeed, []byte(id)) % uint64(es.bktlen))
+}
+
+func (es *ElasticSketch) lightCol(row int, id string) int {
+	return int((common.HashIt(row, []byte(id)) & 0xffffffff) % uint64(es.light.Cols()))
+}
+
+func (es *ElasticSketch) lightInsert(id string, count int32) {
+	for r := 0; r < es.light.Rows(); r++ {
+		es.light.RowSlice(r)[es.lightCol(r, id)] += count
 	}
 }
 
-func (es *ElasticSketch) resetHeavy() {
-	for i := range es.heavy {
-		es.heavy[i] = newHeavyBucket()
+func (es *ElasticSketch) lightEstimate(id string) int32 {
+	est := es.light.At(0, es.lightCol(0, id))
+	for r := 1; r < es.light.Rows(); r++ {
+		est = min(est, es.light.At(r, es.lightCol(r, id)))
+	}
+	return est
+}
+
+func (es *ElasticSketch) cloneLocked() *ElasticSketch {
+	light, _ := storage.Vector2DFromFn(es.light.Rows(), es.light.Cols(), es.light.At)
+	return &ElasticSketch{
+		heavy:       slices.Clone(es.heavy),
+		bktlen:      es.bktlen,
+		light:       light,
+		staleCopies: es.staleCopies,
 	}
 }

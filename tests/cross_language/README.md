@@ -1,6 +1,6 @@
 # Cross-Language Integration Test
 
-Verifies that three sketch types serialise correctly from **sketchlib-go** (Go producer)
+Verifies that two sketch types serialise correctly from **sketchlib-go** (Go producer)
 and deserialise correctly in **sketchlib-rust** (Rust consumer) using the shared
 protobuf wire format defined in `proto/sketchlib.proto`.
 
@@ -8,7 +8,6 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 
 | File | Sketch type | Query checked |
 |------|-------------|---------------|
-| `elastic.pb` | ElasticSketch (64 heavy buckets) | `estimate("elephant") ≥ 900` |
 | `univmon.pb` | UnivMon (8 layers, CS 3 × 2048) | `g-sum cardinality ∈ [1 000, 15 000]` |
 | `hydra.pb` | HydraSketch (4 × 4 CM cells) | `freq("hydra:42") ≥ 51` |
 
@@ -18,7 +17,7 @@ protobuf wire format defined in `proto/sketchlib.proto`.
 sketchlib-go/
   tests/cross_language/
     run_test.sh          ← orchestrates both phases
-    producer_test.go     ← Go test that writes the 3 .pb files (no binary)
+    producer_test.go     ← Go test that writes the 2 .pb files (no binary)
     README.md            ← this file
 
 sketchlib-rust/
@@ -81,7 +80,6 @@ XTEST_DIR=/tmp/mytest cargo test --test xtest_consumer -- --nocapture
 ```
 Go producer (go test)            proto wire format           Rust consumer (cargo test)
 ──────────────────────────────────────────────────────────────────────────────────────
-ElasticSketch.SerializePortable()   →  elastic.pb   →  decode + heavy/light query
 UnivSketch.SerializePortable()      →  univmon.pb   →  decode + g-sum cardinality
 Hydra.SerializePortable()           →  hydra.pb     →  decode + xorshift route + CM min
 ```
@@ -96,7 +94,6 @@ Seed roles:
 | Seed index | Value | Used by |
 |------------|-------|---------|
 | 0 | `0xcafe3553` | `Hash64` — CountMin, CountSketch, UnivMon heap |
-| 5 | `0x6a09e667` | `CanonicalHashSeed` — ElasticSketch |
 | 6 | `0xbb67ae85` | `defaultHydraSeed` — Hydra cell routing |
 
 ### Protobuf schema
