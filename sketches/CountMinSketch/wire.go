@@ -29,12 +29,16 @@ func checkWireDims(rows, cols uint64) error {
 	return nil
 }
 
-// MarshalASAPv1 encodes the Count matrix as an ASAPv1 Count-Min envelope.
-// A sketch sampled with WithSampleP is rejected: its raw counts need a
-// sampling probability the encoding does not carry.
+// MarshalASAPv1 encodes the Count matrix as an ASAPv1 Count-Min envelope. It
+// rejects WithSampleP-sampled counts (the probability is not carried) and cells
+// written by a uint64-hash path outside the packed 64-bit layout.
 func (s *CountMinSketch) MarshalASAPv1() ([]byte, error) {
-	if s.sampler != nil {
-		return nil, errors.New("countminsketch: ASAPv1 cannot encode a sketch sampled with WithSampleP")
+	if s.sampler != nil || s.sampled {
+		return nil, errors.New("countminsketch: ASAPv1 cannot encode counts sampled with WithSampleP")
+	}
+	if s.foreignLayout {
+		return nil, fmt.Errorf("countminsketch: ASAPv1 cannot encode a %dx%d sketch written through a uint64-hash path; "+
+			"its columns differ from the fast-mode matrix hash outside the packed 64-bit layout", s.Rows, s.Cols)
 	}
 	if s.Rows < 0 || s.Cols < 0 {
 		return nil, fmt.Errorf("countminsketch: negative dimensions %dx%d", s.Rows, s.Cols)
@@ -66,8 +70,8 @@ func (s *CountMinSketch) MarshalASAPv1() ([]byte, error) {
 }
 
 // UnmarshalASAPv1 replaces s with the sketch in an ASAPv1 Count-Min envelope.
-// Sum and Sum2 are set to the counts and L1 to each row's sum; the sketch
-// comes back unsampled.
+// Sum, Sum2 and L1 are rebuilt from the counts, so they change across a round
+// trip once GOS resets or cell operations have made them diverge.
 func (s *CountMinSketch) UnmarshalASAPv1(b []byte) error {
 	md, p, err := asapv1.Open(b, asapv1.KindCountMin)
 	if err != nil {

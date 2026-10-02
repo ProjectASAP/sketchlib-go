@@ -15,9 +15,8 @@ import "fmt"
 //	  matrix : [][]float64   // row-major, shape [rows][cols]
 //	]
 //
-// Note: the field order differs from CountMinSketch (which puts the
-// matrix first). This mirrors the Rust struct declaration order and is
-// intentional — PR I's Rust decoder expects this exact layout.
+// The order mirrors the Rust struct declaration order, which PR I's Rust
+// decoder expects.
 func MarshalCountSketch(rowNum, colNum uint64, matrix [][]float64) ([]byte, error) {
 	if uint64(len(matrix)) != rowNum {
 		return nil, fmt.Errorf(

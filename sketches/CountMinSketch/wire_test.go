@@ -185,3 +185,119 @@ func TestASAPv1RoundTripKeepsEstimates(t *testing.T) {
 		t.Fatal("decoded sketch does not keep updating in place")
 	}
 }
+
+// Columns Rust's CountMin<Vector2D<f64>, FastPath> touches for
+// DataInput::Str("asapv1-pin"), one geometry per matrix-hash layout.
+func TestUpdateColumnsMatchRustFastPath(t *testing.T) {
+	for _, tc := range []struct {
+		rows, cols int
+		want       []int
+	}{
+		{3, 4096, []int{139, 2213, 3527}},
+		{5, 4096, []int{2621, 1916, 3522, 2386, 3321}},
+		{20, 1024, []int{139, 279, 543, 9, 469, 788, 568, 298, 16, 796, 468, 39, 609, 966, 629, 919, 852, 543, 64, 624}},
+	} {
+		s, _ := NewCountMinSketch(tc.rows, tc.cols)
+		s.Update(common.FromString("asapv1-pin"))
+		var got []int
+		for r := range tc.rows {
+			for c, v := range s.Count[r] {
+				if v != 0 {
+					got = append(got, c)
+				}
+			}
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%dx%d: columns %v, want %v", tc.rows, tc.cols, got, tc.want)
+		}
+	}
+}
+
+func TestASAPv1RefusesUint64HashWritesOutsidePacked64(t *testing.T) {
+	const hash = 0x9e3779b97f4a7c15
+	in := &common.SketchInput{Hash: hash}
+	writes := map[string]func(s *CountMinSketch){
+		"InsertWithHash":                 func(s *CountMinSketch) { s.InsertWithHash(hash) },
+		"FastInsertWeightWithHashValue":  func(s *CountMinSketch) { s.FastInsertWeightWithHashValue(hash, 2) },
+		"InsertWithHashGOS":              func(s *CountMinSketch) { s.InsertWithHashGOS(hash, 1, 100) },
+		"InsertWithHashGOS no threshold": func(s *CountMinSketch) { s.InsertWithHashGOS(hash, 1, 0) },
+		"ProcessInput":                   func(s *CountMinSketch) { s.ProcessInput(in, 100, func(common.DeltaUpdate) {}) },
+		"ColForRow":                      func(s *CountMinSketch) { s.IncrCell(0, s.ColForRow(in, 0), 1) },
+		"InsertWithHashSampledPerRow":    func(s *CountMinSketch) { s.InsertWithHashSampledPerRow(hash, common.NewGeometricSampler(0.99, 1)) },
+		"InsertWithHashAtRows":           func(s *CountMinSketch) { s.InsertWithHashAtRows(hash, 1, 1, 0.5) },
+		"InsertWithHashAtRowsGOS":        func(s *CountMinSketch) { s.InsertWithHashAtRowsGOS(hash, 1, 1, 0.5, 100) },
+		"MergeDelta":                     func(s *CountMinSketch) { s.MergeDelta(common.DeltaUpdate{Row: 0, Col: 1, Value: 1}) },
+	}
+	for name, write := range writes {
+		packed, _ := NewCountMinSketch(3, 4096)
+		write(packed)
+		if _, err := packed.MarshalASAPv1(); err != nil {
+			t.Errorf("%s at 3x4096 (packed 64-bit): %v", name, err)
+		}
+		for _, dims := range [][2]int{{5, 4096}, {20, 1024}} {
+			wide, _ := NewCountMinSketch(dims[0], dims[1])
+			write(wide)
+			if _, err := wide.MarshalASAPv1(); err == nil || !strings.Contains(err.Error(), "uint64-hash") {
+				t.Errorf("%s at %dx%d: got %v, want a uint64-hash refusal", name, dims[0], dims[1], err)
+			}
+			clean, _ := NewCountMinSketch(dims[0], dims[1])
+			clean.Update(common.FromString("k"))
+			if _, err := clean.MarshalASAPv1(); err != nil {
+				t.Fatalf("Update-only %dx%d: %v", dims[0], dims[1], err)
+			}
+			if err := clean.Merge(wide); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := clean.MarshalASAPv1(); err == nil {
+				t.Errorf("%s at %dx%d: merged sketch encoded", name, dims[0], dims[1])
+			}
+			wide.Reset()
+			if _, err := wide.MarshalASAPv1(); err != nil {
+				t.Errorf("%s at %dx%d after Reset: %v", name, dims[0], dims[1], err)
+			}
+		}
+	}
+}
+
+func TestASAPv1RefusesSampledCountsAfterSamplingIsCleared(t *testing.T) {
+	sampled := func() *CountMinSketch {
+		s, _ := NewCountMinSketch(3, 512)
+		s.WithSampleP(0.5, 1)
+		for range 100 {
+			s.Update(common.FromString("z"))
+		}
+		return s
+	}
+	cleared := sampled().WithSampleP(1.0, 1)
+	if _, err := cleared.MarshalASAPv1(); err == nil {
+		t.Error("sampled counts encoded after WithSampleP(1.0)")
+	}
+	cleared.Reset()
+	if _, err := cleared.MarshalASAPv1(); err != nil {
+		t.Errorf("after Reset: %v", err)
+	}
+
+	merged, _ := NewCountMinSketch(3, 512)
+	if err := merged.Merge(sampled()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := merged.MarshalASAPv1(); err == nil {
+		t.Error("unsampled sketch encoded after merging sampled counts")
+	}
+	merged3, _ := NewCountMinSketch(3, 512)
+	if err := merged3.Merge(sampled().WithSampleP(1.0, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := merged3.MarshalASAPv1(); err == nil {
+		t.Error("unsampled sketch encoded after merging cleared sampled counts")
+	}
+	idle, _ := NewCountMinSketch(3, 512)
+	idle.WithSampleP(0.5, 1)
+	merged2, _ := NewCountMinSketch(3, 512)
+	if err := merged2.Merge(idle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := merged2.MarshalASAPv1(); err == nil {
+		t.Error("unsampled sketch encoded after merging a sampling sketch")
+	}
+}

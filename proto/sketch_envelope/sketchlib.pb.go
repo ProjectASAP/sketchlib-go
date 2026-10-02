@@ -429,7 +429,7 @@ var File_sketchlib_proto protoreflect.FileDescriptor
 
 const file_sketchlib_proto_rawDesc = "" +
 	"\n" +
-	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a\x1dcountsketch/countsketch.proto\x1a\rhll/hll.proto\x1a\rkll/kll.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\x92\x05\n" +
+	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a\x1dcountsketch/countsketch.proto\x1a\rhll/hll.proto\x1a\rkll/kll.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\x9d\x05\n" +
 	"\x0eSketchEnvelope\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x126\n" +
 	"\bproducer\x18\x02 \x01(\v2\x1a.sketchlib.v1.ProducerInfoR\bproducer\x123\n" +
@@ -444,7 +444,7 @@ const file_sketchlib_proto_rawDesc = "" +
 	"\aelastic\x18\x12 \x01(\v2\x1a.sketchlib.v1.ElasticStateH\x00R\aelastic\x12\x19\n" +
 	"\bsample_p\x18\x04 \x01(\x01R\asamplePB\x0e\n" +
 	"\fsketch_stateJ\x04\b\n" +
-	"\x10\vJ\x04\b\x13\x10 \"\xc5\x02\n" +
+	"\x10\vJ\x04\b\x13\x10 R\tcount_min\"\xd0\x02\n" +
 	"\x13SketchDeltaEnvelope\x12#\n" +
 	"\rpartition_key\x18\x01 \x01(\tR\fpartitionKey\x12&\n" +
 	"\x0fwindow_start_ms\x18\x02 \x01(\x03R\rwindowStartMs\x12&\n" +
@@ -453,7 +453,7 @@ const file_sketchlib_proto_rawDesc = "" +
 	"\x03hll\x18\f \x01(\v2\x16.sketchlib.v1.HLLDeltaH\x00R\x03hll\x129\n" +
 	"\bddsketch\x18\r \x01(\v2\x1b.sketchlib.v1.DDSketchDeltaH\x00R\bddsketchB\a\n" +
 	"\x05deltaJ\x04\b\n" +
-	"\x10\vBMZKgithub.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;sketch_envelopepbb\x06proto3"
+	"\x10\vR\tcount_minBMZKgithub.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;sketch_envelopepbb\x06proto3"
 
 var (
 	file_sketchlib_proto_rawDescOnce sync.Once

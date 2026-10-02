@@ -9,8 +9,8 @@ import "fmt"
 //
 // byte-identical to Rust
 // `rmp_serde::to_vec(&(u64, u64, Vec<u32>, Vec<u32>, Vec<i64>))` (compact
-// mode). This is the shared shape emitted by asap_sketchlib's
-// `CountMinSketch` / `CountSketch` `compute_delta_msgpack` — signed integer
+// mode). This is the shape emitted by asap_sketchlib's
+// `CountSketch` `compute_delta_msgpack` — signed integer
 // cell deltas (rmp_serde encodes non-negative `i64` in the compact unsigned
 // form, so a delta of all-positive cells is byte-identical to a `u64` one).
 //

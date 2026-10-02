@@ -47,6 +47,7 @@ func (s *CountMinSketch) InsertWithHashSampledPerRow(hash uint64, sampler common
 	if admittedRows == 0 {
 		return // no admitted row → touch nothing
 	}
+	s.noteRawHash()
 
 	// 2. Update admitted rows only, with the inverse-probability weight. The
 	// per-row column derivation mirrors InsertWithHash exactly (row r reads the
@@ -94,6 +95,7 @@ func (s *CountMinSketch) InsertWithHashAtRows(hash uint64, value float64, admitt
 	if admittedRows == 0 || s.Rows > maxSampledRowsCMS {
 		return
 	}
+	s.noteRawHash()
 	w := value
 	if p > 0 && p < 1.0 {
 		w = value / p
