@@ -1,6 +1,7 @@
 package hydrasketch
 
 import (
+	"errors"
 	"fmt"
 
 	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
@@ -104,13 +105,7 @@ func cellToProto(c HydraCounter) (*hydrapb.HydraCell, error) {
 		}, nil
 
 	case *hllCounter:
-		env, err := ct.s.SerializePortable()
-		if err != nil {
-			return nil, err
-		}
-		return &hydrapb.HydraCell{
-			Sketch: &hydrapb.HydraCell_Hll{Hll: env.GetHll()},
-		}, nil
+		return nil, errors.New("hydra: HLL cells have no protobuf encoding")
 
 	case *kllCounter:
 		return nil, fmt.Errorf("KLL cells have no protobuf encoding")

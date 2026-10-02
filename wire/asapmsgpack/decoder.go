@@ -215,28 +215,6 @@ func (d *decoder) readString() (string, error) {
 	return string(sb), nil
 }
 
-// readU8Array reads an array-of-u8 serialized in the rmp_serde
-// `Vec<u8>` shape (fixarray + positive-fixint elements).
-func (d *decoder) readU8Array() ([]byte, error) {
-	n, err := d.readArrayLen()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]byte, n)
-	for i := 0; i < n; i++ {
-		v, err := d.readUint()
-		if err != nil {
-			return nil, err
-		}
-		if v > 0xff {
-			return nil, fmt.Errorf(
-				"asapmsgpack: element %d = %d out of u8 range", i, v)
-		}
-		out[i] = byte(v)
-	}
-	return out, nil
-}
-
 func (d *decoder) readFloat64Matrix() ([][]float64, error) {
 	rows, err := d.readArrayLen()
 	if err != nil {
@@ -268,4 +246,10 @@ func (d *decoder) done() error {
 			d.pos, len(d.buf))
 	}
 	return nil
+}
+
+func errWrongLen(sketch string, want, got int) error {
+	return fmt.Errorf(
+		"asapmsgpack: %s expected %d-element array, got %d",
+		sketch, want, got)
 }

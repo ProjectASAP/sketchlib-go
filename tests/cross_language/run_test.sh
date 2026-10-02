@@ -2,12 +2,12 @@
 # run_test.sh — Cross-language integration test for sketchlib.
 #
 # Builds and runs:
-#   1. Go producer  (sketchlib-go)   — writes 8 .pb sketch files into a tmp dir (go test)
+#   1. Go producer  (sketchlib-go)   — writes 7 .pb sketch files into a tmp dir (go test)
 #   2. Rust consumer (sketchlib-rust) — reads those files, deserialises each sketch,
 #      runs sanity queries, and asserts correctness
 #
 # Sketch types covered:
-#   CountMin · DDSketch · HLL · CountSketch · CocoSketch ·
+#   CountMin · DDSketch · CountSketch · CocoSketch ·
 #   ElasticSketch · UnivMon · HydraSketch
 #
 # Usage (run from anywhere inside the repo):
@@ -107,7 +107,7 @@ step "Produced .pb files:"
 ls -lh "$TMP_DIR"/*.pb 2>/dev/null || { err "No .pb files produced"; exit 1; }
 
 EXPECTED_FILES=(
-    countmin.pb ddsketch.pb hll.pb countsketch.pb
+    countmin.pb ddsketch.pb countsketch.pb
     coco.pb elastic.pb univmon.pb hydra.pb
 )
 MISSING=0
@@ -118,7 +118,7 @@ for f in "${EXPECTED_FILES[@]}"; do
     fi
 done
 if [[ "$MISSING" != "0" ]]; then exit 1; fi
-ok "All 8 sketch files present"
+ok "All 7 sketch files present"
 
 # ---------------------------------------------------------------------------
 # Phase 2 — Rust consumer

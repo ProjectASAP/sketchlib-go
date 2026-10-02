@@ -1,13 +1,12 @@
 // xtest_producer — Cross-language integration test: Go producer side.
 //
-// Inserts synthetic data into eight sketch types, serializes each as a portable
+// Inserts synthetic data into seven sketch types, serializes each as a portable
 // protobuf SketchEnvelope, and writes the binary files to $XTEST_DIR.
 //
 // Output files:
 //
 //	countmin.pb     CountMinState     (float64 counters)
 //	ddsketch.pb     DDSketchState     (alpha + bucket array)
-//	hll.pb          HyperLogLogState  (DataFusion estimator)
 //	countsketch.pb  CountSketchState  (float64 signed counters)
 //	coco.pb         CocoSketchState   (hash+val+hasKey buckets)
 //	elastic.pb      ElasticState      (heavy buckets + light CM)
@@ -35,9 +34,6 @@ import (
 	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
 	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/sketches/ElasticSKetch"
-	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
-
-	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
 )
 
 func TestXtestProducer(t *testing.T) {
@@ -88,44 +84,6 @@ func TestXtestProducer(t *testing.T) {
 	p99dd, _ := ds.Quantile(0.99)
 	t.Logf("[DDSketch] Step 3/3 — p50≈%.2f  p99≈%.2f", p50dd, p99dd)
 	writeEnvelope(t, outDir, "ddsketch.pb", tmust(ds.SerializePortable()))
-
-	// -----------------------------------------------------------------------
-	// HLL (DataFusion estimator)
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[HLL] Step 1/3 — Create HyperLogLog sketch")
-	h := hll.NewHyperLogLog()
-
-	t.Log("[HLL] Step 2/3 — Insert 50 000 distinct keys")
-	for i := 0; i < 50_000; i++ {
-		h.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("hll:%d", i))))
-	}
-	t.Logf("[HLL] Step 3/3 — cardinality≈%d (expect ~50000)", h.Estimate())
-	writeEnvelope(t, outDir, "hll.pb", tmust(h.SerializePortable()))
-
-	// -----------------------------------------------------------------------
-	// HLL (low cardinality → SPARSE registers, proto tag 7)
-	// -----------------------------------------------------------------------
-	// The default 50 000-key HLL above lands DENSE; below ~6000 non-zero
-	// registers the encoder emits the SPARSE registers_sparse field (tag 7),
-	// which is what most real-world HLLs now emit. This fixture pins that path
-	// for the cross-language consumer (which dual-reads tag 7 via
-	// registers_from_state). Written as a separate, optional file so existing
-	// dense-only consumer slots are unaffected.
-	t.Log()
-	t.Log("[HLL/sparse] Step 1/3 — Create HyperLogLog sketch")
-	hSparse := hll.NewHyperLogLog()
-	t.Log("[HLL/sparse] Step 2/3 — Insert 500 distinct keys (sparse-encoded)")
-	for i := 0; i < 500; i++ {
-		hSparse.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("hllsparse:%d", i))))
-	}
-	sparseEnv := tmust(hSparse.SerializePortable()).(*envpb.SketchEnvelope)
-	if sparseEnv.GetHll().GetRegistersSparse() == nil {
-		t.Fatal("[HLL/sparse] expected SPARSE (tag 7) encoding at 500 keys")
-	}
-	t.Logf("[HLL/sparse] Step 3/3 — cardinality≈%d (expect ~500), sparse tag 7 populated",
-		hSparse.Estimate())
-	writeEnvelope(t, outDir, "hll_sparse.pb", sparseEnv)
 
 	// -----------------------------------------------------------------------
 	// CountSketch
@@ -250,29 +208,11 @@ func TestXtestProducer(t *testing.T) {
 	writeEnvelope(t, outDir, "countmin_sampled.pb", tmust(cmS.SerializePortable()))
 
 	// -----------------------------------------------------------------------
-	// Sampled HLL (hash-threshold element sampling, p=0.1)
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[HLL/sampled] Step 1/3 — Create HLL, p=0.1 hash-threshold")
-	hS := hll.NewHyperLogLog()
-	hS.WithSampleP(0.1)
-
-	t.Log("[HLL/sampled] Step 2/3 — Insert 200 000 distinct keys (each 3×)")
-	for i := 0; i < 200_000; i++ {
-		hash := common.Hash64([]byte(fmt.Sprintf("hlls:%d", i)))
-		hS.InsertWithHash(hash)
-		hS.InsertWithHash(hash)
-		hS.InsertWithHash(hash)
-	}
-	t.Logf("[HLL/sampled] Step 3/3 — raw card≈%d (≈ p·200000), p=%.2f", hS.Estimate(), hS.SampleP())
-	writeEnvelope(t, outDir, "hll_sampled.pb", tmust(hS.SerializePortable()))
-
-	// -----------------------------------------------------------------------
 	// Summary
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 8 sketches + 2 sampled written to " + outDir)
+	t.Log("  Producer complete — 7 sketches + 1 sampled written to " + outDir)
 	t.Log("=======================================================")
 }
 
