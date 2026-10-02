@@ -31,7 +31,6 @@
 package sketch_envelopepb
 
 import (
-	cocosketch "github.com/ProjectASAP/sketchlib-go/proto/cocosketch"
 	common "github.com/ProjectASAP/sketchlib-go/proto/common"
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/proto/elasticsketch"
 	hydra "github.com/ProjectASAP/sketchlib-go/proto/hydra"
@@ -60,7 +59,7 @@ type SketchEnvelope struct {
 	//
 	//	1 = CountMin, Count, HLL, KLL
 	//	2 = UnivMon, Hydra (reserved)
-	//	3 = CocoSketch, ElasticSketch (reserved)
+	//	3 = ElasticSketch (reserved)
 	FormatVersion uint32 `protobuf:"varint,1,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
 	// Library and build info of the producing side.
 	Producer *common.ProducerInfo `protobuf:"bytes,2,opt,name=producer,proto3" json:"producer,omitempty"`
@@ -74,7 +73,6 @@ type SketchEnvelope struct {
 	//
 	//	*SketchEnvelope_Univmon
 	//	*SketchEnvelope_Hydra
-	//	*SketchEnvelope_Coco
 	//	*SketchEnvelope_Elastic
 	SketchState isSketchEnvelope_SketchState `protobuf_oneof:"sketch_state"`
 	// Geometric / NitroSketch sampling probability for the producing sketch.
@@ -175,15 +173,6 @@ func (x *SketchEnvelope) GetHydra() *hydra.HydraState {
 	return nil
 }
 
-func (x *SketchEnvelope) GetCoco() *cocosketch.CocoSketchState {
-	if x != nil {
-		if x, ok := x.SketchState.(*SketchEnvelope_Coco); ok {
-			return x.Coco
-		}
-	}
-	return nil
-}
-
 func (x *SketchEnvelope) GetElastic() *elasticsketch.ElasticState {
 	if x != nil {
 		if x, ok := x.SketchState.(*SketchEnvelope_Elastic); ok {
@@ -212,10 +201,6 @@ type SketchEnvelope_Hydra struct {
 	Hydra *hydra.HydraState `protobuf:"bytes,16,opt,name=hydra,proto3,oneof"`
 }
 
-type SketchEnvelope_Coco struct {
-	Coco *cocosketch.CocoSketchState `protobuf:"bytes,17,opt,name=coco,proto3,oneof"`
-}
-
 type SketchEnvelope_Elastic struct {
 	Elastic *elasticsketch.ElasticState `protobuf:"bytes,18,opt,name=elastic,proto3,oneof"`
 }
@@ -223,8 +208,6 @@ type SketchEnvelope_Elastic struct {
 func (*SketchEnvelope_Univmon) isSketchEnvelope_SketchState() {}
 
 func (*SketchEnvelope_Hydra) isSketchEnvelope_SketchState() {}
-
-func (*SketchEnvelope_Coco) isSketchEnvelope_SketchState() {}
 
 func (*SketchEnvelope_Elastic) isSketchEnvelope_SketchState() {}
 
@@ -297,18 +280,17 @@ var File_sketchlib_proto protoreflect.FileDescriptor
 
 const file_sketchlib_proto_rawDesc = "" +
 	"\n" +
-	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\xf7\x03\n" +
+	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a!elasticsketch/elasticsketch.proto\"\xce\x03\n" +
 	"\x0eSketchEnvelope\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x126\n" +
 	"\bproducer\x18\x02 \x01(\v2\x1a.sketchlib.v1.ProducerInfoR\bproducer\x123\n" +
 	"\thash_spec\x18\x03 \x01(\v2\x16.sketchlib.v1.HashSpecR\bhashSpec\x126\n" +
 	"\aunivmon\x18\x0f \x01(\v2\x1a.sketchlib.v1.UnivMonStateH\x00R\aunivmon\x120\n" +
-	"\x05hydra\x18\x10 \x01(\v2\x18.sketchlib.v1.HydraStateH\x00R\x05hydra\x123\n" +
-	"\x04coco\x18\x11 \x01(\v2\x1d.sketchlib.v1.CocoSketchStateH\x00R\x04coco\x126\n" +
+	"\x05hydra\x18\x10 \x01(\v2\x18.sketchlib.v1.HydraStateH\x00R\x05hydra\x126\n" +
 	"\aelastic\x18\x12 \x01(\v2\x1a.sketchlib.v1.ElasticStateH\x00R\aelastic\x12\x19\n" +
 	"\bsample_p\x18\x04 \x01(\x01R\asamplePB\x0e\n" +
 	"\fsketch_stateJ\x04\b\n" +
-	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x13\x10 R\tcount_minR\fcount_sketchR\x03hllR\x03kllR\bddsketch\"\xca\x01\n" +
+	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x11\x10\x12J\x04\b\x13\x10 R\tcount_minR\fcount_sketchR\x03hllR\x03kllR\bddsketchR\x04coco\"\xca\x01\n" +
 	"\x13SketchDeltaEnvelope\x12#\n" +
 	"\rpartition_key\x18\x01 \x01(\tR\fpartitionKey\x12&\n" +
 	"\x0fwindow_start_ms\x18\x02 \x01(\x03R\rwindowStartMs\x12&\n" +
@@ -335,21 +317,19 @@ var file_sketchlib_proto_goTypes = []any{
 	(*common.HashSpec)(nil),            // 3: sketchlib.v1.HashSpec
 	(*univmon.UnivMonState)(nil),       // 4: sketchlib.v1.UnivMonState
 	(*hydra.HydraState)(nil),           // 5: sketchlib.v1.HydraState
-	(*cocosketch.CocoSketchState)(nil), // 6: sketchlib.v1.CocoSketchState
-	(*elasticsketch.ElasticState)(nil), // 7: sketchlib.v1.ElasticState
+	(*elasticsketch.ElasticState)(nil), // 6: sketchlib.v1.ElasticState
 }
 var file_sketchlib_proto_depIdxs = []int32{
 	2, // 0: sketchlib.v1.SketchEnvelope.producer:type_name -> sketchlib.v1.ProducerInfo
 	3, // 1: sketchlib.v1.SketchEnvelope.hash_spec:type_name -> sketchlib.v1.HashSpec
 	4, // 2: sketchlib.v1.SketchEnvelope.univmon:type_name -> sketchlib.v1.UnivMonState
 	5, // 3: sketchlib.v1.SketchEnvelope.hydra:type_name -> sketchlib.v1.HydraState
-	6, // 4: sketchlib.v1.SketchEnvelope.coco:type_name -> sketchlib.v1.CocoSketchState
-	7, // 5: sketchlib.v1.SketchEnvelope.elastic:type_name -> sketchlib.v1.ElasticState
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	6, // 4: sketchlib.v1.SketchEnvelope.elastic:type_name -> sketchlib.v1.ElasticState
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_sketchlib_proto_init() }
@@ -360,7 +340,6 @@ func file_sketchlib_proto_init() {
 	file_sketchlib_proto_msgTypes[0].OneofWrappers = []any{
 		(*SketchEnvelope_Univmon)(nil),
 		(*SketchEnvelope_Hydra)(nil),
-		(*SketchEnvelope_Coco)(nil),
 		(*SketchEnvelope_Elastic)(nil),
 	}
 	type x struct{}

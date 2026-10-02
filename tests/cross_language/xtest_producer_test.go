@@ -1,11 +1,10 @@
 // xtest_producer — Cross-language integration test: Go producer side.
 //
-// Inserts synthetic data into four sketch types, serializes each as a portable
+// Inserts synthetic data into three sketch types, serializes each as a portable
 // protobuf SketchEnvelope, and writes the binary files to $XTEST_DIR.
 //
 // Output files:
 //
-//	coco.pb         CocoSketchState   (hash+val+hasKey buckets)
 //	elastic.pb      ElasticState      (heavy buckets + light CM)
 //	univmon.pb      UnivMonState      (layered CS + TopK heaps)
 //	hydra.pb        HydraState        (CM-cell grid)
@@ -26,7 +25,6 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/common"
 	hydrasketch "github.com/ProjectASAP/sketchlib-go/sketch_framework/HydraSketch"
 	univmon "github.com/ProjectASAP/sketchlib-go/sketch_framework/UnivMon"
-	cocosketch "github.com/ProjectASAP/sketchlib-go/sketches/CocoSketch"
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/sketches/ElasticSKetch"
 )
 
@@ -42,23 +40,6 @@ func TestXtestProducer(t *testing.T) {
 	t.Log("=======================================================")
 	t.Log("  sketchlib-go → xtest_producer")
 	t.Log("=======================================================")
-
-	// -----------------------------------------------------------------------
-	// CocoSketch
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[CocoSketch] Step 1/3 — Create sketch (d=5, width=128)")
-	coco, err := cocosketch.NewCocoSketch(5, 128)
-	tcheck(t, "new coco", err)
-
-	t.Log("[CocoSketch] Step 2/3 — Insert 'coco:hot' with val 500")
-	coco.Insert("coco:hot", 500)
-	for i := 0; i < 1000; i++ {
-		coco.Insert(fmt.Sprintf("coco:%d", i), 1)
-	}
-	cocoEst := coco.Estimate("coco:hot")
-	t.Logf("[CocoSketch] Step 3/3 — 'coco:hot' est = %d (expect ≥ 500)", cocoEst)
-	writeEnvelope(t, outDir, "coco.pb", tmust(coco.SerializePortable()))
 
 	// -----------------------------------------------------------------------
 	// ElasticSketch
@@ -128,7 +109,7 @@ func TestXtestProducer(t *testing.T) {
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 4 sketches written to " + outDir)
+	t.Log("  Producer complete — 3 sketches written to " + outDir)
 	t.Log("=======================================================")
 }
 
