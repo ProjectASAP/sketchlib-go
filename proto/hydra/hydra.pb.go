@@ -340,13 +340,13 @@ const file_hydra_hydra_proto_rawDesc = "" +
 	"seed_index\x18\x06 \x01(\rR\tseedIndex\x12\x1f\n" +
 	"\venable_topk\x18\a \x01(\bR\n" +
 	"enableTopk\x12%\n" +
-	"\x0efanout_subkeys\x18\b \x01(\bR\rfanoutSubkeysJ\x04\b\t\x10\x10\"\xfa\x01\n" +
+	"\x0efanout_subkeys\x18\b \x01(\bR\rfanoutSubkeysJ\x04\b\t\x10\x10\"\x85\x02\n" +
 	"\tHydraCell\x12:\n" +
 	"\tcount_min\x18\x01 \x01(\v2\x1b.sketchlib.v1.CountMinStateH\x00R\bcountMin\x12C\n" +
 	"\fcount_sketch\x18\x02 \x01(\v2\x1e.sketchlib.v1.CountSketchStateH\x00R\vcountSketch\x12*\n" +
 	"\x03kll\x18\x04 \x01(\v2\x16.sketchlib.v1.KLLStateH\x00R\x03kll\x126\n" +
 	"\aunivmon\x18\x05 \x01(\v2\x1a.sketchlib.v1.UnivMonStateH\x00R\aunivmonB\b\n" +
-	"\x06sketch*\xd5\x01\n" +
+	"\x06sketchJ\x04\b\x03\x10\x04R\x03hll*\xd5\x01\n" +
 	"\x10HydraCounterType\x12\"\n" +
 	"\x1eHYDRA_COUNTER_TYPE_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cHYDRA_COUNTER_TYPE_COUNT_MIN\x10\x01\x12#\n" +

@@ -12,7 +12,7 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/wire/asapv1/asapv1test"
 )
 
-// p12Sketch runs the HLL codec at precision 12, the precision of the fixtures.
+// p12Sketch runs the HLL codec at precision 12, the precision of the p12 fixtures.
 type p12Sketch struct {
 	Kind      asapv1.KindID
 	Registers []uint8
@@ -57,31 +57,6 @@ func TestASAPv1Golden(t *testing.T) {
 	}
 }
 
-// p14Bytes is the p12 fixture name with precision 14 and regs as its registers.
-func p14Bytes(t *testing.T, name string, regs []uint8, hip []float64) []byte {
-	t.Helper()
-	kind, metadata, _, err := asapv1.Split(asapv1test.Golden(t, name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	p12 := []byte("\xa9precision\x0c")
-	if !bytes.HasSuffix(metadata, p12) {
-		t.Fatalf("%s: metadata does not end with precision 12", name)
-	}
-	metadata = append(bytes.TrimSuffix(metadata, p12), "\xa9precision\x0e"...)
-	p := asapv1.NewEncoder()
-	p.Array(1 + len(hip))
-	p.Bin(regs)
-	for _, v := range hip {
-		p.Float64(v)
-	}
-	b, err := asapv1.Encode(kind, metadata, p.Bytes())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
-
 func marshal(t *testing.T, m asapv1.Marshaler) []byte {
 	t.Helper()
 	b, err := m.MarshalASAPv1()
@@ -91,45 +66,29 @@ func marshal(t *testing.T, m asapv1.Marshaler) []byte {
 	return b
 }
 
-func TestASAPv1SketchTypes(t *testing.T) {
-	regs := fixtureRegisters(HLLRegisterCount)
-
-	h := NewHyperLogLog()
-	copy(h.Registers.AsMutSlice(), regs)
-	b := marshal(t, h)
-	asapv1test.Equal(t, b, p14Bytes(t, "hll_ertl_mle_p12", regs, nil))
-	var gotH HyperLogLog
-	if err := gotH.UnmarshalASAPv1(b); err != nil {
-		t.Fatal(err)
+func TestASAPv1GoldenP14(t *testing.T) {
+	regs := func() []uint8 {
+		r := make([]uint8, HLLRegisterCount)
+		r[0], r[1], r[8192], r[16383] = 1, 7, 42, 51
+		return r
 	}
-	if !reflect.DeepEqual(&gotH, h) {
-		t.Fatal("HyperLogLog round trip differs")
-	}
-
-	for variant, fixture := range map[HLLVariant]string{HLLRegular: "hll_classic_p12", HLLDataFusion: "hll_ertl_mle_p12"} {
-		v := NewHyperLogLogVariant(variant)
-		copy(v.Registers.AsMutSlice(), regs)
-		b := marshal(t, v)
-		asapv1test.Equal(t, b, p14Bytes(t, fixture, regs, nil))
-		var got HyperLogLogVariant
-		if err := got.UnmarshalASAPv1(b); err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(&got, v) {
-			t.Fatalf("HyperLogLogVariant %d round trip differs", variant)
-		}
-	}
-
-	hip := &HyperLogLogHIP{Registers: storage.Vector1DFromSlice(regs), kxq0: 1.5, kxq1: 2.5, est: 3.0}
-	b = marshal(t, hip)
-	asapv1test.Equal(t, b, p14Bytes(t, "hll_hip_p12", regs, []float64{1.5, 2.5, 3.0}))
-	var gotHIP HyperLogLogHIP
-	if err := gotHIP.UnmarshalASAPv1(b); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(&gotHIP, hip) {
-		t.Fatal("HyperLogLogHIP round trip differs")
-	}
+	t.Run("hll_ertl_mle_p14/HyperLogLog", func(t *testing.T) {
+		h := NewHyperLogLog()
+		copy(h.Registers.AsMutSlice(), regs())
+		asapv1test.CheckGolden(t, "hll_ertl_mle_p14", h, nil)
+	})
+	t.Run("hll_classic_p14/HyperLogLogVariant", func(t *testing.T) {
+		v := &HyperLogLogVariant{Registers: storage.Vector1DFromSlice(regs()), Variant: HLLRegular}
+		asapv1test.CheckGolden(t, "hll_classic_p14", v, nil)
+	})
+	t.Run("hll_ertl_mle_p14/HyperLogLogVariant", func(t *testing.T) {
+		v := &HyperLogLogVariant{Registers: storage.Vector1DFromSlice(regs()), Variant: HLLDataFusion}
+		asapv1test.CheckGolden(t, "hll_ertl_mle_p14", v, nil)
+	})
+	t.Run("hll_hip_p14/HyperLogLogHIP", func(t *testing.T) {
+		hip := &HyperLogLogHIP{Registers: storage.Vector1DFromSlice(regs()), kxq0: 16380.5, kxq1: 0.25, est: 4.125}
+		asapv1test.CheckGolden(t, "hll_hip_p14", hip, nil)
+	})
 }
 
 func TestASAPv1RoundTripPreservesEstimates(t *testing.T) {

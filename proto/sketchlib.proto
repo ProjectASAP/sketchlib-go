@@ -74,6 +74,8 @@ message SketchEnvelope {
     ElasticState     elastic      = 18;
   }
 
+  reserved 12;
+  reserved "hll";
   reserved 19 to 31;  // Reserved for future sketch types.
 
   // Geometric / NitroSketch sampling probability for the producing sketch.
@@ -131,4 +133,7 @@ message SketchDeltaEnvelope {
     CountSketchDelta count_sketch = 11;
     DDSketchDelta    ddsketch     = 13;
   }
+
+  reserved 12;
+  reserved "hll";
 }

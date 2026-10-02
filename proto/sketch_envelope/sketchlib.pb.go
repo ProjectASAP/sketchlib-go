@@ -428,7 +428,7 @@ var File_sketchlib_proto protoreflect.FileDescriptor
 
 const file_sketchlib_proto_rawDesc = "" +
 	"\n" +
-	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a#countminsketch/countminsketch.proto\x1a\x1dcountsketch/countsketch.proto\x1a\rkll/kll.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\x94\x05\n" +
+	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a#countminsketch/countminsketch.proto\x1a\x1dcountsketch/countsketch.proto\x1a\rkll/kll.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\x9f\x05\n" +
 	"\x0eSketchEnvelope\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x126\n" +
 	"\bproducer\x18\x02 \x01(\v2\x1a.sketchlib.v1.ProducerInfoR\bproducer\x123\n" +
@@ -443,7 +443,7 @@ const file_sketchlib_proto_rawDesc = "" +
 	"\x04coco\x18\x11 \x01(\v2\x1d.sketchlib.v1.CocoSketchStateH\x00R\x04coco\x126\n" +
 	"\aelastic\x18\x12 \x01(\v2\x1a.sketchlib.v1.ElasticStateH\x00R\aelastic\x12\x19\n" +
 	"\bsample_p\x18\x04 \x01(\x01R\asamplePB\x0e\n" +
-	"\fsketch_stateJ\x04\b\x13\x10 \"\xcf\x02\n" +
+	"\fsketch_stateJ\x04\b\f\x10\rJ\x04\b\x13\x10 R\x03hll\"\xda\x02\n" +
 	"\x13SketchDeltaEnvelope\x12#\n" +
 	"\rpartition_key\x18\x01 \x01(\tR\fpartitionKey\x12&\n" +
 	"\x0fwindow_start_ms\x18\x02 \x01(\x03R\rwindowStartMs\x12&\n" +
@@ -452,7 +452,7 @@ const file_sketchlib_proto_rawDesc = "" +
 	" \x01(\v2\x1b.sketchlib.v1.CountMinDeltaH\x00R\bcountMin\x12C\n" +
 	"\fcount_sketch\x18\v \x01(\v2\x1e.sketchlib.v1.CountSketchDeltaH\x00R\vcountSketch\x129\n" +
 	"\bddsketch\x18\r \x01(\v2\x1b.sketchlib.v1.DDSketchDeltaH\x00R\bddsketchB\a\n" +
-	"\x05deltaBMZKgithub.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;sketch_envelopepbb\x06proto3"
+	"\x05deltaJ\x04\b\f\x10\rR\x03hllBMZKgithub.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;sketch_envelopepbb\x06proto3"
 
 var (
 	file_sketchlib_proto_rawDescOnce sync.Once

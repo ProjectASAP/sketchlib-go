@@ -1,15 +1,13 @@
 // xtest_producer — Cross-language integration test: Go producer side.
 //
-// Inserts synthetic data into nine sketch types, serializes each as a portable
-// protobuf SketchEnvelope (HLL as ASAPv1), and writes the binary files to
-// $XTEST_DIR.
+// Inserts synthetic data into eight sketch types, serializes each as a portable
+// protobuf SketchEnvelope, and writes the binary files to $XTEST_DIR.
 //
 // Output files:
 //
 //	countmin.pb     CountMinState     (float64 counters)
 //	kll.pb          KLLState          (quantile items + coin RNG)
 //	ddsketch.pb     DDSketchState     (alpha + bucket array)
-//	hll.asapv1      ASAPv1 HLL Ertl-MLE
 //	countsketch.pb  CountSketchState  (float64 signed counters)
 //	coco.pb         CocoSketchState   (hash+val+hasKey buckets)
 //	elastic.pb      ElasticState      (heavy buckets + light CM)
@@ -37,7 +35,6 @@ import (
 	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
 	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/sketches/ElasticSKetch"
-	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
 	kll "github.com/ProjectASAP/sketchlib-go/sketches/KLL"
 )
 
@@ -106,22 +103,6 @@ func TestXtestProducer(t *testing.T) {
 	p99dd, _ := ds.Quantile(0.99)
 	t.Logf("[DDSketch] Step 3/3 — p50≈%.2f  p99≈%.2f", p50dd, p99dd)
 	writeEnvelope(t, outDir, "ddsketch.pb", tmust(ds.SerializePortable()))
-
-	// -----------------------------------------------------------------------
-	// HLL (DataFusion estimator)
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[HLL] Step 1/3 — Create HyperLogLog sketch")
-	h := hll.NewHyperLogLog()
-
-	t.Log("[HLL] Step 2/3 — Insert 50 000 distinct keys")
-	for i := 0; i < 50_000; i++ {
-		h.InsertWithHash(common.Hash64([]byte(fmt.Sprintf("hll:%d", i))))
-	}
-	t.Logf("[HLL] Step 3/3 — cardinality≈%d (expect ~50000)", h.Estimate())
-	hllBytes, err := h.MarshalASAPv1()
-	tcheck(t, "marshal hll", err)
-	writeBytes(t, outDir, "hll.asapv1", hllBytes)
 
 	// -----------------------------------------------------------------------
 	// CountSketch
@@ -250,7 +231,7 @@ func TestXtestProducer(t *testing.T) {
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 9 sketches + 1 sampled written to " + outDir)
+	t.Log("  Producer complete — 8 sketches + 1 sampled written to " + outDir)
 	t.Log("=======================================================")
 }
 
@@ -262,11 +243,6 @@ func writeEnvelope(t *testing.T, dir, name string, env proto.Message) {
 	t.Helper()
 	data, err := proto.Marshal(env)
 	tcheck(t, "marshal "+name, err)
-	writeBytes(t, dir, name, data)
-}
-
-func writeBytes(t *testing.T, dir, name string, data []byte) {
-	t.Helper()
 	path := filepath.Join(dir, name)
 	tcheck(t, "write "+path, os.WriteFile(path, data, 0o644))
 	t.Logf("   → %s  (%d bytes)", path, len(data))

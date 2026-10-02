@@ -75,4 +75,7 @@ message HydraCell {
     KLLState         kll          = 4;
     UnivMonState     univmon      = 5;
   }
+
+  reserved 3;
+  reserved "hll";
 }

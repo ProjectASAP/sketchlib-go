@@ -120,7 +120,8 @@ func (h *HyperLogLogVariant) MarshalASAPv1() ([]byte, error) {
 }
 
 // UnmarshalASAPv1 replaces the sketch with one decoded from ASAPv1 HLL Classic
-// or HLL Ertl-MLE bytes at precision HLLPrecision; the kind_id sets Variant.
+// or HLL Ertl-MLE bytes at precision HLLPrecision.
+// Variant follows the kind_id: Classic gives HLLRegular, Ertl-MLE HLLDataFusion.
 func (h *HyperLogLogVariant) UnmarshalASAPv1(b []byte) error {
 	kind, _, _, err := asapv1.Split(b)
 	if err != nil {
