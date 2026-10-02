@@ -159,7 +159,8 @@ type countSketchCounter struct {
 }
 
 // NewHydraCountSketchCounter returns an empty rows x cols Count Sketch counter
-// of int32 counters in fast mode; cols must be a power of two.
+// of int32 counters in fast mode. cols must be a power of two, so a Hydra
+// Count Sketch grid with other counter_cols does not decode.
 func NewHydraCountSketchCounter(rows, cols int) (HydraCounter, error) {
 	s, err := countsketch.NewCountSketch(rows, cols)
 	if err != nil {

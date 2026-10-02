@@ -557,3 +557,118 @@ func TestASAPv1RoundTripKeepsQueries(t *testing.T) {
 		}
 	}
 }
+
+func TestASAPv1IdleUnivMonGridKeepsTheReceiversKeyType(t *testing.T) {
+	newGrid := func() *Hydra {
+		c, err := NewHydraUnivMonCounter[string](4, 2, 16, 3)
+		return mustHydra(t, 2, 4, goldenSchema, c, err)
+	}
+	b, err := newGrid().MarshalASAPv1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := newGrid()
+	if err := got.UnmarshalASAPv1(b); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.proto.(*univMonCounter[string]); !ok {
+		t.Fatalf("an idle string-keyed grid decoded with %T cells", got.proto)
+	}
+	populated := newGrid()
+	mustUpdate(t, populated, []string{"us", "api"}, common.FromString("alpha"), 3)
+	if err := got.Merge(populated); err != nil {
+		t.Fatalf("merging a populated grid into the decoded idle one: %v", err)
+	}
+	if l1 := mustQuery(t, got, []*string{Eq("us"), nil}, L1NormQuery()); l1 != 3 {
+		t.Errorf("L1 after merge %v, want 3", l1)
+	}
+	mustUpdate(t, got, []string{"eu", "web"}, common.FromString("beta"), 1)
+
+	var fresh Hydra
+	if err := fresh.UnmarshalASAPv1(b); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fresh.proto.(*univMonCounter[uint64]); !ok {
+		t.Errorf("an idle grid decoded into a fresh Hydra with %T cells, want uint64 keys", fresh.proto)
+	}
+	err = got.Merge(&fresh)
+	if err == nil || !strings.Contains(err.Error(), "uint64") || !strings.Contains(err.Error(), "string") {
+		t.Errorf("merging uint64-keyed cells into string-keyed ones: %v", err)
+	}
+
+	populatedU64 := newGrid()
+	if err := populatedU64.UnmarshalASAPv1(asapv1test.Golden(t, "hydra_univmon_1x2")); err == nil ||
+		!strings.Contains(err.Error(), "string") {
+		t.Errorf("u64 heap keys decoded into a string-keyed grid: %v", err)
+	}
+	if _, ok := populatedU64.proto.(*univMonCounter[string]); !ok || populatedU64.rows != 2 {
+		t.Error("a failed decode changed the receiver")
+	}
+	strGrid := newGrid()
+	sb, err := populated.MarshalASAPv1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	u64Grid := goldenUnivMon(t)
+	if err := u64Grid.UnmarshalASAPv1(sb); err == nil || !strings.Contains(err.Error(), "string") {
+		t.Errorf("string heap keys decoded into a uint64-keyed grid: %v", err)
+	}
+	if err := strGrid.UnmarshalASAPv1(sb); err != nil {
+		t.Errorf("string heap keys into a string-keyed grid: %v", err)
+	}
+}
+
+func TestASAPv1RejectsNonPowerOfTwoCountSketchCols(t *testing.T) {
+	kind, mdBytes, _, err := asapv1.Split(asapv1test.Golden(t, "hydra_cs_2x2_counter_2x2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := asapv1.NewDecoder(mdBytes)
+	md := asapv1.NewMetadataWriter(1)
+	for range d.Map() {
+		key, value := d.Str(), d.Raw()
+		switch key {
+		case "metadata_version":
+		case "counter_cols":
+			md.Uint(key, 3)
+		default:
+			md.Field(key).Raw(value)
+		}
+	}
+	p := asapv1.NewEncoder()
+	p.Array(1)
+	asapv1.EncodeInts(p, make([]int32, 2*2*2*3))
+	b, err := asapv1.Marshal(kind, md, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var h Hydra
+	if err := h.UnmarshalASAPv1(b); err == nil || !strings.Contains(err.Error(), "power of two") {
+		t.Errorf("a Count Sketch grid of 3 counter_cols: %v", err)
+	}
+	cm, err := asapv1.Encode(asapv1.KindHydraCountMin, mustMetadata(t, b), mustPayload(t, b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.UnmarshalASAPv1(cm); err != nil {
+		t.Errorf("a Count-Min grid of 3 counter_cols: %v", err)
+	}
+}
+
+func mustMetadata(t *testing.T, b []byte) []byte {
+	t.Helper()
+	_, md, _, err := asapv1.Split(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return md
+}
+
+func mustPayload(t *testing.T, b []byte) []byte {
+	t.Helper()
+	_, _, p, err := asapv1.Split(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}

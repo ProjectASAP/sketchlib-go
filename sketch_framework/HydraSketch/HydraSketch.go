@@ -236,6 +236,11 @@ func (h *Hydra) Merge(o *Hydra) error {
 		return fmt.Errorf("hydra: cannot merge a %dx%d grid into a %dx%d grid", o.rows, o.cols, h.rows, h.cols)
 	}
 	if reflect.TypeOf(h.proto) != reflect.TypeOf(o.proto) {
+		hu, ok1 := h.proto.(univMonCell)
+		ou, ok2 := o.proto.(univMonCell)
+		if ok1 && ok2 {
+			return fmt.Errorf("hydra: cannot merge a UnivMon grid of %s keys into one of %s keys", ou.goKeyType(), hu.goKeyType())
+		}
 		return fmt.Errorf("hydra: cannot merge a %s grid into a %s grid", o.proto.CounterType(), h.proto.CounterType())
 	}
 	if !slices.Equal(h.schema.labels, o.schema.labels) {

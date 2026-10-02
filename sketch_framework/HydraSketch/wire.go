@@ -323,6 +323,8 @@ type univMonCell interface {
 	shape() [4]int
 	holdsKeys() bool
 	keyType() string
+	goKeyType() string
+	decodeCells(d *asapv1.Decoder, n int, shape [4]uint32, keyType string) ([]HydraCounter, HydraCounter, error)
 	fresh() (bool, error)
 	encodePayload(e *asapv1.Encoder) error
 }
@@ -342,6 +344,12 @@ func (c *univMonCounter[K]) holdsKeys() bool {
 }
 
 func (c *univMonCounter[K]) keyType() string { return asapv1.HeapKeyType[K]() }
+
+func (c *univMonCounter[K]) goKeyType() string { return reflect.TypeFor[K]().String() }
+
+func (c *univMonCounter[K]) decodeCells(d *asapv1.Decoder, n int, shape [4]uint32, keyType string) ([]HydraCounter, HydraCounter, error) {
+	return decodeUnivMonCells[K](d, n, shape, keyType)
+}
 
 func (c *univMonCounter[K]) fresh() (bool, error) {
 	empty, err := univmon.NewUnivMon[K](c.s.HeapSize(), c.s.SketchRow(), c.s.SketchCol(), c.s.LayerSize())
@@ -395,9 +403,9 @@ func (h *Hydra) marshalUnivMon(p univMonCell) ([]byte, error) {
 	return asapv1.Marshal(asapv1.KindHydraUnivMon, md, e)
 }
 
-// UnmarshalASAPv1 replaces h with the grid in b, of any Hydra kind, rebuilding
-// each cell through its counter's own decoder. UnivMon cells take the Go key
-// type counter_key_type names; "isize" and "usize" have none.
+// UnmarshalASAPv1 replaces h with the grid in b, rebuilding each cell through
+// its counter's decoder; Count Sketch counter_cols must be a power of two.
+// UnivMon cells keep h's key type if h is a UnivMon grid, else counter_key_type's.
 func (h *Hydra) UnmarshalASAPv1(b []byte) error {
 	kind, mdBytes, payload, err := asapv1.Split(b)
 	if err != nil {
@@ -433,7 +441,7 @@ func (h *Hydra) UnmarshalASAPv1(b []byte) error {
 	case asapv1.KindHydraKLL:
 		out, err = unmarshalKLL(md, d, rows, cols, labels)
 	case asapv1.KindHydraUnivMon:
-		out, err = unmarshalUnivMon(md, d, rows, cols, labels)
+		out, err = unmarshalUnivMon(md, d, rows, cols, labels, h.proto)
 	}
 	if err != nil {
 		return err
@@ -470,6 +478,9 @@ func unmarshalMatrix(kind asapv1.KindID, md *asapv1.MetadataReader, d *asapv1.De
 	per, err := checkedCells("counter", uint64(counterRows), uint64(counterCols))
 	if err != nil {
 		return nil, err
+	}
+	if kind == asapv1.KindHydraCountSketch && counterCols&(counterCols-1) != 0 {
+		return nil, fmt.Errorf("hydra: Count Sketch counter_cols %d is not a power of two", counterCols)
 	}
 	total, err := tiledLen("counters", uint64(n), uint64(per))
 	if err != nil {
@@ -618,7 +629,7 @@ func unmarshalKLL(md *asapv1.MetadataReader, d *asapv1.Decoder, rows, cols uint3
 	return newGrid(int(rows), int(cols), ks, cells, NewHydraKLLCounter(int(k), int(m))), nil
 }
 
-func unmarshalUnivMon(md *asapv1.MetadataReader, d *asapv1.Decoder, rows, cols uint32, labels []string) (*Hydra, error) {
+func unmarshalUnivMon(md *asapv1.MetadataReader, d *asapv1.Decoder, rows, cols uint32, labels []string, recv HydraCounter) (*Hydra, error) {
 	var shape [4]uint32
 	for i, key := range [4]string{"counter_layer_size", "counter_sketch_row", "counter_sketch_col", "counter_heap_size"} {
 		shape[i] = md.Uint32(key)
@@ -634,6 +645,15 @@ func unmarshalUnivMon(md *asapv1.MetadataReader, d *asapv1.Decoder, rows, cols u
 	}
 	var cells []HydraCounter
 	var proto HydraCounter
+	if u, ok := recv.(univMonCell); ok {
+		if keyType != u.keyType() && keyType != asapv1.EmptyHeapKeyType {
+			return nil, fmt.Errorf("hydra: counter_key_type %q does not match this grid's %s keys", keyType, u.goKeyType())
+		}
+		if cells, proto, err = u.decodeCells(d, n, shape, keyType); err != nil {
+			return nil, fmt.Errorf("hydra: decoding UnivMon cells as %s keys: %w", u.goKeyType(), err)
+		}
+		return newGrid(int(rows), int(cols), ks, cells, proto), nil
+	}
 	switch keyType {
 	case "i8":
 		cells, proto, err = decodeUnivMonCells[int8](d, n, shape, keyType)
