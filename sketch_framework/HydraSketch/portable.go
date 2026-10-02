@@ -83,9 +83,9 @@ func hydraCounterTypeToProto(ct HydraCounterType) hydrapb.HydraCounterType {
 	}
 }
 
-// cellToProto converts a HydraCounter into a HydraCell proto by delegating to
-// the inner sketch's SerializePortable. The counter wrapper structs are in the
-// same package so their private .s field is accessible.
+// cellToProto converts a HydraCounter into a HydraCell proto: a Count Sketch
+// cell through countSketchState, every other cell through the inner sketch's
+// SerializePortable.
 func cellToProto(c HydraCounter) (*hydrapb.HydraCell, error) {
 	switch ct := c.(type) {
 	case *countMinCounter:

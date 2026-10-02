@@ -8,9 +8,12 @@ import (
 )
 
 // MarshalASAPv1 encodes the sketch as an ASAPv1 Count Sketch. It fails for a
-// CounterFloat64 sketch, which has no ASAPv1 encoding, and for any cell that
-// is not an integer within the counter type's range.
+// CounterFloat64 sketch, for a cell that is not an integer within the counter
+// type's range, and after a hash-only write that did not follow Mode.
 func (s *CountSketch) MarshalASAPv1() ([]byte, error) {
+	if s.hashWriteForeign {
+		return nil, fmt.Errorf("countsketch: counters include a write from a precomputed hash that does not follow Mode")
+	}
 	counterType, err := s.CounterType.wireName()
 	if err != nil {
 		return nil, err
@@ -50,7 +53,7 @@ func (s *CountSketch) MarshalASAPv1() ([]byte, error) {
 
 // UnmarshalASAPv1 replaces the sketch with the ASAPv1 Count Sketch in b,
 // recomputing the per-row L2 sums and starting empty top-k trackers. An i64
-// counter must be exact in float64.
+// counter must be exact in float64, and cols must be a power of two.
 func (s *CountSketch) UnmarshalASAPv1(b []byte) error {
 	md, p, err := asapv1.Open(b, asapv1.KindCountSketch)
 	if err != nil {

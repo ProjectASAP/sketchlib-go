@@ -76,6 +76,7 @@ message SketchEnvelope {
   }
 
   reserved 11;
+  reserved "count_sketch";
   reserved 19 to 31;  // Reserved for future sketch types.
 
   // Geometric / NitroSketch sampling probability for the producing sketch.
@@ -135,4 +136,5 @@ message SketchDeltaEnvelope {
     DDSketchDelta    ddsketch     = 13;
   }
   reserved 11;
+  reserved "count_sketch";
 }

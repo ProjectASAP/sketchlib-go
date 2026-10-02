@@ -37,8 +37,9 @@ const (
 	CounterInt64
 )
 
-// Mode is the key-to-column and sign derivation. Update, UpdateWeight and
-// Estimate follow it; every other insert and query method derives the fast way.
+// Mode is the key-to-column and sign derivation every key-bearing method uses.
+// A write from a precomputed hash alone matches it only for ModeFast on the
+// packed 64-bit layout; any other such write makes MarshalASAPv1 fail.
 type Mode uint8
 
 const (
@@ -67,6 +68,9 @@ type CountSketch struct {
 	SS *spacesaving.SpaceSaving
 
 	bitsPerRow uint
+
+	// hashWriteForeign is set once a hash-only write did not follow Mode.
+	hashWriteForeign bool
 }
 
 func (s *CountSketch) rehydrateStorage() error {
@@ -215,11 +219,7 @@ func (s *CountSketch) Update(input *common.SketchInput) {
 	if input == nil {
 		return
 	}
-	if s.Mode == ModeRegular {
-		s.insertRegular(input.Bytes, 1)
-		return
-	}
-	s.insertWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), 1)
+	s.insertKey(input.Bytes, 1)
 }
 
 // OctoUpdate is an alias for Update kept for the OctoSketch framework.
@@ -229,11 +229,75 @@ func (s *CountSketch) UpdateWeight(input *common.SketchInput, many float64) {
 	if input == nil || many == 0 {
 		return
 	}
+	s.insertKey(input.Bytes, many)
+}
+
+// keyHash is a key's row derivation: the key itself on the regular path, its
+// matrix hash on the fast path, or a precomputed hash when fromHash is set.
+type keyHash struct {
+	regular  bool
+	fromHash bool
+	key      []byte
+	hashed   storage.MatrixHashType
+}
+
+func (s *CountSketch) hashKey(key []byte) keyHash {
 	if s.Mode == ModeRegular {
-		s.insertRegular(input.Bytes, many)
+		return keyHash{regular: true, key: key}
+	}
+	return keyHash{hashed: storage.BuildMatrixHashFromInput(&common.SketchInput{Bytes: key}, s.Rows, s.Cols)}
+}
+
+// inputHash derives from input's key bytes, or from its precomputed hash when
+// it carries none.
+func (s *CountSketch) inputHash(input *common.SketchInput) keyHash {
+	if input.Bytes == nil {
+		return keyHash{fromHash: true, hashed: storage.BuildMatrixHash(input.Hash, s.Rows, s.Cols)}
+	}
+	return s.hashKey(input.Bytes)
+}
+
+// posAndSign returns row's column and sign for k.
+func (s *CountSketch) posAndSign(k keyHash, row int) (int, float64) {
+	if k.regular {
+		return s.regularPosAndSign(k.key, row)
+	}
+	if k.hashed.Mode() == storage.MatrixHashPacked64 {
+		return s.fastPacked64PosAndSign(k.hashed.Lower64(), row)
+	}
+	return s.derivePosAndSignFromHashed(k.hashed, row)
+}
+
+// markHashWrite records a write from a precomputed hash, which follows Mode
+// only for ModeFast on the packed 64-bit layout.
+func (s *CountSketch) markHashWrite() {
+	if s.Mode != ModeFast || storage.HashModeForMatrix(s.Rows, s.Cols) != storage.MatrixHashPacked64 {
+		s.hashWriteForeign = true
+	}
+}
+
+func (s *CountSketch) insertKey(key []byte, value float64) {
+	if s.Mode == ModeRegular {
+		s.insertRegular(key, value)
 		return
 	}
-	s.insertWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols), many)
+	s.insertWithMatrixHash(s.hashKey(key).hashed, value)
+}
+
+func (s *CountSketch) estimateKey(key []byte) float64 {
+	if s.Mode != ModeRegular {
+		return s.estimateWithMatrixHash(s.hashKey(key).hashed)
+	}
+	var estimatesStack [16]float64
+	estimates := estimatesStack[:0]
+	if s.Rows > len(estimatesStack) {
+		estimates = make([]float64, 0, s.Rows)
+	}
+	for r := 0; r < s.Rows; r++ {
+		c, sign := s.regularPosAndSign(key, r)
+		estimates = append(estimates, s.Count[r][c]*sign)
+	}
+	return common.ComputeMedianInlineF64(estimates)
 }
 
 // regularPosAndSign derives row's column from the low 32 bits of the row's
@@ -268,6 +332,7 @@ func (s *CountSketch) FastInsertWeightWithHashValue(hash uint64, many float64) {
 
 // InsertWithHashAndValue supports weighted updates.
 func (s *CountSketch) InsertWithHashAndValue(hash uint64, value float64) {
+	s.markHashWrite()
 	hashed := storage.BuildMatrixHash(hash, s.Rows, s.Cols)
 	s.insertWithMatrixHash(hashed, value)
 }
@@ -347,15 +412,7 @@ func (s *CountSketch) Estimate(input *common.SketchInput) float64 {
 	if input == nil {
 		return 0
 	}
-	if s.Mode == ModeRegular {
-		estimates := make([]float64, s.Rows)
-		for r := range estimates {
-			c, sign := s.regularPosAndSign(input.Bytes, r)
-			estimates[r] = s.Count[r][c] * sign
-		}
-		return common.ComputeMedianInlineF64(estimates)
-	}
-	return s.estimateWithMatrixHash(storage.BuildMatrixHashFromInput(input, s.Rows, s.Cols))
+	return s.estimateKey(input.Bytes)
 }
 
 // OctoEstimate satisfies the octosketch.OctoSketch interface.
@@ -396,6 +453,7 @@ func (s *CountSketch) Reset() {
 		clear(s.Count[i])
 	}
 	clear(s.L2)
+	s.hashWriteForeign = false
 	if s.TopK != nil {
 		s.TopK = common.NewTopKHeap(TOPK_SIZE)
 	}
@@ -416,6 +474,8 @@ func (s *CountSketch) Merge(other common.Sketch) error {
 		return errors.New("cannot merge: counter type or mode mismatch")
 	}
 
+	s.hashWriteForeign = s.hashWriteForeign || o.hashWriteForeign
+
 	// 1. Merge Matrix and L2
 	for r := 0; r < s.Rows; r++ {
 		s.L2[r] += o.L2[r]
@@ -430,8 +490,7 @@ func (s *CountSketch) Merge(other common.Sketch) error {
 	// using the merged CS matrix for accurate counts.
 	if s.TopK != nil && o.TopK != nil {
 		for _, item := range o.TopK.Heap {
-			est, _ := s.QueryWithHash(common.QueryFrequency, common.Hash64([]byte(item.Key)))
-			s.TopK.Update(item.Key, int64(est))
+			s.TopK.Update(item.Key, int64(s.estimateKey([]byte(item.Key))))
 		}
 	}
 
@@ -448,8 +507,7 @@ func (s *CountSketch) TypeName() string {
 // The SS tracker maintains heavy-hitter candidates at O(log k) cost without
 // querying the CS matrix (no CS query on the hot path).
 func (s *CountSketch) UpdateString(key string, count float64) {
-	hash := common.Hash64([]byte(key))
-	s.InsertWithHashAndValue(hash, count)
+	s.insertKey([]byte(key), count)
 	if s.SS != nil {
 		s.SS.Update(key, count)
 	}
@@ -481,44 +539,15 @@ func (s *CountSketch) UpdateStringGOS(key string, count float64, threshold float
 	if s.SS != nil {
 		s.SS.Update(key, count)
 	}
-	hash := common.Hash64([]byte(key))
 	if threshold <= 0 {
-		s.InsertWithHashAndValue(hash, count)
+		s.insertKey([]byte(key), count)
 		return nil
 	}
-	hashed := storage.BuildMatrixHash(hash, s.Rows, s.Cols)
+	k := s.hashKey([]byte(key))
 	var dirty []GOSCellUpdate
-	countMatrix := s.Count
-	if hashed.Mode() == storage.MatrixHashPacked64 {
-		packed := hashed.Lower64()
-		for r := 0; r < s.Rows; r++ {
-			c, sign := s.fastPacked64PosAndSign(packed, r)
-			increment := sign * count
-			row := countMatrix[r]
-			prev := row[c]
-			curr := prev + increment
-			row[c] = curr
-			s.L2[r] += (curr * curr) - (prev * prev)
-			if math.Abs(curr) >= threshold {
-				dirty = append(dirty, GOSCellUpdate{Row: uint32(r), Col: uint32(c), Delta: curr})
-				row[c] = 0
-				s.L2[r] -= curr * curr
-			}
-		}
-		return dirty
-	}
 	for r := 0; r < s.Rows; r++ {
-		c, sign := s.derivePosAndSignFromHashed(hashed, r)
-		increment := sign * count
-		row := countMatrix[r]
-		prev := row[c]
-		curr := prev + increment
-		row[c] = curr
-		s.L2[r] += (curr * curr) - (prev * prev)
-		if math.Abs(curr) >= threshold {
-			dirty = append(dirty, GOSCellUpdate{Row: uint32(r), Col: uint32(c), Delta: curr})
-			row[c] = 0
-			s.L2[r] -= curr * curr
+		if d, ok := s.applyGosCellAtRow(r, k, count, threshold); ok {
+			dirty = append(dirty, d)
 		}
 	}
 	return dirty
@@ -526,9 +555,7 @@ func (s *CountSketch) UpdateStringGOS(key string, count float64, threshold float
 
 // EstimateStringCount is a helper to query by string directly
 func (s *CountSketch) EstimateStringCount(key string) int64 {
-	hash := common.Hash64([]byte(key))
-	est, _ := s.QueryWithHash(common.QueryFrequency, hash)
-	return int64(est)
+	return int64(s.estimateKey([]byte(key)))
 }
 
 // ── OctoSketch cell-level accessors ──────────────────────────────────────────
@@ -540,18 +567,16 @@ func (s *CountSketch) EstimateStringCount(key string) int64 {
 // They operate only on countStore; L2 norms are whole-stream statistics that
 // are irrelevant to the per-cell OctoSketch loop.
 
-// ColForRow derives the column index for row r from input, using the same hash
-// mode dispatch (Packed64 fast path or fallback) as insertWithMatrixHash.
-// Pure: same input → same col, no state change.
+// ColForRow derives the column index for row r from input's key bytes, or from
+// its precomputed hash when it carries none. Pure: no state change.
 func (s *CountSketch) ColForRow(input *common.SketchInput, row int) int {
-	col, _ := s.derivePosAndSign(input.Hash, row)
+	col, _ := s.posAndSign(s.inputHash(input), row)
 	return col
 }
 
-// SignForRow returns +1.0 or -1.0 for (input, row) using the same bit
-// extraction as insertWithMatrixHash.
+// SignForRow returns +1.0 or -1.0 for (input, row), derived as ColForRow does.
 func (s *CountSketch) SignForRow(input *common.SketchInput, row int) float64 {
-	_, sign := s.derivePosAndSign(input.Hash, row)
+	_, sign := s.posAndSign(s.inputHash(input), row)
 	return sign
 }
 
@@ -592,34 +617,26 @@ func (s *CountSketch) NumRows() int { return s.Rows }
 
 // UpdateCell applies count[row][col] += sign(row, input). Always returns changed=true.
 func (s *CountSketch) UpdateCell(row, col int, input *common.SketchInput) (float64, bool) {
+	if input.Bytes == nil {
+		s.markHashWrite()
+	}
 	sign := s.SignForRow(input, row)
 	return s.IncrCell(row, col, sign), true
 }
 
 // ProcessInput is an optimized OctoSketch worker fast path that derives the
-// packed row hashes once and updates/emits without repeated sign extraction.
+// row positions once and updates/emits each row.
 func (s *CountSketch) ProcessInput(input *common.SketchInput, tau float64, emit func(common.DeltaUpdate)) {
 	if input == nil {
 		return
 	}
-	hashed := storage.BuildMatrixHash(input.Hash, s.Rows, s.Cols)
-	count := s.Count
-	if hashed.Mode() == storage.MatrixHashPacked64 {
-		packed := hashed.Lower64()
-		for row := 0; row < s.Rows; row++ {
-			col, sign := s.fastPacked64PosAndSign(packed, row)
-			newVal := count[row][col] + sign
-			count[row][col] = newVal
-			if (newVal >= tau) || (newVal <= -tau) {
-				emit(common.DeltaUpdate{Row: row, Col: col, Value: newVal})
-				count[row][col] = 0
-			}
-		}
-		return
+	k := s.inputHash(input)
+	if k.fromHash {
+		s.markHashWrite()
 	}
-
+	count := s.Count
 	for row := 0; row < s.Rows; row++ {
-		col, sign := s.derivePosAndSignFromHashed(hashed, row)
+		col, sign := s.posAndSign(k, row)
 		newVal := count[row][col] + sign
 		count[row][col] = newVal
 		if (newVal >= tau) || (newVal <= -tau) {

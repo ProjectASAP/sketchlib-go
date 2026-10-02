@@ -1,6 +1,7 @@
 package countsketch
 
 import (
+	"encoding/hex"
 	"fmt"
 	"reflect"
 	"strings"
@@ -190,5 +191,125 @@ func TestMergeRejectsModeOrCounterMismatch(t *testing.T) {
 	}
 	if err := a.Merge(fixtureSketch(t, CounterInt32, ModeFast)); err == nil {
 		t.Error("merged i64 with i32")
+	}
+}
+
+func TestKeyMethodsFollowMode(t *testing.T) {
+	geometries := []struct {
+		mode       Mode
+		rows, cols int
+	}{{ModeRegular, 3, 16}, {ModeFast, 3, 16}, {ModeFast, 8, 4096}, {ModeFast, 12, 1024}}
+	for _, g := range geometries {
+		build := func() *CountSketch {
+			s, err := NewCountSketch(g.rows, g.cols)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.CounterType, s.Mode = CounterInt64, g.mode
+			return s
+		}
+		viaUpdate, viaString, viaGOS, viaRows, viaOcto := build(), build(), build(), build(), build()
+		all := uint64(1)<<g.rows - 1
+		for i := range 300 {
+			key := fmt.Sprintf("k%d", i%23)
+			w := float64(i%4 + 1)
+			viaUpdate.UpdateWeight(common.FromString(key), w)
+			viaString.UpdateString(key, w)
+			viaGOS.UpdateStringGOS(key, w, 1e18)
+			viaRows.UpdateStringAtRows(key, w, all, 1)
+			for range int(w) {
+				viaOcto.ProcessInput(common.FromString(key), 1e18, func(common.DeltaUpdate) {})
+			}
+		}
+		for name, s := range map[string]*CountSketch{"UpdateString": viaString, "UpdateStringGOS": viaGOS,
+			"UpdateStringAtRows": viaRows, "ProcessInput": viaOcto} {
+			if !reflect.DeepEqual(s.Count, viaUpdate.Count) {
+				t.Fatalf("mode %d %dx%d: %s cells differ from UpdateWeight", g.mode, g.rows, g.cols, name)
+			}
+		}
+		b, err := viaString.MarshalASAPv1()
+		if err != nil {
+			t.Fatalf("mode %d %dx%d: %v", g.mode, g.rows, g.cols, err)
+		}
+		var back CountSketch
+		if err := back.UnmarshalASAPv1(b); err != nil {
+			t.Fatal(err)
+		}
+		for i := range 23 {
+			key := fmt.Sprintf("k%d", i)
+			want := viaUpdate.Estimate(common.FromString(key))
+			if got := viaString.EstimateStringCount(key); got != int64(want) {
+				t.Fatalf("mode %d %dx%d: EstimateStringCount(%s) = %d, want %v", g.mode, g.rows, g.cols, key, got, want)
+			}
+			if got := back.Estimate(common.FromString(key)); got != want {
+				t.Fatalf("mode %d %dx%d: decoded Estimate(%s) = %v, want %v", g.mode, g.rows, g.cols, key, got, want)
+			}
+			if got := back.EstimateStringCount(key); got != int64(want) {
+				t.Fatalf("mode %d %dx%d: decoded EstimateStringCount(%s) = %d, want %v", g.mode, g.rows, g.cols, key, got, want)
+			}
+		}
+	}
+}
+
+func TestHashOnlyWritesThatDoNotFollowModeRefuseToMarshal(t *testing.T) {
+	build := func(mode Mode, rows, cols int) *CountSketch {
+		s, err := NewCountSketch(rows, cols)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.CounterType, s.Mode = CounterInt64, mode
+		return s
+	}
+	hash := common.Hash64([]byte("k"))
+	hashOnly := &common.SketchInput{Hash: hash}
+	cases := []struct {
+		name  string
+		s     *CountSketch
+		write func(s *CountSketch)
+		ok    bool
+	}{
+		{"InsertWithHash fast packed64", build(ModeFast, 3, 16), func(s *CountSketch) { s.InsertWithHash(hash) }, true},
+		{"InsertWithHash regular", build(ModeRegular, 3, 16), func(s *CountSketch) { s.InsertWithHash(hash) }, false},
+		{"InsertWithHash fast packed128", build(ModeFast, 8, 4096), func(s *CountSketch) { s.InsertWithHash(hash) }, false},
+		{"FastInsertWeightWithHashValue regular", build(ModeRegular, 3, 16), func(s *CountSketch) { s.FastInsertWeightWithHashValue(hash, 2) }, false},
+		{"ProcessInput hash-only regular", build(ModeRegular, 3, 16), func(s *CountSketch) { s.ProcessInput(hashOnly, 1e18, func(common.DeltaUpdate) {}) }, false},
+		{"UpdateCell hash-only fast rows", build(ModeFast, 12, 1024), func(s *CountSketch) { s.UpdateCell(0, s.ColForRow(hashOnly, 0), hashOnly) }, false},
+		{"ProcessInput with bytes regular", build(ModeRegular, 3, 16), func(s *CountSketch) { s.ProcessInput(common.FromString("k"), 1e18, func(common.DeltaUpdate) {}) }, true},
+	}
+	for _, c := range cases {
+		c.write(c.s)
+		if _, err := c.s.MarshalASAPv1(); (err == nil) != c.ok {
+			t.Errorf("%s: MarshalASAPv1 error %v", c.name, err)
+		}
+	}
+
+	dirty := build(ModeRegular, 3, 16)
+	dirty.InsertWithHash(hash)
+	clean := build(ModeRegular, 3, 16)
+	if err := clean.Merge(dirty); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clean.MarshalASAPv1(); err == nil {
+		t.Error("Merge dropped the hash-only write mark")
+	}
+	clean.Reset()
+	if _, err := clean.MarshalASAPv1(); err != nil {
+		t.Errorf("after Reset: %v", err)
+	}
+}
+
+// rustNonPow2Cols is Count<Vector2D<i64>, RegularPath>::with_dimensions(2, 3)
+// after one insert of the string "a", serialized by the Rust crate.
+const rustNonPow2Cols = "4153415076310102040000000156000000088bb06d657461646174615f76657273696f6e01af686173685f70726f66696c655f6964bc70726f6a656374617361702e787868332e736565646c6973742e7631ae686173685f616c676f726974686dab787868335f36345f313238af736565645f64657269766174696f6eb4736565645f6c6973745f696e6465785f77726170ae696e7075745f656e636f64696e67b470726f6a656374617361702e696e7075742e7631a9736565645f6c697374dc0014cecafe3553cf000000ade3415118ce8cc70208ce2f024b2bce451a3df5ce6a09e667cebb67ae85ce3c6ef372cea54ff53ace510e527fce9b05688cce1f83d9abce5be0cd19cecbbb9d5dce629a292ace9159015ace152fecd8ce67332667ce8eb44a87cedb0c2e0db16d61747269785f736565645f696e64657800a4726f777302a4636f6c7303ac636f756e7465725f74797065a3693634a46d6f6465a7726567756c6172919600010000ff00"
+
+func TestUnmarshalASAPv1RejectsNonPowerOfTwoCols(t *testing.T) {
+	b, err := hex.DecodeString(rustNonPow2Cols)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s CountSketch
+	err = s.UnmarshalASAPv1(b)
+	if err == nil || !strings.Contains(err.Error(), "cols 3 is not a power of two") {
+		t.Fatalf("got %v, want the power-of-two error", err)
 	}
 }

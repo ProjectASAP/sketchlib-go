@@ -74,10 +74,9 @@ message CountMinState {
 //   d_sum / d_sum2 are omitted; receiver reconstructs Sum[r][c] += d_count
 //   and Sum2[r][c] += d_count for unweighted (unit-weight) streams.
 //
-// CountMinDelta is structurally identical to CountSketchDelta: rows, cols,
-// the packed cell encoding (cell_rows/cell_cols/d_counts), per-row norm
-// deltas, and an optional repeated hh_keys at the SAME field number (6).
-// Both sketches can track heavy hitters; whether hh_keys is populated is a
+// CountMinDelta carries rows, cols, the packed cell encoding
+// (cell_rows/cell_cols/d_counts), per-row norm deltas, and an optional
+// repeated hh_keys (field 6). Whether hh_keys is populated is a
 // control-plane decision (it is empty/omitted when heavy-hitter tracking is
 // not enabled for this sketch).
 message CountMinDelta {
@@ -90,8 +89,7 @@ message CountMinDelta {
   // field 5 was l2 (per-row L2 norm deltas). Removed alongside
   // CountMinState.l2 — see that field's comment. Reserved, not reused.
   reserved 5;
-  // Heavy-hitter candidate keys from an upstream tracker, mirroring
-  // CountSketchDelta.hh_keys (same field number 6, same wire shape).
+  // Heavy-hitter candidate keys from an upstream tracker.
   // Downstream queries the merged CMS matrix for each key to (re)build its
   // Top-K with globally-merged estimates. Empty/omitted when heavy-hitter
   // tracking is not enabled.

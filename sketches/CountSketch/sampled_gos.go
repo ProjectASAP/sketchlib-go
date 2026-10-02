@@ -5,7 +5,6 @@ import (
 	"math/bits"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
-	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
 // applyGosCellAtRow is the shared per-row body of the GOS-aware sampled
@@ -18,16 +17,8 @@ import (
 // it cannot cross on this occurrence, which is what makes "sampling then GOS"
 // compose correctly: the threshold check sees the same 1/p-upweighted cell
 // value it would have accumulated, only on the rows that actually moved.
-func (s *CountSketch) applyGosCellAtRow(
-	r int, hashed storage.MatrixHashType, packed uint64, isPacked bool, scaled, threshold float64,
-) (GOSCellUpdate, bool) {
-	var c int
-	var sign float64
-	if isPacked {
-		c, sign = s.fastPacked64PosAndSign(packed, r)
-	} else {
-		c, sign = s.derivePosAndSignFromHashed(hashed, r)
-	}
+func (s *CountSketch) applyGosCellAtRow(r int, k keyHash, scaled, threshold float64) (GOSCellUpdate, bool) {
+	c, sign := s.posAndSign(k, r)
 	row := s.Count[r]
 	prev := row[c]
 	curr := prev + sign*scaled
@@ -72,16 +63,14 @@ func (s *CountSketch) UpdateStringSampledPerRowGOS(
 	}
 
 	// 2. Hash once, 3. update+gate admitted rows only.
-	hashed := storage.BuildMatrixHash(common.Hash64([]byte(key)), s.Rows, s.Cols)
+	k := s.hashKey([]byte(key))
 	scaled := count / sampler.P()
-	isPacked := hashed.Mode() == storage.MatrixHashPacked64
-	packed := hashed.Lower64()
 
 	var dirty []GOSCellUpdate
 	for admittedRows != 0 {
 		r := bits.TrailingZeros64(admittedRows)
 		admittedRows &^= uint64(1) << uint(r)
-		if d, ok := s.applyGosCellAtRow(r, hashed, packed, isPacked, scaled, threshold); ok {
+		if d, ok := s.applyGosCellAtRow(r, k, scaled, threshold); ok {
 			dirty = append(dirty, d)
 		}
 	}
@@ -112,19 +101,17 @@ func (s *CountSketch) UpdateStringAtRowsGOS(
 	if admittedRows == 0 || s.Rows > maxSampledRows {
 		return nil
 	}
-	hashed := storage.BuildMatrixHash(common.Hash64([]byte(key)), s.Rows, s.Cols)
+	k := s.hashKey([]byte(key))
 	scaled := count
 	if p > 0 && p < 1.0 {
 		scaled = count / p
 	}
-	isPacked := hashed.Mode() == storage.MatrixHashPacked64
-	packed := hashed.Lower64()
 
 	var dirty []GOSCellUpdate
 	for admittedRows != 0 {
 		r := bits.TrailingZeros64(admittedRows)
 		admittedRows &^= uint64(1) << uint(r)
-		if d, ok := s.applyGosCellAtRow(r, hashed, packed, isPacked, scaled, threshold); ok {
+		if d, ok := s.applyGosCellAtRow(r, k, scaled, threshold); ok {
 			dirty = append(dirty, d)
 		}
 	}

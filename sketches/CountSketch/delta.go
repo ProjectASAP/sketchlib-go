@@ -3,8 +3,6 @@ package countsketch
 import (
 	"fmt"
 	"math"
-
-	"github.com/ProjectASAP/sketchlib-go/common"
 )
 
 // CellDelta holds the signed additive delta for a single (row, col) cell.
@@ -114,8 +112,7 @@ func ApplyDelta(target *CountSketch, d *Delta) {
 	// Rebuild TopK from hh_keys using the updated (merged) CS matrix.
 	if len(d.HHKeys) > 0 && target.TopK != nil {
 		for _, key := range d.HHKeys {
-			est, _ := target.QueryWithHash(common.QueryFrequency, common.Hash64([]byte(key)))
-			target.TopK.Update(key, int64(est))
+			target.TopK.Update(key, int64(target.estimateKey([]byte(key))))
 		}
 	}
 }
