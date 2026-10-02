@@ -23,11 +23,7 @@
 //
 // Out of scope:
 //
-//   - KLL: sketchlib-go's KLL and ASAPQuery-backend's sketch-core `KllSketch`
-//     do not share a byte-level backend serialization. A KLL MessagePack
-//     path would need a shared backend (tracked as a follow-up — use the
-//     `_ENCODING_PROTO` path for KLL, which decodes via lossy statistical
-//     reconstruction on the Rust side).
+//   - KLL: its encoding is ASAPv1 (sketches/KLL, wire/asapv1).
 //
 //   - Delta transmission (`*_ENCODING_MSGPACK_DELTA = 4`): supported for the
 //     four delta-capable sketches via the `*_delta.go` / `cell_delta.go`

@@ -106,7 +106,7 @@ func NewKLLSketch(k int) (*KLLSketch, error) {
 
 // NewKLLSketchWithSeed creates a new KLL sketch with an explicit seed for the
 // compaction-RNG ("coin"). Two sketches built with the same seed and fed the
-// same sequence of values produce byte-identical SerializePortable output.
+// same sequence of values produce byte-identical MarshalASAPv1 output.
 //
 // This is the deterministic-construction path: prefer it for tests, parity
 // harnesses, and any production caller that needs reproducible sketch state

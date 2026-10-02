@@ -113,13 +113,7 @@ func cellToProto(c HydraCounter) (*hydrapb.HydraCell, error) {
 		}, nil
 
 	case *kllCounter:
-		env, err := ct.s.SerializePortable()
-		if err != nil {
-			return nil, err
-		}
-		return &hydrapb.HydraCell{
-			Sketch: &hydrapb.HydraCell_Kll{Kll: env.GetKll()},
-		}, nil
+		return nil, fmt.Errorf("KLL cells have no protobuf encoding")
 
 	case *univCounter:
 		env, err := ct.s.SerializePortable()
