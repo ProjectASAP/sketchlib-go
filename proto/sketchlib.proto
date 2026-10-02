@@ -5,7 +5,7 @@
 //
 //   common/common.proto              — HashSpec, ProducerInfo, CounterType, ...
 //   countminsketch/countminsketch.proto — CountMinState (embedded by Hydra and Elastic)
-//   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry, CountSketchDelta, CountSketchCell
+//   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry
 //   kll/kll.proto                    — KLLState, CoinState
 //   ddsketch/ddsketch.proto          — DDSketchState, DDSketchDelta, DDSketchBucketDelta
 //   univmon/univmon.proto            — UnivMonState, UnivMonLayer
@@ -28,7 +28,6 @@ syntax = "proto3";
 package sketchlib.v1;
 
 import "common/common.proto";
-import "countsketch/countsketch.proto";
 import "ddsketch/ddsketch.proto";
 import "univmon/univmon.proto";
 import "hydra/hydra.proto";
@@ -62,7 +61,6 @@ message SketchEnvelope {
 
   // The sketch payload. Exactly one field must be set.
   oneof sketch_state {
-    CountSketchState count_sketch = 11;
     DDSketchState    ddsketch     = 14;
     UnivMonState     univmon      = 15;
     HydraState       hydra        = 16;
@@ -72,6 +70,8 @@ message SketchEnvelope {
 
   reserved 10;
   reserved "count_min";
+  reserved 11;
+  reserved "count_sketch";
   reserved 12;
   reserved "hll";
   reserved 13;
@@ -107,12 +107,10 @@ message SketchEnvelope {
 // full-sketch payloads by the encoding="proto_delta" attribute.
 //
 // Receiver semantics:
-//   CountSketch:             agg[r][c] += cell.d_*
 //   DDSketch buckets:        agg[b]   += bucket.d_count
 //   DDSketch min/max:        lossless  — only transmitted when changed
 //
 // Per-sketch delta message types live in their per-sketch proto files:
-//   countsketch/countsketch.proto       — CountSketchDelta, CountSketchCell
 //   ddsketch/ddsketch.proto             — DDSketchDelta, DDSketchBucketDelta
 
 // SketchDeltaEnvelope is the top-level wire container for delta payloads.
@@ -128,12 +126,13 @@ message SketchDeltaEnvelope {
   bool   is_window_close = 3;
 
   oneof delta {
-    CountSketchDelta count_sketch = 11;
     DDSketchDelta    ddsketch     = 13;
   }
 
   reserved 10;
   reserved "count_min";
+  reserved 11;
+  reserved "count_sketch";
   reserved 12;
   reserved "hll";
 }

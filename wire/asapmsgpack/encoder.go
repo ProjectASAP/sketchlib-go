@@ -12,9 +12,9 @@
 //     `[]byte` as `bin` by default, producing bytes that cannot be
 //     deserialized on the Rust side.
 //
-//   - The contract only covers two sketch types today (CountSketch,
-//     DDSketch). Writing a 50-line encoder shim gives
-//     byte-exact control and drops a dependency.
+//   - The contract only covers one sketch type today (DDSketch).
+//     Writing a 50-line encoder shim gives byte-exact control and drops a
+//     dependency.
 //
 // Wire-format reference for each supported sketch type lives alongside
 // the `Marshal*` function in its per-sketch file. Golden fixtures pinned
@@ -105,16 +105,6 @@ func (e *encoder) writeInt(v int64) {
 		binary.BigEndian.PutUint64(b[:], uint64(v))
 		e.buf = append(e.buf, 0xd3)
 		e.buf = append(e.buf, b[:]...)
-	}
-}
-
-// writeBool emits a msgpack bool (0xc3 = true, 0xc2 = false). Matches
-// rmp_serde's serialization of a Rust `bool`.
-func (e *encoder) writeBool(v bool) {
-	if v {
-		e.buf = append(e.buf, 0xc3)
-	} else {
-		e.buf = append(e.buf, 0xc2)
 	}
 }
 

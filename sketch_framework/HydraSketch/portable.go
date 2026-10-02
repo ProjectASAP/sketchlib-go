@@ -7,9 +7,11 @@ import (
 
 	commonpb "github.com/ProjectASAP/sketchlib-go/proto/common"
 	cmpb "github.com/ProjectASAP/sketchlib-go/proto/countminsketch"
+	cspb "github.com/ProjectASAP/sketchlib-go/proto/countsketch"
 	hydrapb "github.com/ProjectASAP/sketchlib-go/proto/hydra"
 	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
 	countminsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountMinSketch"
+	countsketch "github.com/ProjectASAP/sketchlib-go/sketches/CountSketch"
 )
 
 // SerializePortable serializes the Hydra sketch into a portable protobuf SketchEnvelope.
@@ -108,9 +110,9 @@ func countMinCellState(s *countminsketch.CountMinSketch) *cmpb.CountMinState {
 	return st
 }
 
-// cellToProto converts a HydraCounter into a HydraCell proto via
-// countMinCellState or the inner sketch's SerializePortable. The counter
-// wrapper structs are in the same package so their private .s field is accessible.
+// cellToProto converts a HydraCounter into a HydraCell proto: Count-Min and
+// Count Sketch cells through countMinCellState and countSketchState, every
+// other cell through the inner sketch's SerializePortable.
 func cellToProto(c HydraCounter) (*hydrapb.HydraCell, error) {
 	switch ct := c.(type) {
 	case *countMinCounter:
@@ -119,12 +121,8 @@ func cellToProto(c HydraCounter) (*hydrapb.HydraCell, error) {
 		}, nil
 
 	case *countSketchCounter:
-		env, err := ct.s.SerializePortable()
-		if err != nil {
-			return nil, err
-		}
 		return &hydrapb.HydraCell{
-			Sketch: &hydrapb.HydraCell_CountSketch{CountSketch: env.GetCountSketch()},
+			Sketch: &hydrapb.HydraCell_CountSketch{CountSketch: countSketchState(ct.s)},
 		}, nil
 
 	case *hllCounter:
@@ -145,6 +143,36 @@ func cellToProto(c HydraCounter) (*hydrapb.HydraCell, error) {
 	default:
 		return nil, fmt.Errorf("unknown HydraCounter type %T", c)
 	}
+}
+
+// countSketchState flattens a Count Sketch cell row-major: sint64 counters
+// when every cell is an integer in int64 range, float64 counters otherwise.
+func countSketchState(s *countsketch.CountSketch) *cspb.CountSketchState {
+	st := &cspb.CountSketchState{
+		Rows:        uint32(s.Rows),
+		Cols:        uint32(s.Cols),
+		CounterType: commonpb.CounterType_COUNTER_TYPE_INT64,
+		L2:          append([]float64(nil), s.L2...),
+	}
+	for _, row := range s.Count[:s.Rows] {
+		for _, v := range row[:s.Cols] {
+			if v != math.Trunc(v) || v < math.MinInt64 || v >= math.MaxInt64 {
+				st.CounterType = commonpb.CounterType_COUNTER_TYPE_FLOAT64
+			}
+			st.CountsFloat = append(st.CountsFloat, v)
+		}
+	}
+	if st.CounterType == commonpb.CounterType_COUNTER_TYPE_INT64 {
+		st.CountsInt = make([]int64, len(st.CountsFloat))
+		for i, v := range st.CountsFloat {
+			st.CountsInt[i] = int64(v)
+		}
+		st.CountsFloat = nil
+	}
+	if s.SS != nil && s.SS.Len() > 0 {
+		st.HhKeys = s.SS.Candidates()
+	}
+	return st
 }
 
 func portableHashSpec() *commonpb.HashSpec {

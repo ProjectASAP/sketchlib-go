@@ -84,6 +84,14 @@
 // MarshalASAPv1 with Split, and rebuild with Encode before UnmarshalASAPv1.
 // Encoder.Raw and Decoder.Raw move one already-encoded value.
 //
+// # Top-k heaps
+//
+// A key array typed by a key_type is written with EncodeHeapKeys and read with
+// DecodeHeapKeys; CheckDistinctHeapKeys rejects a repeated key. A heap's
+// parallel keys and heap_counts arrays are written with EncodeHeapEntries, in
+// descending count then CompareHeapKeys order, and read with DecodeHeapEntries.
+// HeapKeyTypeOf gives a heap's key_type metadata value.
+//
 // # Encoding rules
 //
 // Encoder writes every integer in the uint family when it is non-negative and

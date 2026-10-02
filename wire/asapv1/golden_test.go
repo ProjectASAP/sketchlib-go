@@ -12,65 +12,6 @@ import (
 // The types below hold raw fixture state and follow the codec convention, so
 // the fixtures check the envelope, metadata and msgpack helpers end to end.
 
-type matrixState struct {
-	Kind        asapv1.KindID
-	Rows, Cols  uint32
-	CounterType string
-	Mode        string
-	Ints        []int64
-}
-
-func (s *matrixState) MarshalASAPv1() ([]byte, error) {
-	md := asapv1.NewMetadataWriter(1)
-	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)
-	md.Uint("rows", uint64(s.Rows))
-	md.Uint("cols", uint64(s.Cols))
-	md.Str("counter_type", s.CounterType)
-	md.Str("mode", s.Mode)
-	p := asapv1.NewEncoder()
-	p.Array(1)
-	asapv1.EncodeInts(p, s.Ints)
-	return asapv1.Marshal(s.Kind, md, p)
-}
-
-func (s *matrixState) UnmarshalASAPv1(b []byte) error {
-	kind, metadata, payload, err := asapv1.Split(b)
-	if err != nil {
-		return err
-	}
-	md, err := asapv1.ReadMetadata(metadata)
-	if err != nil {
-		return err
-	}
-	out := matrixState{Kind: kind}
-	md.ExpectVersion(1)
-	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)
-	out.Rows = md.Uint32("rows")
-	out.Cols = md.Uint32("cols")
-	out.CounterType = md.Str("counter_type")
-	out.Mode = md.Str("mode")
-	if err := md.Finish(); err != nil {
-		return err
-	}
-	p := asapv1.NewDecoder(payload)
-	p.ExpectArray(1)
-	if out.CounterType == "i32" {
-		for _, v := range asapv1.DecodeInts[int32](p) {
-			out.Ints = append(out.Ints, int64(v))
-		}
-	} else {
-		out.Ints = asapv1.DecodeInts[int64](p)
-	}
-	if err := p.Finish(); err != nil {
-		return err
-	}
-	if uint64(len(out.Ints)) != uint64(out.Rows)*uint64(out.Cols) {
-		return fmt.Errorf("%d counts for %dx%d", len(out.Ints), out.Rows, out.Cols)
-	}
-	*s = out
-	return nil
-}
-
 // kllState covers the KLL fixtures no Go sketch codec reads: compact KLL and
 // i64 items.
 type kllState struct {
@@ -223,17 +164,6 @@ func compactKLL(itemType string) *kllState {
 }
 
 func TestGoldenFixtures(t *testing.T) {
-	csCounts := []int64{0, 127, 128, 65536, -1, -33, -32768, -2147483648}
-	matrix := func(counterType, mode string) *matrixState {
-		return &matrixState{Kind: asapv1.KindCountSketch, Rows: 2, Cols: 4, CounterType: counterType, Mode: mode, Ints: csCounts}
-	}
-	for name, known := range map[string]*matrixState{
-		"cs_i64_regular_2x4": matrix("i64", "regular"),
-		"cs_i64_fast_2x4":    matrix("i64", "fast"),
-		"cs_i32_regular_2x4": matrix("i32", "regular"),
-	} {
-		t.Run(name, func(t *testing.T) { asapv1test.CheckGolden(t, name, known, nil) })
-	}
 	t.Run("kll_f64_k200", func(t *testing.T) { asapv1test.CheckGolden(t, "kll_f64_k200", compactKLL("f64"), nil) })
 	t.Run("kll_i64_k200", func(t *testing.T) { asapv1test.CheckGolden(t, "kll_i64_k200", compactKLL("i64"), nil) })
 	t.Run("kll_dynamic_i64_k200", func(t *testing.T) {
