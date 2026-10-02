@@ -523,6 +523,43 @@ func TestASAPv1SumAfterBucketInserts(t *testing.T) {
 	}
 }
 
+func TestAddOneFastSumAcrossGrowthCollapseAndDecode(t *testing.T) {
+	check := func(t *testing.T, d *DDSketch, ks []int32) {
+		t.Helper()
+		want := d.sum
+		for _, k := range ks {
+			d.addOneFast(k)
+			want += d.mapping.Value(k)
+		}
+		if !sameFloat(d.sum, want) {
+			t.Fatalf("sum %v, want %v", d.sum, want)
+		}
+	}
+	grown := NewDDSketch(testAlpha)
+	grown.AddToBucket(0, 1)
+	check(t, grown, []int32{0, 0, 5, 5, 0})
+	grown.AddToBucket(-500, 1)
+	check(t, grown, []int32{0, -500, 0, 5, 5})
+	grown.AddToBucket(repCacheSize, 1)
+	check(t, grown, []int32{0, repCacheSize, 0, repCacheSize, -500})
+
+	collapsed := NewDDSketchWithMaxBins(testAlpha, 8)
+	collapsed.AddToBucket(0, 1)
+	check(t, collapsed, []int32{0, 3, 3})
+	collapsed.AddToBucket(100, 1)
+	check(t, collapsed, []int32{100, 95, 95, 100})
+
+	b, err := NewDDSketch(0.05).MarshalASAPv1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := grown.UnmarshalASAPv1(b); err != nil {
+		t.Fatal(err)
+	}
+	grown.AddToBucket(5, 1)
+	check(t, grown, []int32{5, 5})
+}
+
 func TestMergeSumSaturates(t *testing.T) {
 	a, b := NewDDSketch(testAlpha), NewDDSketch(testAlpha)
 	v := a.mapping.MaxIndexableValue()

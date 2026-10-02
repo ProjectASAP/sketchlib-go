@@ -293,6 +293,10 @@ type DDSketch struct {
 	// and never mixes it with the plain insert path. See PopulatedBuckets.
 	gosPopulated uint32
 
+	// reps caches bucket representatives for addOneFast, direct-mapped by
+	// absolute bucket index; allocated on first use.
+	reps *[repCacheSize]repEntry
+
 	// sampler implements optional NitroSketch geometric skip-sampling. When nil
 	// (the default) every value is recorded and the sketch is byte-identical to
 	// an unsampled one. When set with p<1, a Geometric(p)-distributed run of
@@ -843,6 +847,33 @@ func (d *DDSketch) AddToBucket(k int32, delta uint64) uint64 {
 	return counts[idx]
 }
 
+const repCacheSize = 256
+
+// repEntry is one representative cache slot; v == 0 means empty.
+type repEntry struct {
+	k int32
+	v float64
+}
+
+// cachedValue returns d.mapping.Value(k) through the reps cache.
+func (d *DDSketch) cachedValue(k int32) float64 {
+	if d.reps != nil {
+		if e := &d.reps[uint32(k)%repCacheSize]; e.k == k && e.v != 0 {
+			return e.v
+		}
+	}
+	return d.fillValue(k)
+}
+
+func (d *DDSketch) fillValue(k int32) float64 {
+	if d.reps == nil {
+		d.reps = new([repCacheSize]repEntry)
+	}
+	v := d.mapping.Value(k)
+	d.reps[uint32(k)%repCacheSize] = repEntry{k: k, v: v}
+	return v
+}
+
 // addOneFast is the hot-path variant of AddToBucket(k, 1).
 // It avoids the ensure() call when bucket k is already within the store's range,
 // saving a function call and two bounds checks on every insert of a hot bucket.
@@ -855,7 +886,7 @@ func (d *DDSketch) addOneFast(k int32) uint64 {
 			prev := counts[idx]
 			counts[idx]++
 			d.count++
-			rep := d.mapping.Value(k)
+			rep := d.cachedValue(k)
 			d.addToSum(rep)
 			if prev == 0 {
 				// First write to this bucket: initialise min/max from representative.
