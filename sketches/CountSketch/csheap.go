@@ -1,11 +1,11 @@
 package countsketch
 
 import (
-	"errors"
 	"fmt"
 	"math"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
+	"github.com/ProjectASAP/sketchlib-go/common/storage"
 	"github.com/ProjectASAP/sketchlib-go/wire/asapv1"
 )
 
@@ -30,9 +30,6 @@ const (
 	modeFast       = "fast"
 	modeRegular    = "regular"
 )
-
-// maxExactFloat bounds the integers float64 represents exactly.
-const maxExactFloat = 1 << 53
 
 func checkCounterType(counterType string) error {
 	if counterType != counterTypeI32 && counterType != counterTypeI64 {
@@ -90,7 +87,17 @@ func (h *CSHeap) validate() error {
 	if len(h.Heap) > h.K {
 		return fmt.Errorf("countsketch: CSHeap heap holds %d entries, more than k=%d", len(h.Heap), h.K)
 	}
-	return checkDistinctItems(h.Heap)
+	return nil
+}
+
+// checkFastGeometry fails unless rows x cols uses the 64-bit packed hash, the
+// one geometry where CountSketch places keys as ASAPv1 fast mode does.
+func checkFastGeometry(rows, cols int) error {
+	if storage.HashModeForMatrix(rows, cols) != storage.MatrixHashPacked64 {
+		return fmt.Errorf("countsketch: a %dx%d CountSketch does not hash in ASAPv1 fast mode: "+
+			"rows*(log2(cols)+1) must be at most 64", rows, cols)
+	}
+	return nil
 }
 
 func heapEntries(items []common.Item) []asapv1.HeapEntry[string] {
@@ -185,11 +192,15 @@ func (h *CSHeap) UnmarshalASAPv1(b []byte) error {
 	return nil
 }
 
-// ToCSHeap returns s's matrix as i64 cells in fast mode, and its TopK heap. It
-// fails when s has no TopK heap or a cell is not an integer.
-func (s *CountSketch) ToCSHeap() (*CSHeap, error) {
-	if s.TopK == nil {
-		return nil, errors.New("countsketch: ToCSHeap: no TopK heap")
+// ToCSHeap returns s's matrix as i64 cells in fast mode, with a heap of capacity
+// k holding the k Space-Saving candidates of highest positive estimate. It fails
+// when k < 0, a cell is not an i64, or s's geometry is not fast mode's.
+func (s *CountSketch) ToCSHeap(k int) (*CSHeap, error) {
+	if k < 0 {
+		return nil, fmt.Errorf("countsketch: ToCSHeap: k %d is negative", k)
+	}
+	if err := checkFastGeometry(s.Rows, s.Cols); err != nil {
+		return nil, err
 	}
 	counts := make([]int64, 0, s.Rows*s.Cols)
 	for r := 0; r < s.Rows; r++ {
@@ -201,30 +212,46 @@ func (s *CountSketch) ToCSHeap() (*CSHeap, error) {
 			counts = append(counts, iv)
 		}
 	}
-	h := &CSHeap{
+	var es []asapv1.HeapEntry[string]
+	if s.SS != nil {
+		for _, key := range s.SS.Candidates() {
+			if est := s.EstimateStringCount(key); est > 0 {
+				es = append(es, asapv1.HeapEntry[string]{Key: key, Count: est})
+			}
+		}
+	}
+	asapv1.SortHeapEntries(es)
+	es = es[:min(len(es), k)]
+	heap := make([]common.Item, len(es))
+	for i, e := range es {
+		heap[i] = common.Item{Key: e.Key, Count: e.Count}
+	}
+	return &CSHeap{
 		Rows: s.Rows, Cols: s.Cols,
 		CounterType: counterTypeI64, Mode: modeFast,
-		Counts: counts, K: s.TopK.K,
-		Heap: make([]common.Item, len(s.TopK.Heap)),
-	}
-	copy(h.Heap, s.TopK.Heap)
-	es := heapEntries(h.Heap)
-	asapv1.SortHeapEntries(es)
-	for i, e := range es {
-		h.Heap[i] = common.Item{Key: e.Key, Count: e.Count}
-	}
-	return h, nil
+		Counts: counts, K: k, Heap: heap,
+	}, nil
 }
 
-// ToCountSketch returns a CountSketch holding h's cells and heap, with L2 set to
-// each row's sum of squares and an empty Space-Saving tracker. It fails unless
-// h is valid and in fast mode, and every cell is within float64's exact range.
+// ToCountSketch returns a CountSketch holding h's cells, h's heap as its TopK,
+// L2 as each row's sum of squares and an empty Space-Saving tracker. It fails
+// unless h is valid, in fast mode and geometry, and float64 holds every cell.
 func (h *CSHeap) ToCountSketch() (*CountSketch, error) {
 	if err := h.validate(); err != nil {
 		return nil, err
 	}
 	if h.Mode != modeFast {
 		return nil, fmt.Errorf("countsketch: ToCountSketch: mode %q, CountSketch hashes in fast mode", h.Mode)
+	}
+	if err := checkFastGeometry(h.Rows, h.Cols); err != nil {
+		return nil, err
+	}
+	keys := make([]string, len(h.Heap))
+	for i, it := range h.Heap {
+		keys[i] = it.Key
+	}
+	if err := asapv1.CheckDistinctHeapKeys(keys); err != nil {
+		return nil, err
 	}
 	s, err := NewCountSketch(h.Rows, h.Cols)
 	if err != nil {
@@ -233,10 +260,10 @@ func (h *CSHeap) ToCountSketch() (*CountSketch, error) {
 	for r := 0; r < h.Rows; r++ {
 		for c := 0; c < h.Cols; c++ {
 			v := h.Counts[r*h.Cols+c]
-			if v > maxExactFloat || v < -maxExactFloat {
-				return nil, fmt.Errorf("countsketch: ToCountSketch: cell (%d,%d) value %d is beyond float64's exact range", r, c, v)
-			}
 			f := float64(v)
+			if f >= 0x1p63 || int64(f) != v {
+				return nil, fmt.Errorf("countsketch: ToCountSketch: cell (%d,%d) value %d is not exact in float64", r, c, v)
+			}
 			s.Count[r][c] = f
 			s.L2[r] += f * f
 		}
@@ -246,15 +273,4 @@ func (h *CSHeap) ToCountSketch() (*CountSketch, error) {
 		s.TopK.Insert(it.Key, it.Count)
 	}
 	return s, nil
-}
-
-func checkDistinctItems(items []common.Item) error {
-	seen := make(map[string]struct{}, len(items))
-	for _, it := range items {
-		if _, ok := seen[it.Key]; ok {
-			return fmt.Errorf("countsketch: CSHeap heap holds key %q twice", it.Key)
-		}
-		seen[it.Key] = struct{}{}
-	}
-	return nil
 }

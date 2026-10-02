@@ -1,6 +1,7 @@
 package countsketch
 
 import (
+	"cmp"
 	"math"
 	"reflect"
 	"slices"
@@ -221,21 +222,44 @@ func populatedSketch(t *testing.T) *CountSketch {
 	for i, key := range []string{"a", "b", "c", "d", "e", "a", "a", "b"} {
 		s.UpdateString(key, float64(i+1))
 	}
-	s.TopK = common.NewTopKHeap(3)
-	for _, key := range s.SS.Candidates() {
-		s.TopK.Update(key, s.EstimateStringCount(key))
-	}
 	return s
+}
+
+// topByEstimate is the heap ToCSHeap should build: the k keys of highest
+// positive estimate, ties by key.
+func topByEstimate(s *CountSketch, keys []string, k int) []common.Item {
+	var items []common.Item
+	for _, key := range keys {
+		if est := s.EstimateStringCount(key); est > 0 {
+			items = append(items, common.Item{Key: key, Count: est})
+		}
+	}
+	slices.SortFunc(items, func(a, b common.Item) int {
+		if a.Count != b.Count {
+			return cmp.Compare(b.Count, a.Count)
+		}
+		return strings.Compare(a.Key, b.Key)
+	})
+	return items[:min(len(items), k)]
+}
+
+func sortedByKey(items []common.Item) []common.Item {
+	out := slices.Clone(items)
+	slices.SortFunc(out, func(a, b common.Item) int { return strings.Compare(a.Key, b.Key) })
+	return out
 }
 
 func TestCountSketchThroughCSHeap(t *testing.T) {
 	s := populatedSketch(t)
-	h, err := s.ToCSHeap()
+	h, err := s.ToCSHeap(3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.CounterType != "i64" || h.Mode != "fast" || h.K != 3 || len(h.Heap) != 3 {
+	if h.CounterType != "i64" || h.Mode != "fast" || h.K != 3 {
 		t.Fatalf("ToCSHeap gave %+v", h)
+	}
+	if want := topByEstimate(s, []string{"a", "b", "c", "d", "e"}, 3); !reflect.DeepEqual(h.Heap, want) {
+		t.Fatalf("heap %v, want %v", h.Heap, want)
 	}
 	b, err := h.MarshalASAPv1()
 	if err != nil {
@@ -260,65 +284,135 @@ func TestCountSketchThroughCSHeap(t *testing.T) {
 			t.Errorf("estimate %q: %d, want %d", key, got, want)
 		}
 	}
-	if back.TopK.K != s.TopK.K {
-		t.Errorf("TopK K %d, want %d", back.TopK.K, s.TopK.K)
+	if back.TopK.K != 3 {
+		t.Errorf("TopK K %d, want 3", back.TopK.K)
 	}
-	gotHeap := slices.Clone(back.TopK.Heap)
-	wantHeap := slices.Clone(s.TopK.Heap)
-	byKey := func(a, b common.Item) int { return strings.Compare(a.Key, b.Key) }
-	slices.SortFunc(gotHeap, byKey)
-	slices.SortFunc(wantHeap, byKey)
-	if !reflect.DeepEqual(gotHeap, wantHeap) {
-		t.Errorf("TopK %v, want %v", gotHeap, wantHeap)
-	}
-	again, err := back.ToCSHeap()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(again, h) {
-		t.Errorf("second ToCSHeap %+v, want %+v", again, h)
+	if got, want := sortedByKey(back.TopK.Heap), sortedByKey(h.Heap); !reflect.DeepEqual(got, want) {
+		t.Errorf("TopK %v, want %v", got, want)
 	}
 }
 
-func TestToCSHeapOrdersHeap(t *testing.T) {
-	s, err := NewCountSketch(1, 2)
+func TestToCSHeapBuildsHeapFromCandidates(t *testing.T) {
+	s, err := NewCountSketch(5, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.TopK = common.NewTopKHeap(4)
+	for key, n := range map[string]int{"/checkout": 100, "/cart": 40, "/home": 5} {
+		for range n {
+			s.UpdateString(key, 1)
+		}
+	}
+	if s.TopK != nil && len(s.TopK.Heap) != 0 {
+		t.Fatalf("UpdateString filled TopK: %v", s.TopK.Heap)
+	}
+	h, err := s.ToCSHeap(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Rows != 5 || h.Cols != 1024 || h.K != 20 {
+		t.Fatalf("rows=%d cols=%d k=%d", h.Rows, h.Cols, h.K)
+	}
+	if len(h.Heap) != 3 {
+		t.Fatalf("heap %v, want the 3 candidates", h.Heap)
+	}
+	if h.Heap[0].Key != "/checkout" || h.Heap[1].Key != "/cart" || h.Heap[2].Key != "/home" {
+		t.Fatalf("heap order %v", h.Heap)
+	}
+	if c := h.Heap[0].Count; c < 85 || c > 115 {
+		t.Fatalf("/checkout estimate out of band: %d", c)
+	}
+	if _, err := h.MarshalASAPv1(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestToCSHeapKeepsTopK(t *testing.T) {
+	s, err := NewCountSketch(5, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, it := range []common.Item{{Key: "b", Count: 5}, {Key: "z", Count: 9}, {Key: "a", Count: 5}, {Key: "c", Count: -1}} {
-		s.TopK.Insert(it.Key, it.Count)
+		s.UpdateString(it.Key, float64(it.Count))
+		if got := s.EstimateStringCount(it.Key); got != it.Count {
+			t.Fatalf("estimate %q = %d, want %d", it.Key, got, it.Count)
+		}
 	}
-	h, err := s.ToCSHeap()
+	s.UpdateString("d", 2)
+	s.InsertWithHashAndValue(common.Hash64([]byte("d")), -2)
+	if got := s.EstimateStringCount("d"); got != 0 {
+		t.Fatalf("estimate d = %d, want 0", got)
+	}
+	all := []common.Item{{Key: "z", Count: 9}, {Key: "a", Count: 5}, {Key: "b", Count: 5}}
+	for k := 0; k <= 4; k++ {
+		h, err := s.ToCSHeap(k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := all[:min(k, len(all))]; !reflect.DeepEqual(h.Heap, want) || h.K != k {
+			t.Errorf("k=%d: heap %v (K %d), want %v", k, h.Heap, h.K, want)
+		}
+	}
+}
+
+func TestToCSHeapEmptyWithoutCandidates(t *testing.T) {
+	s, err := NewCountSketch(3, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []common.Item{{Key: "z", Count: 9}, {Key: "a", Count: 5}, {Key: "b", Count: 5}, {Key: "c", Count: -1}}
-	if !reflect.DeepEqual(h.Heap, want) {
-		t.Fatalf("heap %v, want %v", h.Heap, want)
+	h, err := s.ToCSHeap(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.Heap) != 0 || h.K != 10 {
+		t.Fatalf("heap %v, K %d", h.Heap, h.K)
+	}
+	if _, err := h.MarshalASAPv1(); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestToCSHeapRejects(t *testing.T) {
 	s := populatedSketch(t)
 	s.Count[1][3] += 0.5
-	if _, err := s.ToCSHeap(); err == nil {
+	if _, err := s.ToCSHeap(3); err == nil {
 		t.Error("fractional cell converted")
 	}
 	s = populatedSketch(t)
 	s.Count[0][0] = math.Inf(1)
-	if _, err := s.ToCSHeap(); err == nil {
+	if _, err := s.ToCSHeap(3); err == nil {
 		t.Error("infinite cell converted")
 	}
 	s = populatedSketch(t)
 	s.Count[0][0] = math.Exp2(63)
-	if _, err := s.ToCSHeap(); err == nil {
+	if _, err := s.ToCSHeap(3); err == nil {
 		t.Error("cell of 2^63 converted")
 	}
-	s = populatedSketch(t)
-	s.TopK = nil
-	if _, err := s.ToCSHeap(); err == nil {
-		t.Error("sketch without a TopK heap converted")
+	if _, err := populatedSketch(t).ToCSHeap(-1); err == nil {
+		t.Error("negative k converted")
+	}
+	wide, err := NewCountSketch(5, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wide.ToCSHeap(3); err == nil {
+		t.Error("5x8192 sketch converted to fast mode")
+	}
+}
+
+func TestLargeCellsSurviveConversion(t *testing.T) {
+	s := populatedSketch(t)
+	s.Count[2][5] = math.Exp2(60)
+	s.Count[3][1] = -math.Exp2(62) - math.Exp2(10)
+	h, err := s.ToCSHeap(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := h.ToCountSketch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Count[2][5] != s.Count[2][5] || back.Count[3][1] != s.Count[3][1] {
+		t.Fatalf("cells %v, %v", back.Count[2][5], back.Count[3][1])
 	}
 }
 
@@ -334,10 +428,17 @@ func TestToCountSketchRejects(t *testing.T) {
 	if _, err := csHeapFixture().ToCountSketch(); err == nil {
 		t.Error("regular mode converted")
 	}
+	for _, v := range []int64{1<<53 + 1, math.MaxInt64, math.MinInt64 + 1} {
+		h := fast()
+		h.Counts[0] = v
+		if _, err := h.ToCountSketch(); err == nil {
+			t.Errorf("cell %d, not exact in float64, converted", v)
+		}
+	}
 	h := fast()
-	h.Counts[0] = 1<<53 + 1
-	if _, err := h.ToCountSketch(); err == nil {
-		t.Error("cell beyond float64's exact range converted")
+	h.Counts[0] = math.MinInt64
+	if _, err := h.ToCountSketch(); err != nil {
+		t.Errorf("cell MinInt64: %v", err)
 	}
 	h = fast()
 	h.Heap[1].Key = "alpha"
@@ -348,5 +449,10 @@ func TestToCountSketchRejects(t *testing.T) {
 	h.Rows, h.Cols, h.Counts = 1, 3, []int64{1, 2, 3}
 	if _, err := h.ToCountSketch(); err == nil {
 		t.Error("non-power-of-two cols converted")
+	}
+	h = fast()
+	h.Rows, h.Cols, h.Counts = 5, 8192, make([]int64, 5*8192)
+	if _, err := h.ToCountSketch(); err == nil {
+		t.Error("5x8192 converted")
 	}
 }
