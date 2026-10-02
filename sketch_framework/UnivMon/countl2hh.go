@@ -47,9 +47,9 @@ func checkDimensions(rows, cols int) error {
 	return nil
 }
 
-// NewCountL2HH returns a zeroed rows x cols sketch hashing at seed index
+// newCountL2HH returns a zeroed rows x cols sketch hashing at seed index
 // seedIdx.
-func NewCountL2HH(rows, cols, seedIdx int) (*CountL2HH, error) {
+func newCountL2HH(rows, cols, seedIdx int) (*CountL2HH, error) {
 	if err := checkDimensions(rows, cols); err != nil {
 		return nil, err
 	}

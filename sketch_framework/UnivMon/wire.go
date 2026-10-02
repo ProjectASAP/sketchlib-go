@@ -74,7 +74,8 @@ func (u *UnivMon[K]) MarshalASAPv1() ([]byte, error) {
 }
 
 // UnmarshalASAPv1 replaces u with the UnivMon in b. A pyramid with heap
-// entries must have K's key_type.
+// entries must have K's key_type, so one keyed by "isize" or "usize" does not
+// decode.
 func (u *UnivMon[K]) UnmarshalASAPv1(b []byte) error {
 	md, p, err := asapv1.Open(b, asapv1.KindUnivMon)
 	if err != nil {

@@ -33,7 +33,6 @@ package sketch_envelopepb
 import (
 	common "github.com/ProjectASAP/sketchlib-go/proto/common"
 	hydra "github.com/ProjectASAP/sketchlib-go/proto/hydra"
-	univmon "github.com/ProjectASAP/sketchlib-go/proto/univmon"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -69,7 +68,6 @@ type SketchEnvelope struct {
 	//
 	// Types that are valid to be assigned to SketchState:
 	//
-	//	*SketchEnvelope_Univmon
 	//	*SketchEnvelope_Hydra
 	SketchState isSketchEnvelope_SketchState `protobuf_oneof:"sketch_state"`
 	// Geometric / NitroSketch sampling probability for the producing sketch.
@@ -152,15 +150,6 @@ func (x *SketchEnvelope) GetSketchState() isSketchEnvelope_SketchState {
 	return nil
 }
 
-func (x *SketchEnvelope) GetUnivmon() *univmon.UnivMonState {
-	if x != nil {
-		if x, ok := x.SketchState.(*SketchEnvelope_Univmon); ok {
-			return x.Univmon
-		}
-	}
-	return nil
-}
-
 func (x *SketchEnvelope) GetHydra() *hydra.HydraState {
 	if x != nil {
 		if x, ok := x.SketchState.(*SketchEnvelope_Hydra); ok {
@@ -181,15 +170,9 @@ type isSketchEnvelope_SketchState interface {
 	isSketchEnvelope_SketchState()
 }
 
-type SketchEnvelope_Univmon struct {
-	Univmon *univmon.UnivMonState `protobuf:"bytes,15,opt,name=univmon,proto3,oneof"`
-}
-
 type SketchEnvelope_Hydra struct {
 	Hydra *hydra.HydraState `protobuf:"bytes,16,opt,name=hydra,proto3,oneof"`
 }
-
-func (*SketchEnvelope_Univmon) isSketchEnvelope_SketchState() {}
 
 func (*SketchEnvelope_Hydra) isSketchEnvelope_SketchState() {}
 
@@ -262,16 +245,15 @@ var File_sketchlib_proto protoreflect.FileDescriptor
 
 const file_sketchlib_proto_rawDesc = "" +
 	"\n" +
-	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\"\xa5\x03\n" +
+	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a\x11hydra/hydra.proto\"\xfc\x02\n" +
 	"\x0eSketchEnvelope\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x126\n" +
 	"\bproducer\x18\x02 \x01(\v2\x1a.sketchlib.v1.ProducerInfoR\bproducer\x123\n" +
-	"\thash_spec\x18\x03 \x01(\v2\x16.sketchlib.v1.HashSpecR\bhashSpec\x126\n" +
-	"\aunivmon\x18\x0f \x01(\v2\x1a.sketchlib.v1.UnivMonStateH\x00R\aunivmon\x120\n" +
+	"\thash_spec\x18\x03 \x01(\v2\x16.sketchlib.v1.HashSpecR\bhashSpec\x120\n" +
 	"\x05hydra\x18\x10 \x01(\v2\x18.sketchlib.v1.HydraStateH\x00R\x05hydra\x12\x19\n" +
 	"\bsample_p\x18\x04 \x01(\x01R\asamplePB\x0e\n" +
 	"\fsketch_stateJ\x04\b\n" +
-	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x11\x10\x12J\x04\b\x12\x10\x13J\x04\b\x13\x10 R\tcount_minR\fcount_sketchR\x03hllR\x03kllR\bddsketchR\x04cocoR\aelastic\"\xca\x01\n" +
+	"\x10\vJ\x04\b\v\x10\fJ\x04\b\f\x10\rJ\x04\b\r\x10\x0eJ\x04\b\x0e\x10\x0fJ\x04\b\x0f\x10\x10J\x04\b\x11\x10\x12J\x04\b\x12\x10\x13J\x04\b\x13\x10 R\tcount_minR\fcount_sketchR\x03hllR\x03kllR\bddsketchR\aunivmonR\x04cocoR\aelastic\"\xca\x01\n" +
 	"\x13SketchDeltaEnvelope\x12#\n" +
 	"\rpartition_key\x18\x01 \x01(\tR\fpartitionKey\x12&\n" +
 	"\x0fwindow_start_ms\x18\x02 \x01(\x03R\rwindowStartMs\x12&\n" +
@@ -292,23 +274,21 @@ func file_sketchlib_proto_rawDescGZIP() []byte {
 
 var file_sketchlib_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_sketchlib_proto_goTypes = []any{
-	(*SketchEnvelope)(nil),       // 0: sketchlib.v1.SketchEnvelope
-	(*SketchDeltaEnvelope)(nil),  // 1: sketchlib.v1.SketchDeltaEnvelope
-	(*common.ProducerInfo)(nil),  // 2: sketchlib.v1.ProducerInfo
-	(*common.HashSpec)(nil),      // 3: sketchlib.v1.HashSpec
-	(*univmon.UnivMonState)(nil), // 4: sketchlib.v1.UnivMonState
-	(*hydra.HydraState)(nil),     // 5: sketchlib.v1.HydraState
+	(*SketchEnvelope)(nil),      // 0: sketchlib.v1.SketchEnvelope
+	(*SketchDeltaEnvelope)(nil), // 1: sketchlib.v1.SketchDeltaEnvelope
+	(*common.ProducerInfo)(nil), // 2: sketchlib.v1.ProducerInfo
+	(*common.HashSpec)(nil),     // 3: sketchlib.v1.HashSpec
+	(*hydra.HydraState)(nil),    // 4: sketchlib.v1.HydraState
 }
 var file_sketchlib_proto_depIdxs = []int32{
 	2, // 0: sketchlib.v1.SketchEnvelope.producer:type_name -> sketchlib.v1.ProducerInfo
 	3, // 1: sketchlib.v1.SketchEnvelope.hash_spec:type_name -> sketchlib.v1.HashSpec
-	4, // 2: sketchlib.v1.SketchEnvelope.univmon:type_name -> sketchlib.v1.UnivMonState
-	5, // 3: sketchlib.v1.SketchEnvelope.hydra:type_name -> sketchlib.v1.HydraState
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	4, // 2: sketchlib.v1.SketchEnvelope.hydra:type_name -> sketchlib.v1.HydraState
+	3, // [3:3] is the sub-list for method output_type
+	3, // [3:3] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_sketchlib_proto_init() }
@@ -317,7 +297,6 @@ func file_sketchlib_proto_init() {
 		return
 	}
 	file_sketchlib_proto_msgTypes[0].OneofWrappers = []any{
-		(*SketchEnvelope_Univmon)(nil),
 		(*SketchEnvelope_Hydra)(nil),
 	}
 	type x struct{}

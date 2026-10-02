@@ -296,7 +296,7 @@ func TestASAPv1MarshalRejects(t *testing.T) {
 	cases := map[string]func(u *UnivMon[string]){
 		"negative l2":       func(u *UnivMon[string]) { u.layers[1].l2[0] = -1 },
 		"layer seed index":  func(u *UnivMon[string]) { u.layers[2].seedIdx = 0 },
-		"layer geometry":    func(u *UnivMon[string]) { u.layers[0], _ = NewCountL2HH(2, 8, 0) },
+		"layer geometry":    func(u *UnivMon[string]) { u.layers[0], _ = newCountL2HH(2, 8, 0) },
 		"heap capacity":     func(u *UnivMon[string]) { u.heaps[0].k = 6 },
 		"update mode":       func(u *UnivMon[string]) { u.updateMode = 3 },
 		"missing flag":      func(u *UnivMon[string]) { u.candidateComplete = u.candidateComplete[:2] },

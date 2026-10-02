@@ -88,6 +88,45 @@ func TestInsertTracksWeightAndHeavyHitter(t *testing.T) {
 	}
 }
 
+func TestZeroValueRejectsInserts(t *testing.T) {
+	var u UnivMon[string]
+	if err := u.Insert("a", 1); err == nil {
+		t.Error("Insert into a zero-value pyramid accepted")
+	}
+	if err := u.FastInsert("a", 1); err == nil {
+		t.Error("FastInsert into a zero-value pyramid accepted")
+	}
+	if u.BucketSize() != 0 || u.Mode() != UpdateModeUnset {
+		t.Error("a rejected insert changed the zero-value pyramid")
+	}
+}
+
+func TestHeapEntriesCopiesKeys(t *testing.T) {
+	u, err := NewUnivMon[[]byte](4, 3, 16, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"ab", "ac"} {
+		if err := u.Insert([]byte(k), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := u.MarshalASAPv1()
+	for _, e := range u.HeapEntries(0) {
+		e.Key[1] = 'z'
+	}
+	after, err := u.MarshalASAPv1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("mutating a returned key changed the pyramid")
+	}
+	if err := new(UnivMon[[]byte]).UnmarshalASAPv1(after); err != nil {
+		t.Errorf("re-decode: %v", err)
+	}
+}
+
 func TestInsertRules(t *testing.T) {
 	u := mustNew[string](t, 4, 3, 16, 4)
 	if err := u.Insert("a", -1); err == nil {
@@ -339,7 +378,7 @@ func TestCountL2HHCell(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 4))
 	for _, cols := range []int{1, 2, 4, 5, 10, 16, 1000, 4096} {
 		rows := min(MaxRows, 128/(int(colsMaskBits(cols))+1))
-		s, err := NewCountL2HH(rows, cols, 0)
+		s, err := newCountL2HH(rows, cols, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -73,7 +73,7 @@ func NewUnivMon[K asapv1.HeapKey](heapSize, sketchRow, sketchCol, layerSize int)
 		candidateComplete: make([]bool, layerSize),
 	}
 	for i := range layerSize {
-		u.layers[i], _ = NewCountL2HH(sketchRow, sketchCol, i)
+		u.layers[i], _ = newCountL2HH(sketchRow, sketchCol, i)
 		u.heaps[i] = newHHHeap[K](heapSize, heapSize)
 		u.candidateComplete[i] = true
 	}
@@ -102,10 +102,13 @@ func (u *UnivMon[K]) Mode() UpdateMode { return u.updateMode }
 // key the layer received.
 func (u *UnivMon[K]) CandidatesComplete() []bool { return slices.Clone(u.candidateComplete) }
 
-// HeapEntries returns the layer's heap entries in descending count, then
-// asapv1.CompareHeapKeys order.
+// HeapEntries returns a copy of the layer's heap entries in descending count,
+// then asapv1.CompareHeapKeys order.
 func (u *UnivMon[K]) HeapEntries(layer int) []asapv1.HeapEntry[K] {
-	es := slices.Clone(u.heaps[layer].entries)
+	es := make([]asapv1.HeapEntry[K], len(u.heaps[layer].entries))
+	for i, e := range u.heaps[layer].entries {
+		es[i] = asapv1.HeapEntry[K]{Key: cloneKey(e.Key), Count: e.Count}
+	}
 	asapv1.SortHeapEntries(es)
 	return es
 }
@@ -132,6 +135,9 @@ func BottomLayerForHash(hash uint64, layerSize int) int {
 func bottomLayerHash(id string) uint64 { return common.HashIt(bottomLayerFinder, []byte(id)) }
 
 func (u *UnivMon[K]) begin(value int64, mode UpdateMode) error {
+	if u.layerSize == 0 {
+		return errors.New("univmon: the pyramid was not built by NewUnivMon")
+	}
 	if value < 0 {
 		return fmt.Errorf("univmon: update weight %d is negative", value)
 	}
@@ -238,9 +244,9 @@ func (u *UnivMon[K]) recurrence(g func(float64) float64, candidates [][]candidat
 	return y
 }
 
-// CalcGSum estimates the sum of g over every key's frequency. With isCard set,
-// a layer whose candidate set is incomplete counts only keys above
-// l2/sqrt(heapSize).
+// CalcGSum estimates the sum of g over every key's frequency. A layer whose
+// candidate set is incomplete counts only keys above l2/sqrt(heapSize): with
+// isCard set in standard mode, and always in terminal mode.
 func (u *UnivMon[K]) CalcGSum(g func(float64) float64, isCard bool) float64 {
 	if u.bucketSize == 0 {
 		return 0
