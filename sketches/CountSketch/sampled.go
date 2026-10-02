@@ -4,7 +4,6 @@ import (
 	"math/bits"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
-	"github.com/ProjectASAP/sketchlib-go/common/storage"
 )
 
 // maxSampledRows bounds the stack buffer for admitted-row indices; Count-Sketch
@@ -45,22 +44,14 @@ func (s *CountSketch) UpdateStringSampledPerRow(key string, count float64, sampl
 	}
 
 	// 2. Hash once.
-	hashed := storage.BuildMatrixHash(common.Hash64([]byte(key)), s.Rows, s.Cols)
+	k := s.hashKey([]byte(key))
 	scaled := count / sampler.P() // inverse-probability weight
-	isPacked := hashed.Mode() == storage.MatrixHashPacked64
-	packed := hashed.Lower64()
 
 	// 3. Update admitted rows only.
 	for admittedRows != 0 {
 		r := bits.TrailingZeros64(admittedRows)
 		admittedRows &^= uint64(1) << uint(r)
-		var c int
-		var sign float64
-		if isPacked {
-			c, sign = s.fastPacked64PosAndSign(packed, r)
-		} else {
-			c, sign = s.derivePosAndSignFromHashed(hashed, r)
-		}
+		c, sign := s.posAndSign(k, r)
 		row := s.Count[r]
 		prev := row[c]
 		curr := prev + sign*scaled
@@ -97,24 +88,16 @@ func (s *CountSketch) UpdateStringAtRows(key string, count float64, admittedRows
 	if admittedRows == 0 || s.Rows > maxSampledRows {
 		return
 	}
-	hashed := storage.BuildMatrixHash(common.Hash64([]byte(key)), s.Rows, s.Cols)
+	k := s.hashKey([]byte(key))
 	scaled := count
 	if p > 0 && p < 1.0 {
 		scaled = count / p
 	}
-	isPacked := hashed.Mode() == storage.MatrixHashPacked64
-	packed := hashed.Lower64()
 
 	for admittedRows != 0 {
 		r := bits.TrailingZeros64(admittedRows)
 		admittedRows &^= uint64(1) << uint(r)
-		var c int
-		var sign float64
-		if isPacked {
-			c, sign = s.fastPacked64PosAndSign(packed, r)
-		} else {
-			c, sign = s.derivePosAndSignFromHashed(hashed, r)
-		}
+		c, sign := s.posAndSign(k, r)
 		row := s.Count[r]
 		prev := row[c]
 		curr := prev + sign*scaled

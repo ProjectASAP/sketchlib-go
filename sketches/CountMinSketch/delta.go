@@ -40,10 +40,8 @@ type CellDelta struct {
 // Delta is the native Go representation of a sparse CountMinSketch delta.
 // All fields are plain Go types; no proto dependency.
 //
-// The shape mirrors the CountSketch Delta so the two sketches serialize to
-// structurally identical wire frames (see CountMinDelta vs CountSketchDelta in
-// the protos). HHKeys is the optional heavy-hitter-keys channel: CMS can track
-// heavy hitters, but whether HHKeys is populated is a control-plane decision.
+// HHKeys is the optional heavy-hitter-keys channel: CMS can track heavy
+// hitters, but whether HHKeys is populated is a control-plane decision.
 // It is empty when no heavy-hitter source is wired to the producing sketch.
 type Delta struct {
 	Rows, Cols uint32

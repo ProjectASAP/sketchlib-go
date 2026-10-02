@@ -383,7 +383,6 @@ func kllFixture(itemType string) *kllState {
 }
 
 func TestGoldenFixtures(t *testing.T) {
-	csCounts := []int64{0, 127, 128, 65536, -1, -33, -32768, -2147483648}
 	matrix := func(kind asapv1.KindID, cols uint32, counterType, mode string, ints []int64, floats []float64) *matrixState {
 		return &matrixState{Kind: kind, Rows: 2, Cols: cols, CounterType: counterType, Mode: mode, Ints: ints, Floats: floats}
 	}
@@ -400,9 +399,6 @@ func TestGoldenFixtures(t *testing.T) {
 	for name, known := range map[string]*matrixState{
 		"cms_i64_regular_2x3": matrix(asapv1.KindCountMin, 3, "i64", "regular", []int64{0, 1, 127, 128, 300, 65536}, nil),
 		"cms_f64_fast_2x3":    matrix(asapv1.KindCountMin, 3, "f64", "fast", nil, []float64{0, 1.5, 2.25, 3.75, 4.125, 5.0625}),
-		"cs_i64_regular_2x4":  matrix(asapv1.KindCountSketch, 4, "i64", "regular", csCounts, nil),
-		"cs_i64_fast_2x4":     matrix(asapv1.KindCountSketch, 4, "i64", "fast", csCounts, nil),
-		"cs_i32_regular_2x4":  matrix(asapv1.KindCountSketch, 4, "i32", "regular", csCounts, nil),
 	} {
 		t.Run(name, func(t *testing.T) { asapv1test.CheckGolden(t, name, known, nil) })
 	}

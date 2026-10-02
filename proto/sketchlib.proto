@@ -5,7 +5,7 @@
 //
 //   common/common.proto              — HashSpec, ProducerInfo, CounterType, ...
 //   countminsketch/countminsketch.proto — CountMinState, CountMinDelta, CountMinCell
-//   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry, CountSketchDelta, CountSketchCell
+//   countsketch/countsketch.proto    — CountSketchState, TopKState, HeapEntry
 //   hll/hll.proto                    — HyperLogLogState, HLLVariant, HLLDelta, HLLRegisterUpdate
 //   kll/kll.proto                    — KLLState, CoinState
 //   ddsketch/ddsketch.proto          — DDSketchState, DDSketchDelta, DDSketchBucketDelta
@@ -30,7 +30,6 @@ package sketchlib.v1;
 
 import "common/common.proto";
 import "countminsketch/countminsketch.proto";
-import "countsketch/countsketch.proto";
 import "hll/hll.proto";
 import "kll/kll.proto";
 import "ddsketch/ddsketch.proto";
@@ -67,7 +66,6 @@ message SketchEnvelope {
   // The sketch payload. Exactly one field must be set.
   oneof sketch_state {
     CountMinState    count_min    = 10;
-    CountSketchState count_sketch = 11;
     HyperLogLogState hll          = 12;
     KLLState         kll          = 13;
     DDSketchState    ddsketch     = 14;
@@ -77,6 +75,8 @@ message SketchEnvelope {
     ElasticState     elastic      = 18;
   }
 
+  reserved 11;
+  reserved "count_sketch";
   reserved 19 to 31;  // Reserved for future sketch types.
 
   // Geometric / NitroSketch sampling probability for the producing sketch.
@@ -108,14 +108,13 @@ message SketchEnvelope {
 // full-sketch payloads by the encoding="proto_delta" attribute.
 //
 // Receiver semantics:
-//   CountMin / CountSketch:  agg[r][c] += cell.d_*
+//   CountMin:                agg[r][c] += cell.d_*
 //   HLL:                     agg[i]    = max(agg[i], update.value)
 //   DDSketch buckets:        agg[b]   += bucket.d_count
 //   DDSketch min/max:        lossless  — only transmitted when changed
 //
 // Per-sketch delta message types live in their per-sketch proto files:
 //   countminsketch/countminsketch.proto — CountMinDelta, CountMinCell
-//   countsketch/countsketch.proto       — CountSketchDelta, CountSketchCell
 //   hll/hll.proto                       — HLLDelta, HLLRegisterUpdate
 //   ddsketch/ddsketch.proto             — DDSketchDelta, DDSketchBucketDelta
 
@@ -133,8 +132,9 @@ message SketchDeltaEnvelope {
 
   oneof delta {
     CountMinDelta    count_min    = 10;
-    CountSketchDelta count_sketch = 11;
     HLLDelta         hll          = 12;
     DDSketchDelta    ddsketch     = 13;
   }
+  reserved 11;
+  reserved "count_sketch";
 }
