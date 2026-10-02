@@ -20,7 +20,7 @@
 //   - Hash specification is explicit so consumers can detect configuration mismatches.
 //
 // Version history:
-//   1 — initial portable format (CountMin, Count, HLL, KLL, DDSketch)
+//   1 — initial portable format (CountMin, Count, HLL, KLL)
 //   2 — extended to UnivMon and Hydra (reserved, not yet stable)
 
 syntax = "proto3";
@@ -49,7 +49,7 @@ option go_package = "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope;s
 message SketchEnvelope {
   // Schema version. Consumers should reject envelopes whose version exceeds
   // the highest version they understand.
-  //   1 = CountMin, Count, HLL, KLL, DDSketch
+  //   1 = CountMin, Count, HLL, KLL
   //   2 = UnivMon, Hydra (reserved)
   //   3 = CocoSketch, ElasticSketch (reserved)
   uint32 format_version = 1;
@@ -74,6 +74,8 @@ message SketchEnvelope {
     ElasticState     elastic      = 18;
   }
 
+  reserved 14;
+  reserved "ddsketch";
   reserved 19 to 31;  // Reserved for future sketch types.
 
   // Geometric / NitroSketch sampling probability for the producing sketch.
@@ -83,7 +85,7 @@ message SketchEnvelope {
   // and stores the RAW SAMPLED sketch state — never the rescaled state. The
   // consumer applies the `× 1/sample_p` rescale at QUERY time on the count-like
   // estimators (HLL cardinality, CountMin / CountSketch frequency, SUM / COUNT);
-  // quantile estimators (KLL, DDSketch) are scale-invariant under uniform
+  // quantile estimators (KLL) are scale-invariant under uniform
   // sampling so they carry `sample_p` but need no rescale.
   //
   // Lives on the envelope (not per-sketch state) so downstream consumers that
@@ -130,4 +132,7 @@ message SketchDeltaEnvelope {
     CountSketchDelta count_sketch = 11;
     HLLDelta         hll          = 12;
   }
+
+  reserved 13;
+  reserved "ddsketch";
 }

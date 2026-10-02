@@ -14,7 +14,7 @@ import (
 func TestRepresentativeMeetsAlphaBound(t *testing.T) {
 	for _, alpha := range []float64{0.001, 0.01, 0.05, 0.1} {
 		m := NewIndexMapping(alpha)
-		// Recovered alpha from gamma must match.
+		// RelativeAccuracy must return alpha.
 		if got := m.RelativeAccuracy(); math.Abs(got-alpha) > 1e-12 {
 			t.Fatalf("alpha=%v: RelativeAccuracy()=%v", alpha, got)
 		}

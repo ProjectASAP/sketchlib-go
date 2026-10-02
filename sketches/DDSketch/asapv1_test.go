@@ -240,7 +240,8 @@ func TestASAPv1SignedQuantileWalk(t *testing.T) {
 		t.Fatalf("count %d, want 18", d.Count())
 	}
 	m := d.mapping
-	// Ranks 1, 2-6, 7-13, 14-16, 17-18 fall in buckets -207, -208, zero, 310, 312.
+	// Ranks 1, 2-6, 7-13, 14-16, 17-18 fall in buckets -207, -208, zero, 310, 312;
+	// values are capped to [min, max] = [-0.016, 515].
 	want := map[int]float64{
 		1:  -0.016,
 		2:  -m.Value(-208),
@@ -249,7 +250,7 @@ func TestASAPv1SignedQuantileWalk(t *testing.T) {
 		13: 0,
 		14: m.Value(310),
 		16: m.Value(310),
-		17: m.Value(312),
+		17: 515.0,
 	}
 	for rank, w := range want {
 		q := (float64(rank) - 0.5) / 18
@@ -427,13 +428,115 @@ func TestASAPv1MarshalRejectsUndecodableState(t *testing.T) {
 	}
 }
 
-func TestASAPv1DrainedWorkerDoesNotEncode(t *testing.T) {
+func TestQuantileCapsAtCarriedMax(t *testing.T) {
 	d := NewDDSketch(testAlpha)
-	d.Update(5)
-	d.DrainBuckets(func(int32, uint64) {})
-	if _, err := d.MarshalASAPv1(); err == nil {
-		t.Fatal("a drained sketch that kept its scalars encoded")
+	d.Update(1.0)
+	for _, q := range []float64{0.5, 1} {
+		if got, _ := d.Quantile(q); got != 1.0 {
+			t.Fatalf("Quantile(%v) = %v, want 1.0", q, got)
+		}
 	}
+
+	top := NewDDSketch(testAlpha)
+	v := top.mapping.LowerBound(11) * 0.9999999
+	top.Update(top.mapping.LowerBound(10))
+	top.Update(v)
+	if got, _ := top.Quantile(1); got != v {
+		t.Fatalf("Quantile(1) = %v, want max %v", got, v)
+	}
+}
+
+// TestSignedFixtureQuantilesMatchRust compares against the values Rust's
+// get_value_at_quantile returns for the decoded signed fixture; math.Pow and
+// Rust's powf can differ in the last bits, so bucket values get a tolerance.
+func TestSignedFixtureQuantilesMatchRust(t *testing.T) {
+	var d DDSketch
+	if err := d.UnmarshalASAPv1(asapv1test.Golden(t, "ddsketch_signed_a001")); err != nil {
+		t.Fatal(err)
+	}
+	for q, want := range map[float64]float64{
+		0.05: -0.016, 0.1: -0.01576144762907453, 0.4: 0, 0.75: 497.77940145581556, 0.9: 515.0, 1: 515.0,
+	} {
+		got, _ := d.Quantile(q)
+		if math.Abs(got-want) > 1e-13*math.Abs(want) {
+			t.Errorf("Quantile(%v) = %v, want %v", q, got, want)
+		}
+	}
+}
+
+func TestMappingUsesConstructorAlpha(t *testing.T) {
+	for _, alpha := range []float64{0.001, 0.01, 0.05, 0.3} {
+		m := NewIndexMapping(alpha)
+		if m.RelativeAccuracy() != alpha || m.Value(0) != 1+alpha {
+			t.Errorf("alpha %v: RelativeAccuracy %v, Value(0) %v", alpha, m.RelativeAccuracy(), m.Value(0))
+		}
+	}
+}
+
+func TestASAPv1EmptiedWorkerEncodesAsEmpty(t *testing.T) {
+	fill := func() *DDSketch {
+		d := NewDDSketch(testAlpha)
+		d.Update(5)
+		d.Update(5)
+		return d
+	}
+	drained := fill()
+	drained.DrainBuckets(func(int32, uint64) {})
+	reset := fill()
+	reset.ResetBucket(reset.BucketIndex(5))
+	crossed := NewDDSketch(testAlpha)
+	crossed.UpdateGOS(5, 1)
+
+	empty := NewDDSketch(testAlpha)
+	for name, d := range map[string]*DDSketch{"DrainBuckets": drained, "ResetBucket": reset, "UpdateGOS": crossed} {
+		t.Run(name, func(t *testing.T) {
+			b, err := d.MarshalASAPv1()
+			if err != nil {
+				t.Fatalf("MarshalASAPv1: %v", err)
+			}
+			var got DDSketch
+			if err := got.UnmarshalASAPv1(b); err != nil {
+				t.Fatalf("UnmarshalASAPv1: %v", err)
+			}
+			if got.count != 0 || !sameFloat(got.sum, empty.sum) ||
+				!sameFloat(got.min, empty.min) || !sameFloat(got.max, empty.max) {
+				t.Fatalf("decoded count %d sum %v min %v max %v, want the empty state",
+					got.count, got.sum, got.min, got.max)
+			}
+		})
+	}
+}
+
+func TestASAPv1SumAfterBucketInserts(t *testing.T) {
+	d := NewDDSketch(testAlpha)
+	d.AddToBucket(10, 3)
+	d.addOneFast(10)
+	d.addOneFast(20)
+	m := d.mapping
+	want := 0.0
+	want += m.Value(10) * 3
+	want += m.Value(10)
+	want += m.Value(20)
+	got := roundTrip(t, d)
+	if !sameFloat(got.sum, want) {
+		t.Fatalf("encoded sum %v, want %v", got.sum, want)
+	}
+}
+
+func TestMergeSumSaturates(t *testing.T) {
+	a, b := NewDDSketch(testAlpha), NewDDSketch(testAlpha)
+	v := a.mapping.MaxIndexableValue()
+	for _, d := range []*DDSketch{a, b} {
+		d.Update(v)
+		d.Update(v)
+	}
+	if err := a.Merge(b); err != nil {
+		t.Fatal(err)
+	}
+	if a.sum != math.MaxFloat64 {
+		t.Fatalf("merged sum %v, want MaxFloat64", a.sum)
+	}
+	roundTrip(t, a)
 }
 
 func TestASAPv1EncodesAggregatorFedByAddToBucket(t *testing.T) {

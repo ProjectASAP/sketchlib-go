@@ -45,26 +45,19 @@ func (m IndexMapping) Equals(other IndexMapping) bool {
 	return math.Abs(m.gamma-other.gamma) < 1e-15
 }
 
-// RelativeAccuracy recovers α from γ without a stored field:
-// γ=(1+α)/(1-α) ⇒ α = (γ-1)/(γ+1) = 1 - 2/(1+γ). Matches DataDog's
-// LogarithmicMapping.RelativeAccuracy().
+// RelativeAccuracy returns the α the mapping was built with.
 func (m IndexMapping) RelativeAccuracy() float64 {
-	return 1 - 2/(1+m.gamma)
+	return m.alpha
 }
 
 func (m IndexMapping) Index(v float64) int32 {
 	return int32(math.Floor(math.Log(v) * m.invLogGamma))
 }
 
-// Value returns the representative of bucket k. It is the bucket's LOWER bound
-// γ^k scaled by (1+α), matching DataDog's
-// logarithmic_mapping.go `Value = LowerBound(index) * (1 + RelativeAccuracy())`.
-// This choice makes the relative error EXACTLY α at both bucket edges — the
-// log-midpoint γ^(k+0.5) used previously gave edge error √γ−1 (≈ α + α²/2 > α),
-// silently violating the sketch's advertised α-accuracy guarantee near a
-// bucket edge (sketchlib-go#73 / asap_sketchlib#70 item 1).
+// Value returns the representative of bucket k: its lower bound γ^k scaled by
+// (1+α), so the relative error is exactly α at both bucket edges.
 func (m IndexMapping) Value(k int32) float64 {
-	return m.LowerBound(k) * (1 + m.RelativeAccuracy())
+	return m.LowerBound(k) * (1 + m.alpha)
 }
 
 // LowerBound returns the lower edge γ^k of bucket k.
@@ -440,6 +433,15 @@ func (d *DDSketch) addToSum(delta float64) {
 	d.sum = next
 }
 
+// resetScalarsIfEmpty restores the empty sum/min/max once the count reaches 0.
+func (d *DDSketch) resetScalarsIfEmpty() {
+	if d.count == 0 {
+		d.sum = 0
+		d.min = math.Inf(1)
+		d.max = math.Inf(-1)
+	}
+}
+
 // InsertWithHash implements common.Sketch.
 // It interprets the hash as a numerical value (casting uint64 to float64).
 // This allows tracking distributions of integer-like values (e.g., latencies in ns).
@@ -582,18 +584,21 @@ func (d *DDSketch) mergeBuckets(a *Buckets, b *Buckets) {
 // ---------------- Quantile ----------------
 
 // Quantile returns the value at quantile q in [0, 1], walking negative buckets
-// in descending index order, then zeros, then positive buckets ascending; q == 1
-// returns the highest non-empty positive bucket's representative.
+// in descending index order, then zeros, then positive buckets ascending. Bucket
+// values are capped to [min, max]; q == 0 returns min and q == 1 returns max.
 func (d *DDSketch) Quantile(q float64) (float64, bool) {
 	if d.count == 0 || q < 0 || q > 1 {
 		return 0, false
 	}
-
 	if q == 0 {
 		return d.min, true
 	}
+	if q == 1 {
+		return d.max, true
+	}
 
 	rank := uint64(math.Ceil(q * float64(d.count)))
+	clamp := func(v float64) float64 { return math.Min(math.Max(v, d.min), d.max) }
 
 	var seen uint64
 	if !d.negative.IsEmpty() {
@@ -604,8 +609,7 @@ func (d *DDSketch) Quantile(q float64) (float64, bool) {
 			}
 			seen += neg[i]
 			if seen >= rank {
-				v := -d.mapping.Value(d.negative.offset + int32(i))
-				return math.Min(math.Max(v, d.min), d.max), true
+				return clamp(-d.mapping.Value(d.negative.offset + int32(i))), true
 			}
 		}
 	}
@@ -614,45 +618,18 @@ func (d *DDSketch) Quantile(q float64) (float64, bool) {
 		return 0, true
 	}
 
-	if d.store.counts == nil {
-		return d.max, true
-	}
-
-	counts := d.store.counts.AsSlice()
-
-	topVal := d.max
-	for i := len(counts) - 1; i >= 0; i-- {
-		if counts[i] != 0 {
-			topVal = d.mapping.Value(d.store.offset + int32(i))
-			break
-		}
-	}
-
-	if q == 1 {
-		return topVal, true
-	}
-
-	for i, c := range counts {
-		if c == 0 {
-			continue
-		}
-		seen += c
-		if seen >= rank {
-			k := d.store.offset + int32(i)
-			v := d.mapping.Value(k)
-
-			// clamp for safety
-			if v < d.min {
-				v = d.min
+	if !d.store.IsEmpty() {
+		for i, c := range d.store.counts.AsSlice() {
+			if c == 0 {
+				continue
 			}
-			if v > topVal {
-				v = topVal
+			seen += c
+			if seen >= rank {
+				return clamp(d.mapping.Value(d.store.offset + int32(i))), true
 			}
-			return v, true
 		}
 	}
-
-	return topVal, true
+	return d.max, true
 }
 
 // QueryWithHash implements common.Sketch.
@@ -748,7 +725,8 @@ func (d *DDSketch) addOneGOS(k int32) (newCount uint64, firstTouch bool) {
 // adjusted to match — the local edge-side copy now reflects "accumulated
 // since this bucket was last sent", exactly like Update's running d.count
 // already does across resets) and the crossing is reported via
-// DDSketchGOSUpdate. threshold==0 disables the check entirely and behaves
+// DDSketchGOSUpdate; sum/min/max return to their empty values when the count
+// reaches 0. threshold==0 disables the check entirely and behaves
 // exactly like Update (no gosPopulated bookkeeping either — mirrors
 // CountSketch.UpdateStringGOS's threshold<=0 escape hatch), so callers can
 // toggle GOS mode without a second insert path.
@@ -800,6 +778,7 @@ func (d *DDSketch) UpdateGOS(v float64, threshold uint64) (crossed bool, update 
 	} else {
 		d.count = 0
 	}
+	d.resetScalarsIfEmpty()
 	d.gosPopulated--
 	return true, DDSketchGOSUpdate{Index: k, Count: newCount}
 }
@@ -876,9 +855,10 @@ func (d *DDSketch) addOneFast(k int32) uint64 {
 			prev := counts[idx]
 			counts[idx]++
 			d.count++
+			rep := d.mapping.Value(k)
+			d.addToSum(rep)
 			if prev == 0 {
 				// First write to this bucket: initialise min/max from representative.
-				rep := d.mapping.Value(k)
 				if rep < d.min {
 					d.min = rep
 				}
@@ -892,8 +872,9 @@ func (d *DDSketch) addOneFast(k int32) uint64 {
 	return d.AddToBucket(k, 1)
 }
 
-// ResetBucket zeroes bucket k and decrements d.count by the bucket's current count.
-// Used by DDSketchOcto.ResetCell to drain a worker-local bucket after emitting a delta.
+// ResetBucket zeroes bucket k and decrements d.count by the bucket's current count;
+// sum/min/max return to their empty values when the count reaches 0. Used by
+// DDSketchOcto.ResetCell to drain a worker-local bucket after emitting a delta.
 func (d *DDSketch) ResetBucket(k int32) {
 	if d.store.IsEmpty() {
 		return
@@ -913,23 +894,31 @@ func (d *DDSketch) ResetBucket(k int32) {
 	} else {
 		d.count = 0
 	}
+	d.resetScalarsIfEmpty()
 }
 
-// DrainBuckets calls f(k, count) for every non-zero bucket and then zeroes the
-// entire store (setting d.count = 0). Used by DDSketchOcto.Flush to ship all
-// worker-local sub-τ residuals to the aggregator at end-of-window.
+// DrainBuckets calls f(k, count) for every non-zero positive bucket, zeroes it and
+// subtracts it from d.count, resetting sum/min/max once the count reaches 0.
+// Used by DDSketchOcto.Flush to ship worker-local sub-τ residuals at end-of-window.
 func (d *DDSketch) DrainBuckets(f func(k int32, count uint64)) {
 	if d.store.IsEmpty() {
 		return
 	}
 	counts := d.store.counts.AsMutSlice()
+	var drained uint64
 	for i, c := range counts {
 		if c > 0 {
 			f(d.store.offset+int32(i), c)
 			counts[i] = 0
+			drained += c
 		}
 	}
-	d.count = 0
+	if d.count >= drained {
+		d.count -= drained
+	} else {
+		d.count = 0
+	}
+	d.resetScalarsIfEmpty()
 }
 
 // EachBucket calls f(k, count) for every non-zero bucket without modifying
