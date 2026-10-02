@@ -7,26 +7,12 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/wire/asapv1"
 )
 
-// MarshalASAPv1 encodes the sketch as an ASAPv1 Count Sketch. It fails for a
-// CounterFloat64 sketch, for a cell that is not an integer within the counter
-// type's range, and after a hash-only write that did not follow Mode.
+// MarshalASAPv1 encodes the sketch as an ASAPv1 Count Sketch. It fails where
+// wireCells does.
 func (s *CountSketch) MarshalASAPv1() ([]byte, error) {
-	if s.hashWriteForeign {
-		return nil, fmt.Errorf("countsketch: counters include a write from a precomputed hash that does not follow Mode")
-	}
-	counterType, err := s.CounterType.wireName()
+	counts, counterType, mode, err := s.wireCells()
 	if err != nil {
 		return nil, err
-	}
-	mode, err := s.Mode.wireName()
-	if err != nil {
-		return nil, err
-	}
-	if err := checkWireDims(s.Rows, s.Cols); err != nil {
-		return nil, err
-	}
-	if len(s.Count) != s.Rows {
-		return nil, fmt.Errorf("countsketch: %d count rows for %d rows", len(s.Count), s.Rows)
 	}
 	md := asapv1.NewMetadataWriter(1)
 	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)
@@ -36,19 +22,42 @@ func (s *CountSketch) MarshalASAPv1() ([]byte, error) {
 	md.Str("mode", mode)
 	p := asapv1.NewEncoder()
 	p.Array(1)
-	p.Array(s.Rows * s.Cols)
+	asapv1.EncodeInts(p, counts)
+	return asapv1.Marshal(asapv1.KindCountSketch, md, p)
+}
+
+// wireCells returns the cells row-major with the counter type and mode names.
+// It fails for a CounterFloat64 sketch, for a cell that is not an integer
+// within the counter type's range, and after a hash-only write that did not follow Mode.
+func (s *CountSketch) wireCells() (counts []int64, counterType, mode string, err error) {
+	if s.hashWriteForeign {
+		return nil, "", "", fmt.Errorf("countsketch: counters include a write from a precomputed hash that does not follow Mode")
+	}
+	if counterType, err = s.CounterType.wireName(); err != nil {
+		return nil, "", "", err
+	}
+	if mode, err = s.Mode.wireName(); err != nil {
+		return nil, "", "", err
+	}
+	if err := checkWireDims(s.Rows, s.Cols); err != nil {
+		return nil, "", "", err
+	}
+	if len(s.Count) != s.Rows {
+		return nil, "", "", fmt.Errorf("countsketch: %d count rows for %d rows", len(s.Count), s.Rows)
+	}
+	counts = make([]int64, 0, s.Rows*s.Cols)
 	for r, row := range s.Count {
 		if len(row) != s.Cols {
-			return nil, fmt.Errorf("countsketch: row %d has %d cols, want %d", r, len(row), s.Cols)
+			return nil, "", "", fmt.Errorf("countsketch: row %d has %d cols, want %d", r, len(row), s.Cols)
 		}
 		for c, v := range row {
 			if !s.CounterType.holds(v) {
-				return nil, fmt.Errorf("countsketch: cell (%d,%d) = %v is not an %s", r, c, v, counterType)
+				return nil, "", "", fmt.Errorf("countsketch: cell (%d,%d) = %v is not an %s", r, c, v, counterType)
 			}
-			p.Int(int64(v))
+			counts = append(counts, int64(v))
 		}
 	}
-	return asapv1.Marshal(asapv1.KindCountSketch, md, p)
+	return counts, counterType, mode, nil
 }
 
 // UnmarshalASAPv1 replaces the sketch with the ASAPv1 Count Sketch in b,
