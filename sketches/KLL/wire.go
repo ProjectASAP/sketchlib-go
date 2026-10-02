@@ -14,16 +14,13 @@ const (
 	itemTypeF64 = "f64"
 )
 
-// MarshalASAPv1 encodes the sketch as ASAPv1 kind KindKLLDynamic, with
-// item_type "f64" and the seed key present when the sketch carries a seed.
+// MarshalASAPv1 encodes the sketch as ASAPv1 kind KindKLLDynamic with
+// item_type "f64" and no seed key.
 func (s *KLLSketch) MarshalASAPv1() ([]byte, error) {
 	md := asapv1.NewMetadataWriter(1)
 	md.Uint("k", uint64(s.k))
 	md.Uint("m", uint64(s.m))
 	md.Str("item_type", itemTypeF64)
-	if s.seedSet {
-		md.Uint("seed", uint64(s.seed))
-	}
 	p := asapv1.NewEncoder()
 	if err := s.EncodeASAPv1Payload(p); err != nil {
 		return nil, err
@@ -68,16 +65,15 @@ func (s *KLLSketch) EncodeASAPv1Payload(e *asapv1.Encoder) error {
 }
 
 // DecodeASAPv1Payload reads metadata {metadata_version 1, k, m, item_type
-// "f64", optional seed} from md and one payload array from d.
+// "f64", optional seed} from md and one payload array from d. The decoded
+// sketch carries no seed, so Clear re-seeds its coin from the wall clock.
 func (s *KLLSketch) DecodeASAPv1Payload(md *asapv1.MetadataReader, d *asapv1.Decoder) error {
 	md.ExpectVersion(1)
 	k := int(md.Uint32("k"))
 	m := int(md.Uint32("m"))
 	md.ExpectStr("item_type", itemTypeF64)
-	seedSet := md.Has("seed")
-	var seed uint64
-	if seedSet {
-		seed = md.Uint64("seed")
+	if md.Has("seed") {
+		md.Uint64("seed")
 	}
 	if err := md.Finish(); err != nil {
 		return err
@@ -107,8 +103,6 @@ func (s *KLLSketch) DecodeASAPv1Payload(md *asapv1.MetadataReader, d *asapv1.Dec
 		m:         m,
 		numLevels: len(levels) - 1,
 		co:        coin{state: state, bitCache: bitCache, remainingBits: uint8(remaining)},
-		seed:      int64(seed),
-		seedSet:   seedSet,
 	}
 	s.bindStoresFromSlices()
 	s.rebuildCapacityCache()

@@ -11,10 +11,11 @@ import (
 	"github.com/ProjectASAP/sketchlib-go/wire/asapv1/asapv1test"
 )
 
+// sameState compares everything ASAPv1 carries or derives; the seed is not
+// carried.
 func sameState(a, b *KLLSketch) bool {
 	if a.k != b.k || a.m != b.m || a.numLevels != b.numLevels || a.co != b.co ||
-		a.seed != b.seed || a.seedSet != b.seedSet || a.capacityCache != b.capacityCache ||
-		a.topHeight != b.topHeight || a.level0Cap != b.level0Cap || !slices.Equal(a.levels, b.levels) {
+		a.capacityCache != b.capacityCache || a.topHeight != b.topHeight || a.level0Cap != b.level0Cap || !slices.Equal(a.levels, b.levels) {
 		return false
 	}
 	return slices.EqualFunc(a.items, b.items, func(x, y float64) bool {
@@ -66,7 +67,6 @@ func roundTrip(t *testing.T, s *KLLSketch) (*KLLSketch, []byte) {
 
 func TestASAPv1Golden(t *testing.T) {
 	known := InitWithSeed(200, 8, 42)
-	known.seed, known.seedSet = 0, false
 	for _, v := range []float64{2.5, -1.0, 0.0, 1e300, -0.125, 42.0, 3.0e-5} {
 		known.Update(v)
 	}
@@ -124,46 +124,42 @@ func TestASAPv1RoundTrip(t *testing.T) {
 }
 
 func TestASAPv1SeedKey(t *testing.T) {
-	metadata := func(s *KLLSketch) *asapv1.MetadataReader {
+	unseeded, _ := NewKLLSketch(200)
+	for name, s := range map[string]*KLLSketch{"seeded": seededSketch(t, 42, []float64{1}), "unseeded": unseeded} {
 		b, err := s.MarshalASAPv1()
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, md, _, err := asapv1.Split(b)
+		_, metadata, _, err := asapv1.Split(b)
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, err := asapv1.ReadMetadata(md)
+		md, err := asapv1.ReadMetadata(metadata)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return r
-	}
-	if md := metadata(seededSketch(t, 42, nil)); md.Uint64("seed") != 42 || md.Err() != nil {
-		t.Fatalf("seeded sketch: seed key missing or wrong: %v", md.Err())
-	}
-	if md := metadata(seededSketch(t, -1, nil)); md.Uint64("seed") != math.MaxUint64 || md.Err() != nil {
-		t.Fatalf("seed -1 must encode as its u64 bit pattern: %v", md.Err())
-	}
-	unseeded, _ := NewKLLSketch(200)
-	if metadata(unseeded).Has("seed") {
-		t.Fatal("unseeded sketch must omit the seed key")
+		if md.Has("seed") {
+			t.Errorf("%s: seed key written", name)
+		}
 	}
 }
 
-func TestASAPv1ClearAfterDecodeStaysDeterministic(t *testing.T) {
-	src := seededSketch(t, 42, randomValues(5000, 11))
-	a, _ := roundTrip(t, src)
-	b := seededSketch(t, 42, nil)
-	a.Clear()
-	b.Clear()
-	for _, v := range randomValues(3000, 12) {
-		a.Update(v)
-		b.Update(v)
+func TestASAPv1SeedKeyAcceptedAndDropped(t *testing.T) {
+	c := validCase()
+	c.seed = true
+	var s KLLSketch
+	if err := s.UnmarshalASAPv1(c.bytes(t)); err != nil {
+		t.Fatal(err)
 	}
-	ab, _ := a.MarshalASAPv1()
-	bb, _ := b.MarshalASAPv1()
-	asapv1test.Equal(t, ab, bb)
+	if s.seedSet {
+		t.Fatal("decoded sketch carries a seed")
+	}
+	again, err := s.MarshalASAPv1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.seed = false
+	asapv1test.Equal(t, again, c.bytes(t))
 }
 
 func TestASAPv1DecodeContinuesCompaction(t *testing.T) {
@@ -181,6 +177,7 @@ func TestASAPv1DecodeContinuesCompaction(t *testing.T) {
 type wireCase struct {
 	k, m, version uint64
 	itemType      string
+	seed          bool
 	extraKey      bool
 	levels        []uint64
 	items         []float64
@@ -199,6 +196,9 @@ func (c wireCase) bytes(t *testing.T) []byte {
 	md.Uint("k", c.k)
 	md.Uint("m", c.m)
 	md.Str("item_type", c.itemType)
+	if c.seed {
+		md.Uint("seed", 42)
+	}
 	if c.extraKey {
 		md.Uint("bogus", 1)
 	}
@@ -286,10 +286,7 @@ func TestASAPv1MarshalRejectsInvalidState(t *testing.T) {
 
 func TestASAPv1NestedPayload(t *testing.T) {
 	a := seededSketch(t, 42, randomValues(2000, 31))
-	a.seed, a.seedSet = 0, false
-	b := InitWithSeed(200, 8, 9)
-	b.seed, b.seedSet = 0, false
-	b.Update(-5)
+	b := seededSketch(t, 9, []float64{-5})
 
 	whole, err := a.MarshalASAPv1()
 	if err != nil {

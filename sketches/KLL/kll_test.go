@@ -431,9 +431,8 @@ func TestKLL_Quality_SpecificClear(t *testing.T) {
 //
 // Without a seed, KLL's compaction RNG is seeded from time.Now() so the
 // sketch state — and therefore the MarshalASAPv1 bytes — is non-reproducible
-// across two sketches fed identical inputs. Production code that restarts an aggregator processor would
-// emit different envelopes for the same input stream. The seedable
-// constructor restores byte-determinism end-to-end.
+// across two sketches fed identical inputs. Sketches built with the same seed
+// and fed the same inputs marshal to identical bytes, also after Clear.
 
 func TestKLL_Deterministic_SeededByteParity(t *testing.T) {
 	const k = 200

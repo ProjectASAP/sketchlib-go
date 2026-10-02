@@ -445,7 +445,7 @@ var File_sketchlib_proto protoreflect.FileDescriptor
 
 const file_sketchlib_proto_rawDesc = "" +
 	"\n" +
-	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a#countminsketch/countminsketch.proto\x1a\x1dcountsketch/countsketch.proto\x1a\rhll/hll.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\xa2\x05\n" +
+	"\x0fsketchlib.proto\x12\fsketchlib.v1\x1a\x13common/common.proto\x1a#countminsketch/countminsketch.proto\x1a\x1dcountsketch/countsketch.proto\x1a\rhll/hll.proto\x1a\x17ddsketch/ddsketch.proto\x1a\x15univmon/univmon.proto\x1a\x11hydra/hydra.proto\x1a\x1bcocosketch/cocosketch.proto\x1a!elasticsketch/elasticsketch.proto\"\xa7\x05\n" +
 	"\x0eSketchEnvelope\x12%\n" +
 	"\x0eformat_version\x18\x01 \x01(\rR\rformatVersion\x126\n" +
 	"\bproducer\x18\x02 \x01(\v2\x1a.sketchlib.v1.ProducerInfoR\bproducer\x123\n" +
@@ -460,7 +460,7 @@ const file_sketchlib_proto_rawDesc = "" +
 	"\x04coco\x18\x11 \x01(\v2\x1d.sketchlib.v1.CocoSketchStateH\x00R\x04coco\x126\n" +
 	"\aelastic\x18\x12 \x01(\v2\x1a.sketchlib.v1.ElasticStateH\x00R\aelastic\x12\x19\n" +
 	"\bsample_p\x18\x04 \x01(\x01R\asamplePB\x0e\n" +
-	"\fsketch_stateJ\x04\b\r\x10\x0eJ\x04\b\x13\x10 \"\xfb\x02\n" +
+	"\fsketch_stateJ\x04\b\r\x10\x0eJ\x04\b\x13\x10 R\x03kll\"\xfb\x02\n" +
 	"\x13SketchDeltaEnvelope\x12#\n" +
 	"\rpartition_key\x18\x01 \x01(\tR\fpartitionKey\x12&\n" +
 	"\x0fwindow_start_ms\x18\x02 \x01(\x03R\rwindowStartMs\x12&\n" +
