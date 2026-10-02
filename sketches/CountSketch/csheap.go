@@ -5,7 +5,6 @@ import (
 	"math"
 
 	"github.com/ProjectASAP/sketchlib-go/common"
-	"github.com/ProjectASAP/sketchlib-go/common/storage"
 	"github.com/ProjectASAP/sketchlib-go/wire/asapv1"
 )
 
@@ -14,9 +13,9 @@ import (
 // from and to a CountSketch.
 type CSHeap struct {
 	Rows, Cols int
-	// CounterType is "i32" or "i64"; Mode is "fast" or "regular".
-	CounterType string
-	Mode        string
+	// CounterType is CounterInt32 or CounterInt64.
+	CounterType CounterType
+	Mode        Mode
 	// Counts holds Rows*Cols signed cells, row-major.
 	Counts []int64
 	// K is the heap capacity; Heap holds at most K distinct keys.
@@ -24,57 +23,20 @@ type CSHeap struct {
 	Heap []common.Item
 }
 
-const (
-	counterTypeI32 = "i32"
-	counterTypeI64 = "i64"
-	modeFast       = "fast"
-	modeRegular    = "regular"
-)
-
-func checkCounterType(counterType string) error {
-	if counterType != counterTypeI32 && counterType != counterTypeI64 {
-		return fmt.Errorf("countsketch: CSHeap counter_type %q is not i32 or i64", counterType)
-	}
-	return nil
-}
-
-func checkMode(mode string) error {
-	if mode != modeFast && mode != modeRegular {
-		return fmt.Errorf("countsketch: CSHeap mode %q is not fast or regular", mode)
-	}
-	return nil
-}
-
-func checkDims(rows, cols uint64) error {
-	if rows == 0 || cols == 0 {
-		return fmt.Errorf("countsketch: CSHeap dimensions must be non-zero: rows=%d, cols=%d", rows, cols)
-	}
-	if maxRows := uint64(len(common.SeedList())); rows > maxRows {
-		return fmt.Errorf("countsketch: CSHeap rows %d exceeds the %d seeds", rows, maxRows)
-	}
-	if cols > math.MaxUint32 {
-		return fmt.Errorf("countsketch: CSHeap cols %d exceeds the u32 metadata field", cols)
-	}
-	return nil
-}
-
 func (h *CSHeap) validate() error {
-	if h.Rows < 0 || h.Cols < 0 {
-		return fmt.Errorf("countsketch: CSHeap dimensions must be positive: rows=%d, cols=%d", h.Rows, h.Cols)
-	}
-	if err := checkDims(uint64(h.Rows), uint64(h.Cols)); err != nil {
+	if _, err := h.CounterType.wireName(); err != nil {
 		return err
 	}
-	if err := checkCounterType(h.CounterType); err != nil {
+	if _, err := h.Mode.wireName(); err != nil {
 		return err
 	}
-	if err := checkMode(h.Mode); err != nil {
+	if err := checkWireDims(h.Rows, h.Cols); err != nil {
 		return err
 	}
 	if len(h.Counts) != h.Rows*h.Cols {
 		return fmt.Errorf("countsketch: CSHeap counts length %d != rows*cols %d", len(h.Counts), h.Rows*h.Cols)
 	}
-	if h.CounterType == counterTypeI32 {
+	if h.CounterType == CounterInt32 {
 		for i, v := range h.Counts {
 			if v < math.MinInt32 || v > math.MaxInt32 {
 				return fmt.Errorf("countsketch: CSHeap cell %d value %d overflows i32", i, v)
@@ -86,16 +48,6 @@ func (h *CSHeap) validate() error {
 	}
 	if len(h.Heap) > h.K {
 		return fmt.Errorf("countsketch: CSHeap heap holds %d entries, more than k=%d", len(h.Heap), h.K)
-	}
-	return nil
-}
-
-// checkFastGeometry fails unless rows x cols uses the 64-bit packed hash, the
-// one geometry where CountSketch places keys as ASAPv1 fast mode does.
-func checkFastGeometry(rows, cols int) error {
-	if storage.HashModeForMatrix(rows, cols) != storage.MatrixHashPacked64 {
-		return fmt.Errorf("countsketch: a %dx%d CountSketch does not hash in ASAPv1 fast mode: "+
-			"rows*(log2(cols)+1) must be at most 64", rows, cols)
 	}
 	return nil
 }
@@ -114,13 +66,15 @@ func (h *CSHeap) MarshalASAPv1() ([]byte, error) {
 	if err := h.validate(); err != nil {
 		return nil, err
 	}
+	counterType, _ := h.CounterType.wireName()
+	mode, _ := h.Mode.wireName()
 	es := heapEntries(h.Heap)
 	md := asapv1.NewMetadataWriter(1)
 	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)
 	md.Uint("rows", uint64(h.Rows))
 	md.Uint("cols", uint64(h.Cols))
-	md.Str("counter_type", h.CounterType)
-	md.Str("mode", h.Mode)
+	md.Str("counter_type", counterType)
+	md.Str("mode", mode)
 	md.Uint("k", uint64(h.K))
 	md.Str("key_type", asapv1.HeapKeyTypeOf(es))
 	p := asapv1.NewEncoder()
@@ -141,20 +95,22 @@ func (h *CSHeap) UnmarshalASAPv1(b []byte) error {
 	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexMatrix)
 	rows := md.Uint32("rows")
 	cols := md.Uint32("cols")
-	counterType := md.Str("counter_type")
-	mode := md.Str("mode")
+	counterTypeName := md.Str("counter_type")
+	modeName := md.Str("mode")
 	k := md.Uint32("k")
 	keyType := md.Str("key_type")
 	if err := md.Finish(); err != nil {
 		return err
 	}
-	if err := checkDims(uint64(rows), uint64(cols)); err != nil {
+	counterType, err := parseCounterType(counterTypeName)
+	if err != nil {
 		return err
 	}
-	if err := checkCounterType(counterType); err != nil {
+	mode, err := parseMode(modeName)
+	if err != nil {
 		return err
 	}
-	if err := checkMode(mode); err != nil {
+	if err := checkWireDims(int(rows), int(cols)); err != nil {
 		return err
 	}
 	if !asapv1.IsHeapKeyType(keyType) {
@@ -167,7 +123,7 @@ func (h *CSHeap) UnmarshalASAPv1(b []byte) error {
 	}
 	counts := make([]int64, n)
 	for i := range counts {
-		if counterType == counterTypeI32 {
+		if counterType == CounterInt32 {
 			counts[i] = int64(p.Int32())
 		} else {
 			counts[i] = p.Int()
@@ -192,25 +148,16 @@ func (h *CSHeap) UnmarshalASAPv1(b []byte) error {
 	return nil
 }
 
-// ToCSHeap returns s's matrix as i64 cells in fast mode, with a heap of capacity
-// k holding the k Space-Saving candidates of highest positive estimate. It fails
-// when k < 0, a cell is not an i64, or s's geometry is not fast mode's.
+// ToCSHeap returns s's matrix, counter type and mode, with a heap of capacity k
+// holding the k Space-Saving candidates of highest positive estimate. It fails
+// where MarshalASAPv1 does, and when k < 0.
 func (s *CountSketch) ToCSHeap(k int) (*CSHeap, error) {
 	if k < 0 {
 		return nil, fmt.Errorf("countsketch: ToCSHeap: k %d is negative", k)
 	}
-	if err := checkFastGeometry(s.Rows, s.Cols); err != nil {
+	counts, _, _, err := s.wireCells()
+	if err != nil {
 		return nil, err
-	}
-	counts := make([]int64, 0, s.Rows*s.Cols)
-	for r := 0; r < s.Rows; r++ {
-		for c, v := range s.Count[r] {
-			iv, ok := integralCellDelta(v)
-			if !ok {
-				return nil, fmt.Errorf("countsketch: ToCSHeap: cell (%d,%d) value %v is not an i64", r, c, v)
-			}
-			counts = append(counts, iv)
-		}
 	}
 	var es []asapv1.HeapEntry[string]
 	if s.SS != nil {
@@ -228,22 +175,16 @@ func (s *CountSketch) ToCSHeap(k int) (*CSHeap, error) {
 	}
 	return &CSHeap{
 		Rows: s.Rows, Cols: s.Cols,
-		CounterType: counterTypeI64, Mode: modeFast,
+		CounterType: s.CounterType, Mode: s.Mode,
 		Counts: counts, K: k, Heap: heap,
 	}, nil
 }
 
-// ToCountSketch returns a CountSketch holding h's cells, h's heap as its TopK,
-// L2 as each row's sum of squares and an empty Space-Saving tracker. It fails
-// unless h is valid, in fast mode and geometry, and float64 holds every cell.
+// ToCountSketch returns a CountSketch with h's counter type, mode and cells,
+// h's heap as its TopK, L2 as each row's sum of squares and an empty
+// Space-Saving tracker. It fails unless h is valid and float64 holds every cell.
 func (h *CSHeap) ToCountSketch() (*CountSketch, error) {
 	if err := h.validate(); err != nil {
-		return nil, err
-	}
-	if h.Mode != modeFast {
-		return nil, fmt.Errorf("countsketch: ToCountSketch: mode %q, CountSketch hashes in fast mode", h.Mode)
-	}
-	if err := checkFastGeometry(h.Rows, h.Cols); err != nil {
 		return nil, err
 	}
 	keys := make([]string, len(h.Heap))
@@ -257,11 +198,12 @@ func (h *CSHeap) ToCountSketch() (*CountSketch, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.CounterType, s.Mode = h.CounterType, h.Mode
 	for r := 0; r < h.Rows; r++ {
 		for c := 0; c < h.Cols; c++ {
 			v := h.Counts[r*h.Cols+c]
 			f := float64(v)
-			if f >= 0x1p63 || int64(f) != v {
+			if !h.CounterType.holds(f) || int64(f) != v {
 				return nil, fmt.Errorf("countsketch: ToCountSketch: cell (%d,%d) value %d is not exact in float64", r, c, v)
 			}
 			s.Count[r][c] = f

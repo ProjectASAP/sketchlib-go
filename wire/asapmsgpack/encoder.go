@@ -12,9 +12,9 @@
 //     `[]byte` as `bin` by default, producing bytes that cannot be
 //     deserialized on the Rust side.
 //
-//   - The contract only covers four sketch types today (CountMin,
-//     CountSketch with heap, DDSketch, HLL). Writing a 50-line encoder shim gives
-//     byte-exact control and drops a dependency.
+//   - The contract only covers three sketch types today (CountMin,
+//     DDSketch, HLL). Writing a 50-line encoder shim gives byte-exact
+//     control and drops a dependency.
 //
 // Wire-format reference for each supported sketch type lives alongside
 // the `Marshal*` function in its per-sketch file. Golden fixtures pinned

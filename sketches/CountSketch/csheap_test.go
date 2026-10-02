@@ -15,7 +15,7 @@ import (
 
 func csHeapFixture() *CSHeap {
 	return &CSHeap{
-		Rows: 2, Cols: 4, CounterType: "i64", Mode: "regular",
+		Rows: 2, Cols: 4, CounterType: CounterInt64, Mode: ModeRegular,
 		Counts: []int64{0, 127, 128, 65536, -1, -33, -32768, -2147483648},
 		K:      5,
 		Heap: []common.Item{
@@ -43,12 +43,12 @@ func TestCSHeapMarshalSortsHeap(t *testing.T) {
 
 func TestCSHeapRoundTrips(t *testing.T) {
 	for name, h := range map[string]*CSHeap{
-		"i32 fast": {Rows: 3, Cols: 2, CounterType: "i32", Mode: "fast",
+		"i32 fast": {Rows: 3, Cols: 2, CounterType: CounterInt32, Mode: ModeFast,
 			Counts: []int64{math.MinInt32, math.MaxInt32, 0, -1, 1, 7}, K: 2,
 			Heap: []common.Item{{Key: "x", Count: -4}}},
-		"empty heap": {Rows: 1, Cols: 1, CounterType: "i64", Mode: "regular",
+		"empty heap": {Rows: 1, Cols: 1, CounterType: CounterInt64, Mode: ModeRegular,
 			Counts: []int64{math.MinInt64}, K: 0, Heap: []common.Item{}},
-		"20 rows": {Rows: 20, Cols: 1, CounterType: "i64", Mode: "fast",
+		"20 rows": {Rows: 20, Cols: 1, CounterType: CounterInt64, Mode: ModeFast,
 			Counts: make([]int64, 20), K: 3, Heap: []common.Item{}},
 	} {
 		b, err := h.MarshalASAPv1()
@@ -66,7 +66,7 @@ func TestCSHeapRoundTrips(t *testing.T) {
 }
 
 func TestCSHeapEmptyHeapKeyType(t *testing.T) {
-	h := &CSHeap{Rows: 1, Cols: 2, CounterType: "i64", Mode: "fast", Counts: []int64{1, 2}, K: 4}
+	h := &CSHeap{Rows: 1, Cols: 2, CounterType: CounterInt64, Mode: ModeFast, Counts: []int64{1, 2}, K: 4}
 	b, err := h.MarshalASAPv1()
 	if err != nil {
 		t.Fatal(err)
@@ -83,14 +83,16 @@ func TestCSHeapEmptyHeapKeyType(t *testing.T) {
 
 func TestCSHeapMarshalRejects(t *testing.T) {
 	for name, mutate := range map[string]func(h *CSHeap){
-		"f64 counter":       func(h *CSHeap) { h.CounterType = "f64" },
-		"unknown mode":      func(h *CSHeap) { h.Mode = "packed" },
+		"f64 counter":       func(h *CSHeap) { h.CounterType = CounterFloat64 },
+		"unknown mode":      func(h *CSHeap) { h.Mode = Mode(7) },
 		"zero rows":         func(h *CSHeap) { h.Rows, h.Counts = 0, nil },
 		"zero cols":         func(h *CSHeap) { h.Cols, h.Counts = 0, nil },
 		"21 rows":           func(h *CSHeap) { h.Rows, h.Cols, h.Counts = 21, 1, make([]int64, 21) },
+		"cols not pow2":     func(h *CSHeap) { h.Rows, h.Cols, h.Counts = 1, 3, make([]int64, 3) },
+		"unknown counter":   func(h *CSHeap) { h.CounterType = CounterType(9) },
 		"short counts":      func(h *CSHeap) { h.Counts = h.Counts[:7] },
-		"i32 overflow":      func(h *CSHeap) { h.CounterType, h.Counts[1] = "i32", math.MaxInt32+1 },
-		"i32 underflow":     func(h *CSHeap) { h.CounterType = "i32"; h.Counts[7] = math.MinInt32 - 1 },
+		"i32 overflow":      func(h *CSHeap) { h.CounterType, h.Counts[1] = CounterInt32, math.MaxInt32+1 },
+		"i32 underflow":     func(h *CSHeap) { h.CounterType = CounterInt32; h.Counts[7] = math.MinInt32 - 1 },
 		"negative k":        func(h *CSHeap) { h.K, h.Heap = -1, nil },
 		"k beyond u32":      func(h *CSHeap) { h.K = math.MaxUint32 + 1 },
 		"more entries":      func(h *CSHeap) { h.K = 3 },
@@ -174,6 +176,7 @@ func TestCSHeapUnmarshalRejects(t *testing.T) {
 		"f64 counter":        func(r *rawCSHeap) { r.counterType = "f64" },
 		"unknown mode":       func(r *rawCSHeap) { r.mode = "Fast" },
 		"zero rows":          func(r *rawCSHeap) { r.rows, r.counts = 0, nil },
+		"cols not pow2":      func(r *rawCSHeap) { r.rows, r.cols, r.counts = 1, 3, make([]int64, 3) },
 		"zero cols":          func(r *rawCSHeap) { r.cols, r.counts = 0, nil },
 		"21 rows":            func(r *rawCSHeap) { r.rows, r.cols, r.counts = 21, 1, make([]int64, 21) },
 		"huge declared dims": func(r *rawCSHeap) { r.rows, r.cols = 20, 1<<24 },
@@ -213,12 +216,19 @@ func TestCSHeapEmptyHeapOfAnyKeyTypeDecodes(t *testing.T) {
 	}
 }
 
-func populatedSketch(t *testing.T) *CountSketch {
+func intSketch(t *testing.T, rows, cols int, mode Mode) *CountSketch {
 	t.Helper()
-	s, err := NewCountSketch(4, 64)
+	s, err := NewCountSketch(rows, cols)
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.CounterType, s.Mode = CounterInt64, mode
+	return s
+}
+
+func populatedSketch(t *testing.T) *CountSketch {
+	t.Helper()
+	s := intSketch(t, 4, 64, ModeFast)
 	for i, key := range []string{"a", "b", "c", "d", "e", "a", "a", "b"} {
 		s.UpdateString(key, float64(i+1))
 	}
@@ -255,7 +265,7 @@ func TestCountSketchThroughCSHeap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h.CounterType != "i64" || h.Mode != "fast" || h.K != 3 {
+	if h.CounterType != CounterInt64 || h.Mode != ModeFast || h.K != 3 {
 		t.Fatalf("ToCSHeap gave %+v", h)
 	}
 	if want := topByEstimate(s, []string{"a", "b", "c", "d", "e"}, 3); !reflect.DeepEqual(h.Heap, want) {
@@ -293,10 +303,7 @@ func TestCountSketchThroughCSHeap(t *testing.T) {
 }
 
 func TestToCSHeapBuildsHeapFromCandidates(t *testing.T) {
-	s, err := NewCountSketch(5, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := intSketch(t, 5, 1024, ModeFast)
 	for key, n := range map[string]int{"/checkout": 100, "/cart": 40, "/home": 5} {
 		for range n {
 			s.UpdateString(key, 1)
@@ -327,10 +334,7 @@ func TestToCSHeapBuildsHeapFromCandidates(t *testing.T) {
 }
 
 func TestToCSHeapKeepsTopK(t *testing.T) {
-	s, err := NewCountSketch(5, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := intSketch(t, 5, 1024, ModeFast)
 	for _, it := range []common.Item{{Key: "b", Count: 5}, {Key: "z", Count: 9}, {Key: "a", Count: 5}, {Key: "c", Count: -1}} {
 		s.UpdateString(it.Key, float64(it.Count))
 		if got := s.EstimateStringCount(it.Key); got != it.Count {
@@ -355,10 +359,7 @@ func TestToCSHeapKeepsTopK(t *testing.T) {
 }
 
 func TestToCSHeapEmptyWithoutCandidates(t *testing.T) {
-	s, err := NewCountSketch(3, 256)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := intSketch(t, 3, 256, ModeFast)
 	h, err := s.ToCSHeap(10)
 	if err != nil {
 		t.Fatal(err)
@@ -390,12 +391,80 @@ func TestToCSHeapRejects(t *testing.T) {
 	if _, err := populatedSketch(t).ToCSHeap(-1); err == nil {
 		t.Error("negative k converted")
 	}
-	wide, err := NewCountSketch(5, 8192)
-	if err != nil {
-		t.Fatal(err)
+	s = populatedSketch(t)
+	s.CounterType = CounterFloat64
+	if _, err := s.ToCSHeap(3); err == nil {
+		t.Error("float64-counter sketch converted")
 	}
+	s = populatedSketch(t)
+	s.CounterType = CounterInt32
+	s.Count[0][0] = math.MaxInt32 + 1
+	if _, err := s.ToCSHeap(3); err == nil {
+		t.Error("i32 sketch with a cell past MaxInt32 converted")
+	}
+	wide := intSketch(t, 5, 8192, ModeFast)
+	wide.UpdateString("k", 1)
+	wide.InsertWithHashAndValue(7, 1)
 	if _, err := wide.ToCSHeap(3); err == nil {
-		t.Error("5x8192 sketch converted to fast mode")
+		t.Error("sketch with a foreign hash write converted")
+	}
+}
+
+func TestToCSHeapFollowsCounterTypeAndMode(t *testing.T) {
+	for _, c := range []struct {
+		rows, cols int
+		counter    CounterType
+		mode       Mode
+	}{
+		{4, 64, CounterInt32, ModeRegular},
+		{4, 64, CounterInt64, ModeFast},
+		{5, 8192, CounterInt64, ModeFast},
+		{5, 8192, CounterInt32, ModeRegular},
+	} {
+		s := intSketch(t, c.rows, c.cols, c.mode)
+		s.CounterType = c.counter
+		for i, key := range []string{"x", "y", "z", "x"} {
+			s.UpdateString(key, float64(i+1))
+		}
+		h, err := s.ToCSHeap(2)
+		if err != nil {
+			t.Fatalf("%+v: %v", c, err)
+		}
+		if h.CounterType != c.counter || h.Mode != c.mode {
+			t.Fatalf("%+v: CSHeap has %v / %v", c, h.CounterType, h.Mode)
+		}
+		if want := topByEstimate(s, []string{"x", "y", "z"}, 2); !reflect.DeepEqual(h.Heap, want) {
+			t.Fatalf("%+v: heap %v, want %v", c, h.Heap, want)
+		}
+		b, err := h.MarshalASAPv1()
+		if err != nil {
+			t.Fatalf("%+v: %v", c, err)
+		}
+		var decoded CSHeap
+		if err := decoded.UnmarshalASAPv1(b); err != nil {
+			t.Fatalf("%+v: %v", c, err)
+		}
+		back, err := decoded.ToCountSketch()
+		if err != nil {
+			t.Fatalf("%+v: %v", c, err)
+		}
+		if back.CounterType != c.counter || back.Mode != c.mode || !reflect.DeepEqual(back.Count, s.Count) {
+			t.Fatalf("%+v: ToCountSketch gave %v / %v", c, back.CounterType, back.Mode)
+		}
+		for _, key := range []string{"x", "y", "z", "w"} {
+			if got, want := back.EstimateStringCount(key), s.EstimateStringCount(key); got != want {
+				t.Errorf("%+v: estimate %q %d, want %d", c, key, got, want)
+			}
+		}
+		plain, err := s.MarshalASAPv1()
+		if err != nil {
+			t.Fatalf("%+v: %v", c, err)
+		}
+		again, err := back.MarshalASAPv1()
+		if err != nil {
+			t.Fatalf("%+v: %v", c, err)
+		}
+		asapv1test.Equal(t, again, plain)
 	}
 }
 
@@ -419,14 +488,18 @@ func TestLargeCellsSurviveConversion(t *testing.T) {
 func TestToCountSketchRejects(t *testing.T) {
 	fast := func() *CSHeap {
 		h := csHeapFixture()
-		h.Mode = "fast"
+		h.Mode = ModeFast
 		return h
 	}
 	if _, err := fast().ToCountSketch(); err != nil {
 		t.Fatalf("fast fixture: %v", err)
 	}
-	if _, err := csHeapFixture().ToCountSketch(); err == nil {
-		t.Error("regular mode converted")
+	regular, err := csHeapFixture().ToCountSketch()
+	if err != nil {
+		t.Fatalf("regular fixture: %v", err)
+	}
+	if regular.Mode != ModeRegular || regular.CounterType != CounterInt64 {
+		t.Errorf("regular fixture gave %v / %v", regular.CounterType, regular.Mode)
 	}
 	for _, v := range []int64{1<<53 + 1, math.MaxInt64, math.MinInt64 + 1} {
 		h := fast()
@@ -452,7 +525,7 @@ func TestToCountSketchRejects(t *testing.T) {
 	}
 	h = fast()
 	h.Rows, h.Cols, h.Counts = 5, 8192, make([]int64, 5*8192)
-	if _, err := h.ToCountSketch(); err == nil {
-		t.Error("5x8192 converted")
+	if _, err := h.ToCountSketch(); err != nil {
+		t.Errorf("5x8192: %v", err)
 	}
 }
