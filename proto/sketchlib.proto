@@ -32,7 +32,6 @@ import "common/common.proto";
 import "countminsketch/countminsketch.proto";
 import "countsketch/countsketch.proto";
 import "hll/hll.proto";
-import "kll/kll.proto";
 import "ddsketch/ddsketch.proto";
 import "univmon/univmon.proto";
 import "hydra/hydra.proto";
@@ -69,7 +68,6 @@ message SketchEnvelope {
     CountMinState    count_min    = 10;
     CountSketchState count_sketch = 11;
     HyperLogLogState hll          = 12;
-    KLLState         kll          = 13;
     DDSketchState    ddsketch     = 14;
     UnivMonState     univmon      = 15;
     HydraState       hydra        = 16;
@@ -77,6 +75,7 @@ message SketchEnvelope {
     ElasticState     elastic      = 18;
   }
 
+  reserved 13;
   reserved 19 to 31;  // Reserved for future sketch types.
 
   // Geometric / NitroSketch sampling probability for the producing sketch.

@@ -8,8 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/ProjectASAP/sketchlib-go/testdata"
 )
 
@@ -432,9 +430,8 @@ func TestKLL_Quality_SpecificClear(t *testing.T) {
 // ======================
 //
 // Without a seed, KLL's compaction RNG is seeded from time.Now() so the
-// sketch state — and therefore the SerializePortable / SerializeProtoBytes
-// wire bytes — is non-reproducible across two sketches fed identical
-// inputs. Production code that restarts an aggregator processor would
+// sketch state — and therefore the MarshalASAPv1 bytes — is non-reproducible
+// across two sketches fed identical inputs. Production code that restarts an aggregator processor would
 // emit different envelopes for the same input stream. The seedable
 // constructor restores byte-determinism end-to-end.
 
@@ -463,25 +460,17 @@ func TestKLL_Deterministic_SeededByteParity(t *testing.T) {
 		b.Update(v)
 	}
 
-	envA, err := a.SerializePortable()
+	bytesA, err := a.MarshalASAPv1()
 	if err != nil {
-		t.Fatalf("SerializePortable(a): %v", err)
+		t.Fatalf("MarshalASAPv1(a): %v", err)
 	}
-	envB, err := b.SerializePortable()
+	bytesB, err := b.MarshalASAPv1()
 	if err != nil {
-		t.Fatalf("SerializePortable(b): %v", err)
-	}
-	bytesA, err := proto.Marshal(envA)
-	if err != nil {
-		t.Fatalf("Marshal(a): %v", err)
-	}
-	bytesB, err := proto.Marshal(envB)
-	if err != nil {
-		t.Fatalf("Marshal(b): %v", err)
+		t.Fatalf("MarshalASAPv1(b): %v", err)
 	}
 	if !bytes.Equal(bytesA, bytesB) {
 		t.Fatalf("seeded KLL sketches with identical inputs produced "+
-			"different SerializePortable bytes:\n a (%d bytes) head=%x\n b (%d bytes) head=%x",
+			"different MarshalASAPv1 bytes:\n a (%d bytes) head=%x\n b (%d bytes) head=%x",
 			len(bytesA), firstNBytes(bytesA, 16),
 			len(bytesB), firstNBytes(bytesB, 16))
 	}
@@ -503,8 +492,8 @@ func TestKLL_Deterministic_DifferentSeedsDiffer(t *testing.T) {
 		a.Update(v)
 		b.Update(v)
 	}
-	bytesA, _ := a.SerializeProtoBytes()
-	bytesB, _ := b.SerializeProtoBytes()
+	bytesA, _ := a.MarshalASAPv1()
+	bytesB, _ := b.MarshalASAPv1()
 	if bytes.Equal(bytesA, bytesB) {
 		t.Fatalf("expected different seeds to produce different bytes; got identical %d-byte payloads", len(bytesA))
 	}
@@ -534,8 +523,8 @@ func TestKLL_Deterministic_ClearPreservesSeed(t *testing.T) {
 		a.Update(v)
 		b.Update(v)
 	}
-	bytesA, _ := a.SerializeProtoBytes()
-	bytesB, _ := b.SerializeProtoBytes()
+	bytesA, _ := a.MarshalASAPv1()
+	bytesB, _ := b.MarshalASAPv1()
 	if !bytes.Equal(bytesA, bytesB) {
 		t.Fatalf("Clear() lost determinism: post-Clear sketch (%d bytes) "+
 			"diverges from fresh seeded sketch (%d bytes)", len(bytesA), len(bytesB))

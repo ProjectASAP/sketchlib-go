@@ -1,12 +1,11 @@
 // xtest_producer — Cross-language integration test: Go producer side.
 //
-// Inserts synthetic data into nine sketch types, serializes each as a portable
+// Inserts synthetic data into eight sketch types, serializes each as a portable
 // protobuf SketchEnvelope, and writes the binary files to $XTEST_DIR.
 //
 // Output files:
 //
 //	countmin.pb     CountMinState     (float64 counters)
-//	kll.pb          KLLState          (quantile items + coin RNG)
 //	ddsketch.pb     DDSketchState     (alpha + bucket array)
 //	hll.pb          HyperLogLogState  (DataFusion estimator)
 //	countsketch.pb  CountSketchState  (float64 signed counters)
@@ -37,7 +36,6 @@ import (
 	ddsketch "github.com/ProjectASAP/sketchlib-go/sketches/DDSketch"
 	elasticsketch "github.com/ProjectASAP/sketchlib-go/sketches/ElasticSKetch"
 	hll "github.com/ProjectASAP/sketchlib-go/sketches/HLL"
-	kll "github.com/ProjectASAP/sketchlib-go/sketches/KLL"
 
 	envpb "github.com/ProjectASAP/sketchlib-go/proto/sketch_envelope"
 )
@@ -74,23 +72,6 @@ func TestXtestProducer(t *testing.T) {
 	t.Logf("[CountMin] Step 3/3 — 'item:42' freq = %.0f (expect ≥ 101)",
 		cm.FastEstimateWithHash(hotHash))
 	writeEnvelope(t, outDir, "countmin.pb", tmust(cm.SerializePortable()))
-
-	// -----------------------------------------------------------------------
-	// KLL
-	// -----------------------------------------------------------------------
-	t.Log()
-	t.Log("[KLL] Step 1/3 — Create sketch (k=200)")
-	sk := kll.New()
-
-	t.Log("[KLL] Step 2/3 — Insert values 1.0 … 10 000.0")
-	for i := 1; i <= 10_000; i++ {
-		sk.Update(float64(i))
-	}
-	t.Logf("[KLL] Step 3/3 — p50≈%.1f  p99≈%.1f", sk.Quantile(0.50), sk.Quantile(0.99))
-	// Emit the RAW-F64 items[] form (the wire shape the ASAPQuery-backend
-	// runtime KLL decoder reconstructs); the value-offset fixed-point form is
-	// not consumable there. See SerializeProtoBytes / KLLWrapper.Snapshot.
-	writeEnvelope(t, outDir, "kll.pb", tmust(sk.SerializePortableRawF64()))
 
 	// -----------------------------------------------------------------------
 	// DDSketch
@@ -291,7 +272,7 @@ func TestXtestProducer(t *testing.T) {
 	// -----------------------------------------------------------------------
 	t.Log()
 	t.Log("=======================================================")
-	t.Log("  Producer complete — 9 sketches + 2 sampled written to " + outDir)
+	t.Log("  Producer complete — 8 sketches + 2 sampled written to " + outDir)
 	t.Log("=======================================================")
 }
 
