@@ -1,21 +1,36 @@
 package asapv1
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRegistry(t *testing.T) {
-	if len(kindNames) != 37 {
-		t.Fatalf("registry has %d ids, want 37", len(kindNames))
+	if len(registry) != 45 {
+		t.Fatalf("registry has %d ids, want 45", len(registry))
 	}
-	for kind, name := range kindNames {
-		if len(kind) != 2 || name == "" {
-			t.Errorf("registry entry %x = %q", string(kind), name)
+	payloads := 0
+	for kind, e := range registry {
+		if len(kind) != 2 || e.name == "" {
+			t.Fatalf("registry entry %x = %+v", string(kind), e)
 		}
+		if e.payload {
+			payloads++
+		}
+		if delta := kind[1]&0x80 != 0; delta != strings.HasSuffix(e.name, " delta") ||
+			delta && (!e.payload || e.name != registry[KindID([]byte{kind[0], kind[1] &^ 0x80})].name+" delta") {
+			t.Errorf("%v is not the delta of a registered state kind", kind)
+		}
+	}
+	if payloads != 36 {
+		t.Errorf("registry has %d ids with a payload, want 36", payloads)
 	}
 	cases := map[KindID]string{
 		KindHLLClassic:   "01 01 (HLL Classic)",
 		KindCountMin:     "02 00 (Count-Min)",
 		KindCSHeap:       "0a 00 (CSHeap)",
 		KindUnivMonQ:     "1a 00 (UnivMon-Q)",
+		KindRetired09:    "09 00 (retired)",
 		KindRetired1D:    "1d 00 (retired)",
 		"\x1e\x00":       "1e 00 (unregistered)",
 		"":               " (unregistered)",
