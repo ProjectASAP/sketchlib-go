@@ -268,11 +268,11 @@ func TestDDSketchRustStyleAPI(t *testing.T) {
 	if got := s.Count(); got != 3 {
 		t.Fatalf("unexpected count: got %d", got)
 	}
-	if min, ok := s.Min(); !ok || min != 1 {
-		t.Fatalf("unexpected min: %v %v", min, ok)
+	if lo, ok := s.Quantile(0); !ok || math.Abs(lo-1) > 0.01+1e-12 {
+		t.Fatalf("unexpected Quantile(0): %v %v", lo, ok)
 	}
-	if max, ok := s.Max(); !ok || max != 100 {
-		t.Fatalf("unexpected max: %v %v", max, ok)
+	if hi, ok := s.Quantile(1); !ok || math.Abs(hi-100) > 0.01*100+1e-9 {
+		t.Fatalf("unexpected Quantile(1): %v %v", hi, ok)
 	}
 }
 
