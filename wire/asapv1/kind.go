@@ -58,8 +58,11 @@ const (
 	KindEHSketchList             KindID = "\x14\x00"
 	KindEHUnivOptimized          KindID = "\x15\x00"
 	KindOctoSketch               KindID = "\x16\x00"
-	KindBloom                    KindID = "\x17\x00"
-	KindSpaceSaving              KindID = "\x18\x01"
+	KindBloom                    KindID = "\x17\x01"
+	// KindBloomWithInserted is the retired Bloom kind whose payload also
+	// carried the inserted counter: decoded with it dropped, never encoded.
+	KindBloomWithInserted KindID = "\x17\x00"
+	KindSpaceSaving       KindID = "\x18\x01"
 	// KindSpaceSavingWithTotal is the retired Space-Saving kind whose payload
 	// also carried total: decoded with total dropped, never encoded.
 	KindSpaceSavingWithTotal KindID = "\x18\x00"
@@ -125,6 +128,7 @@ var registry = map[KindID]kindEntry{
 	KindEHUnivOptimized:          {"EHUnivOptimized", false},
 	KindOctoSketch:               {"OctoSketch", false},
 	KindBloom:                    {"Bloom", true},
+	KindBloomWithInserted:        {"Bloom, retired", true},
 	KindSpaceSaving:              {"Space-Saving", true},
 	KindSpaceSavingWithTotal:     {"Space-Saving with total", true},
 	KindCountL2HH:                {"CountL2HH", true},
