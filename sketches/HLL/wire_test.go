@@ -3,6 +3,7 @@ package hll
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"reflect"
 	"testing"
 
@@ -16,15 +17,15 @@ import (
 type p12Sketch struct {
 	Kind      asapv1.KindID
 	Registers []uint8
-	HIP       [3]float64
+	HIPEst    float64
 }
 
 func (s *p12Sketch) MarshalASAPv1() ([]byte, error) {
-	var hip *[3]float64
+	var est *float64
 	if s.Kind == asapv1.KindHLLHIP {
-		hip = &s.HIP
+		est = &s.HIPEst
 	}
-	return marshalRegisters(s.Kind, 12, s.Registers, hip)
+	return marshalRegisters(s.Kind, 12, s.Registers, est)
 }
 
 func (s *p12Sketch) UnmarshalASAPv1(b []byte) error {
@@ -32,11 +33,11 @@ func (s *p12Sketch) UnmarshalASAPv1(b []byte) error {
 	if err != nil {
 		return err
 	}
-	regs, hip, err := unmarshalRegisters(b, kind, 12)
+	regs, est, err := unmarshalRegisters(b, kind, 12)
 	if err != nil {
 		return err
 	}
-	*s = p12Sketch{Kind: kind, Registers: regs, HIP: hip}
+	*s = p12Sketch{Kind: kind, Registers: regs, HIPEst: est}
 	return nil
 }
 
@@ -51,7 +52,6 @@ func TestASAPv1Golden(t *testing.T) {
 	for name, known := range map[string]*p12Sketch{
 		"hll_classic_p12":  {Kind: asapv1.KindHLLClassic, Registers: regs},
 		"hll_ertl_mle_p12": {Kind: asapv1.KindHLLErtlMLE, Registers: regs},
-		"hll_hip_p12":      {Kind: asapv1.KindHLLHIP, Registers: regs, HIP: [3]float64{1.5, 2.5, 3.0}},
 	} {
 		t.Run(name, func(t *testing.T) { asapv1test.CheckGolden(t, name, known, nil) })
 	}
@@ -85,10 +85,113 @@ func TestASAPv1GoldenP14(t *testing.T) {
 		v := &HyperLogLogVariant{Registers: storage.Vector1DFromSlice(regs()), Variant: HLLDataFusion}
 		asapv1test.CheckGolden(t, "hll_ertl_mle_p14", v, nil)
 	})
-	t.Run("hll_hip_p14/HyperLogLogHIP", func(t *testing.T) {
-		hip := &HyperLogLogHIP{Registers: storage.Vector1DFromSlice(regs()), kxq0: 16380.5, kxq1: 0.25, est: 4.125}
-		asapv1test.CheckGolden(t, "hll_hip_p14", hip, nil)
-	})
+}
+
+// withoutKxq rewrites retired 01 03 HIP bytes into the 01 04 bytes of the same
+// state: kind_id 01 04, payload array of 2 instead of 4, and the two float64
+// fields after the register bin (9 bytes each) removed.
+func withoutKxq(t *testing.T, retired []byte) []byte {
+	t.Helper()
+	kind, metadata, payload, err := asapv1.Split(retired)
+	if err != nil || kind != asapv1.KindHLLHIPWithKxq {
+		t.Fatalf("not a retired HIP envelope: %v %v", kind, err)
+	}
+	if payload[0] != 0x94 {
+		t.Fatalf("payload header %#x, want a fixarray of 4", payload[0])
+	}
+	est := payload[len(payload)-9:]
+	regs := payload[1 : len(payload)-27]
+	want := append(append([]byte{0x92}, regs...), est...)
+	b, err := asapv1.Encode(asapv1.KindHLLHIP, metadata, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// The retired 01 03 fixtures decode: the registers and estimate are kept,
+// kxq0 and kxq1 (1.5 / 2.5 and 16380.5 / 0.25, which no register state
+// produces) are replaced by the sums over the registers, and the sketch
+// re-encodes as 01 04 with those two fields gone.
+func TestASAPv1RetiredHIPDecodes(t *testing.T) {
+	var p12 p12Sketch
+	if err := p12.UnmarshalASAPv1(asapv1test.Golden(t, "hll_hip_p12")); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(p12.Registers, fixtureRegisters(1<<12)) || p12.HIPEst != 3.0 {
+		t.Fatalf("p12: registers or estimate differ, est %v", p12.HIPEst)
+	}
+
+	retired := asapv1test.Golden(t, "hll_hip_p14")
+	var got HyperLogLogHIP
+	if err := got.UnmarshalASAPv1(retired); err != nil {
+		t.Fatal(err)
+	}
+	regs := make([]uint8, HLLRegisterCount)
+	regs[0], regs[1], regs[8192], regs[16383] = 1, 7, 42, 51
+	want := HyperLogLogHIP{
+		Registers: storage.Vector1DFromSlice(regs),
+		kxq0:      16380 + 0.5 + math.Ldexp(1, -7),
+		kxq1:      math.Ldexp(1, -42) + math.Ldexp(1, -51),
+		est:       4.125,
+	}
+	if !reflect.DeepEqual(&got, &want) {
+		t.Fatalf("decoded %v %v %v, want %v %v %v", got.kxq0, got.kxq1, got.est, want.kxq0, want.kxq1, want.est)
+	}
+	b := marshal(t, &got)
+	if !bytes.Equal(b, withoutKxq(t, retired)) {
+		t.Fatal("retired p14 does not re-encode as the same state under 01 04")
+	}
+	var again HyperLogLogHIP
+	if err := again.UnmarshalASAPv1(b); err != nil || !reflect.DeepEqual(&again, &want) {
+		t.Fatalf("01 04 bytes do not decode back: %v", err)
+	}
+}
+
+// Decoding recomputes kxq0 and kxq1 bit for bit, so a decoded sketch that
+// keeps inserting holds the same estimate as one that never left memory. Every
+// 7th hash is placed at a rank of 32 or more so kxq1 is exercised too.
+func TestASAPv1HIPDecodeThenContinueIsExact(t *testing.T) {
+	stream := func(n, offset int) []uint64 {
+		hs := make([]uint64, n)
+		for i := range hs {
+			h := common.Hash64([]byte(fmt.Sprintf("c:%d", offset+i)))
+			if i%7 == 0 {
+				rank := 32 + uint(h>>40)%(65-HLLPrecision-31)
+				bucket := h >> HLLRegisterBits
+				h = bucket << HLLRegisterBits
+				if rank <= HLLRegisterBits {
+					h |= 1 << (HLLRegisterBits - rank)
+				}
+			}
+			hs[i] = h
+		}
+		return hs
+	}
+	for _, before := range []int{0, 1_000, 40_000} {
+		kept := NewHIP()
+		for _, h := range stream(before, 0) {
+			kept.InsertWithHash(h)
+		}
+		var restored HyperLogLogHIP
+		if err := restored.UnmarshalASAPv1(marshal(t, kept)); err != nil {
+			t.Fatal(err)
+		}
+		for _, h := range stream(40_000, before) {
+			kept.InsertWithHash(h)
+			restored.InsertWithHash(h)
+		}
+		if kept.kxq1 == 0 {
+			t.Fatal("the stream never reached a rank of 32")
+		}
+		if !reflect.DeepEqual(&restored, kept) {
+			t.Fatalf("after %d updates: est %v vs %v", before, restored.est, kept.est)
+		}
+		kxq0, kxq1 := hipKxq(kept.Registers.AsSlice())
+		if math.Float64bits(kxq0) != math.Float64bits(kept.kxq0) || math.Float64bits(kxq1) != math.Float64bits(kept.kxq1) {
+			t.Fatal("incremental kxq0/kxq1 differ from the sums over the registers")
+		}
+	}
 }
 
 func TestASAPv1RoundTripPreservesEstimates(t *testing.T) {

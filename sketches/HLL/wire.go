@@ -23,9 +23,9 @@ func checkRegisters(regs []uint8, precision uint8) error {
 	return nil
 }
 
-// marshalRegisters encodes an HLL of the given kind and precision. hip is the
-// HIP payload's kxq0, kxq1 and estimate, and is nil for every other kind.
-func marshalRegisters(kind asapv1.KindID, precision uint8, regs []uint8, hip *[3]float64) ([]byte, error) {
+// marshalRegisters encodes an HLL of the given kind and precision. hipEst is
+// the HIP payload's running estimate, and is nil for every other kind.
+func marshalRegisters(kind asapv1.KindID, precision uint8, regs []uint8, hipEst *float64) ([]byte, error) {
 	if err := checkRegisters(regs, precision); err != nil {
 		return nil, err
 	}
@@ -34,11 +34,9 @@ func marshalRegisters(kind asapv1.KindID, precision uint8, regs []uint8, hip *[3
 	md.Uint("precision", uint64(precision))
 	p := asapv1.NewEncoder()
 	if kind == asapv1.KindHLLHIP {
-		p.Array(4)
+		p.Array(2)
 		p.Bin(regs)
-		for _, v := range hip {
-			p.Float64(v)
-		}
+		p.Float64(*hipEst)
 	} else {
 		p.Array(1)
 		p.Bin(regs)
@@ -47,35 +45,41 @@ func marshalRegisters(kind asapv1.KindID, precision uint8, regs []uint8, hip *[3
 }
 
 // unmarshalRegisters decodes an HLL whose kind_id must be kind and whose
-// precision must be precision. hip is zero for every kind but HIP.
-func unmarshalRegisters(b []byte, kind asapv1.KindID, precision uint8) (regs []uint8, hip [3]float64, err error) {
+// precision must be precision. hipEst is zero for every kind but HIP. The
+// retired HIP kind 01 03 also carries kxq0 and kxq1; they are read and dropped.
+func unmarshalRegisters(b []byte, kind asapv1.KindID, precision uint8) (regs []uint8, hipEst float64, err error) {
 	md, p, err := asapv1.Open(b, kind)
 	if err != nil {
-		return nil, hip, err
+		return nil, 0, err
 	}
 	md.ExpectVersion(1)
 	md.HashSpec(asapv1.StandardProfile(), asapv1.SeedIndexCanonical)
 	md.ExpectUint("precision", uint64(precision))
 	if err := md.Finish(); err != nil {
-		return nil, hip, err
+		return nil, 0, err
 	}
-	if kind == asapv1.KindHLLHIP {
+	switch kind {
+	case asapv1.KindHLLHIP:
+		p.ExpectArray(2)
+		regs = p.Bin()
+		hipEst = p.Float64()
+	case asapv1.KindHLLHIPWithKxq:
 		p.ExpectArray(4)
 		regs = p.Bin()
-		for i := range hip {
-			hip[i] = p.Float64()
-		}
-	} else {
+		p.Float64() // kxq0, recomputed from the registers
+		p.Float64() // kxq1, recomputed from the registers
+		hipEst = p.Float64()
+	default:
 		p.ExpectArray(1)
 		regs = p.Bin()
 	}
 	if err := p.Finish(); err != nil {
-		return nil, hip, err
+		return nil, 0, err
 	}
 	if err := checkRegisters(regs, precision); err != nil {
-		return nil, hip, err
+		return nil, 0, err
 	}
-	return regs, hip, nil
+	return regs, hipEst, nil
 }
 
 // MarshalASAPv1 encodes the sketch as ASAPv1 HLL Ertl-MLE. A sampled sketch
@@ -144,21 +148,32 @@ func (h *HyperLogLogVariant) UnmarshalASAPv1(b []byte) error {
 	return nil
 }
 
-// MarshalASAPv1 encodes the sketch as ASAPv1 HLL HIP.
+// MarshalASAPv1 encodes the sketch as ASAPv1 HLL HIP (01 04): the registers
+// and the running estimate. kxq0 and kxq1 are derived from the registers and
+// are not carried.
 func (h *HyperLogLogHIP) MarshalASAPv1() ([]byte, error) {
 	if h.Registers == nil {
 		return nil, errors.New("hll: sketch has no registers")
 	}
-	return marshalRegisters(asapv1.KindHLLHIP, HLLPrecision, h.Registers.AsSlice(), &[3]float64{h.kxq0, h.kxq1, h.est})
+	return marshalRegisters(asapv1.KindHLLHIP, HLLPrecision, h.Registers.AsSlice(), &h.est)
 }
 
 // UnmarshalASAPv1 replaces the sketch with one decoded from ASAPv1 HLL HIP
-// bytes at precision HLLPrecision.
+// bytes at precision HLLPrecision: the current 01 04, or the retired 01 03,
+// whose kxq0 and kxq1 are dropped. Both are recomputed from the registers.
 func (h *HyperLogLogHIP) UnmarshalASAPv1(b []byte) error {
-	regs, hip, err := unmarshalRegisters(b, asapv1.KindHLLHIP, HLLPrecision)
+	kind, _, _, err := asapv1.Split(b)
 	if err != nil {
 		return err
 	}
-	*h = HyperLogLogHIP{Registers: storage.Vector1DFromSlice(regs), kxq0: hip[0], kxq1: hip[1], est: hip[2]}
+	if kind != asapv1.KindHLLHIPWithKxq {
+		kind = asapv1.KindHLLHIP
+	}
+	regs, est, err := unmarshalRegisters(b, kind, HLLPrecision)
+	if err != nil {
+		return err
+	}
+	kxq0, kxq1 := hipKxq(regs)
+	*h = HyperLogLogHIP{Registers: storage.Vector1DFromSlice(regs), kxq0: kxq0, kxq1: kxq1, est: est}
 	return nil
 }
