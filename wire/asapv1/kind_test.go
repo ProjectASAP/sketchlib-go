@@ -6,8 +6,8 @@ import (
 )
 
 func TestRegistry(t *testing.T) {
-	if len(registry) != 49 {
-		t.Fatalf("registry has %d ids, want 49", len(registry))
+	if len(registry) != 52 {
+		t.Fatalf("registry has %d ids, want 52", len(registry))
 	}
 	payloads := 0
 	for kind, e := range registry {
@@ -22,8 +22,8 @@ func TestRegistry(t *testing.T) {
 			t.Errorf("%v is not the delta of a registered state kind", kind)
 		}
 	}
-	if payloads != 40 {
-		t.Errorf("registry has %d ids with a payload, want 40", payloads)
+	if payloads != 43 {
+		t.Errorf("registry has %d ids with a payload, want 43", payloads)
 	}
 	cases := map[KindID]string{
 		KindHLLClassic:               "01 01 (HLL Classic)",
@@ -35,7 +35,10 @@ func TestRegistry(t *testing.T) {
 		KindDDSketch:                 "05 01 (DDSketch)",
 		KindDDSketchWithScalars:      "05 00 (DDSketch with scalars)",
 		KindDDSketchWithScalarsDelta: "05 80 (DDSketch with scalars delta)",
-		KindCSSpaceSaving:            "1f 00 (CSSpaceSaving)",
+		KindSpaceSaving:              "18 01 (Space-Saving)",
+		KindSpaceSavingWithTotal:     "18 00 (Space-Saving with total)",
+		KindCMSSpaceSavingWithTotal:  "1e 00 (CMSSpaceSaving with total)",
+		KindCSSpaceSaving:            "1f 01 (CSSpaceSaving)",
 		"\x20\x00":                   "20 00 (unregistered)",
 		"":                           " (unregistered)",
 		KindHydraUnivMon:             "07 04 (Hydra UnivMon)",
