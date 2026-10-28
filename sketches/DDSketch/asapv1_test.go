@@ -442,6 +442,16 @@ func TestBucketFedSketchMatchesTheProducer(t *testing.T) {
 	}
 }
 
+// If count ever exceeded the buckets, Quantile reads the last occupied
+// bucket, a negative one included.
+func TestQuantilePastTheBucketsReadsTheLastOccupiedBucket(t *testing.T) {
+	d := literal(testAlpha, nil, 0, []uint64{2}, 30, 0)
+	d.count += 5
+	if got, _ := d.Quantile(1); got != -d.mapping.Value(30) {
+		t.Fatalf("Quantile(1) = %v, want %v", got, -d.mapping.Value(30))
+	}
+}
+
 // TestSignedFixtureQuantilesMatchRust compares against the values Rust's
 // get_value_at_quantile returns for the decoded signed fixture; math.Pow and
 // Rust's powf can differ in the last bits, so bucket values get a tolerance.

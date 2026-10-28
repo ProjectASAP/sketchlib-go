@@ -534,7 +534,10 @@ func (d *DDSketch) Quantile(q float64) (float64, bool) {
 	rank := max(uint64(math.Ceil(q*float64(d.count))), 1)
 	rank = min(rank, d.count)
 
+	// last is the last occupied bucket walked, returned if the buckets ever
+	// held fewer samples than count says (no code path allows it).
 	var seen uint64
+	var last float64
 	if !d.negative.IsEmpty() {
 		neg := d.negative.counts.AsSlice()
 		for i := len(neg) - 1; i >= 0; i-- {
@@ -542,17 +545,20 @@ func (d *DDSketch) Quantile(q float64) (float64, bool) {
 				continue
 			}
 			seen += neg[i]
+			last = -d.mapping.Value(d.negative.offset + int32(i))
 			if seen >= rank {
-				return -d.mapping.Value(d.negative.offset + int32(i)), true
+				return last, true
 			}
 		}
 	}
-	seen += d.zeroCount
-	if seen >= rank {
-		return 0, true
+	if d.zeroCount > 0 {
+		seen += d.zeroCount
+		last = 0
+		if seen >= rank {
+			return last, true
+		}
 	}
 
-	var last float64
 	if !d.store.IsEmpty() {
 		for i, c := range d.store.counts.AsSlice() {
 			if c == 0 {
