@@ -121,6 +121,13 @@ func TestASAPv1RetiredHIPDecodes(t *testing.T) {
 	if !bytes.Equal(p12.Registers, fixtureRegisters(1<<12)) || p12.HIPEst != 3.0 {
 		t.Fatalf("p12: registers or estimate differ, est %v", p12.HIPEst)
 	}
+	if p12.Kind != asapv1.KindHLLHIPWithKxq {
+		t.Fatalf("p12: decoded kind %v", p12.Kind)
+	}
+	p12.Kind = asapv1.KindHLLHIP
+	if !bytes.Equal(marshal(t, &p12), withoutKxq(t, asapv1test.Golden(t, "hll_hip_p12"))) {
+		t.Fatal("p12 does not encode as the retired fixture's state under 01 04")
+	}
 
 	retired := asapv1test.Golden(t, "hll_hip_p14")
 	var got HyperLogLogHIP
