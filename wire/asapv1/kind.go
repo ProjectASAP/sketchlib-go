@@ -12,14 +12,18 @@ type KindID string
 // The kind_id registry. An id is allocated once and never reassigned; ids
 // without a designed payload are reserved.
 const (
-	KindHLLUnspecified       KindID = "\x01\x00" // reserved
-	KindHLLClassic           KindID = "\x01\x01"
-	KindHLLErtlMLE           KindID = "\x01\x02"
-	KindHLLHIP               KindID = "\x01\x03"
-	KindCountMin             KindID = "\x02\x00"
-	KindCMSHeap              KindID = "\x03\x00"
-	KindCountSketch          KindID = "\x04\x00"
-	KindDDSketch             KindID = "\x05\x00"
+	KindHLLUnspecified KindID = "\x01\x00" // reserved
+	KindHLLClassic     KindID = "\x01\x01"
+	KindHLLErtlMLE     KindID = "\x01\x02"
+	KindHLLHIP         KindID = "\x01\x03"
+	KindCountMin       KindID = "\x02\x00"
+	KindCMSHeap        KindID = "\x03\x00"
+	KindCountSketch    KindID = "\x04\x00"
+	KindDDSketch       KindID = "\x05\x01"
+	// KindDDSketchWithScalars is the retired DDSketch kind whose payload also
+	// carried sum / min / max: decoded with those scalars dropped, never
+	// encoded.
+	KindDDSketchWithScalars  KindID = "\x05\x00"
 	KindKLL                  KindID = "\x06\x00"
 	KindKLLDynamic           KindID = "\x06\x01"
 	KindHydraKLL             KindID = "\x07\x00"
@@ -60,6 +64,7 @@ var kindNames = map[KindID]string{
 	KindCMSHeap:              "CMSHeap",
 	KindCountSketch:          "Count Sketch",
 	KindDDSketch:             "DDSketch",
+	KindDDSketchWithScalars:  "DDSketch with scalars",
 	KindKLL:                  "KLL",
 	KindKLLDynamic:           "KLL Dynamic",
 	KindHydraKLL:             "Hydra KLL",

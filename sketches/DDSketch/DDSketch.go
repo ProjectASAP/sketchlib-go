@@ -270,7 +270,9 @@ func (b Buckets) Clone() Buckets {
 // ---------------- DDSketch ----------------
 
 // DDSketch is a relative-accuracy quantile sketch. Update records positive
-// values; negative magnitudes and zeros are held when merged or decoded.
+// values; negative magnitudes and zeros are held when merged or decoded. Its
+// state is the buckets alone: a caller that needs the sum, minimum or maximum
+// of the values keeps a separate exact aggregate.
 type DDSketch struct {
 	mapping   IndexMapping
 	store     Buckets
@@ -278,9 +280,6 @@ type DDSketch struct {
 	zeroCount uint64
 
 	count uint64
-	sum   float64
-	min   float64
-	max   float64
 
 	// gosPopulated is B — the number of currently-populated (nonzero-count)
 	// buckets — tracked incrementally by UpdateGOS for the insert-time GOS
@@ -292,10 +291,6 @@ type DDSketch struct {
 	// GOS-enabled series routes every insert through UpdateGOS exclusively
 	// and never mixes it with the plain insert path. See PopulatedBuckets.
 	gosPopulated uint32
-
-	// reps caches bucket representatives for addOneFast, direct-mapped by
-	// absolute bucket index; allocated on first use.
-	reps *[repCacheSize]repEntry
 
 	// sampler implements optional NitroSketch geometric skip-sampling. When nil
 	// (the default) every value is recorded and the sketch is byte-identical to
@@ -333,8 +328,6 @@ func (d *DDSketch) admit() bool {
 func NewDDSketch(alpha float64) *DDSketch {
 	return &DDSketch{
 		mapping: NewIndexMapping(alpha),
-		min:     math.Inf(1),
-		max:     math.Inf(-1),
 	}
 }
 
@@ -360,8 +353,6 @@ func NewDDSketchWithMaxBins(alpha float64, maxBins int32) *DDSketch {
 	return &DDSketch{
 		mapping: NewIndexMapping(alpha),
 		store:   Buckets{maxBins: maxBins},
-		min:     math.Inf(1),
-		max:     math.Inf(-1),
 	}
 }
 
@@ -379,9 +370,6 @@ func (d *DDSketch) Clear() {
 	d.negative = Buckets{}
 	d.zeroCount = 0
 	d.count = 0
-	d.sum = 0
-	d.min = math.Inf(1)
-	d.max = math.Inf(-1)
 	d.gosPopulated = 0
 }
 
@@ -415,35 +403,8 @@ func (d *DDSketch) Update(v float64) {
 	}
 
 	d.count++
-	d.addToSum(v)
-
-	if v < d.min {
-		d.min = v
-	}
-	if v > d.max {
-		d.max = v
-	}
-
 	k := d.mapping.Index(v)
 	d.store.addOne(k)
-}
-
-// addToSum advances sum, saturating at ±math.MaxFloat64 instead of overflowing.
-func (d *DDSketch) addToSum(delta float64) {
-	next := d.sum + delta
-	if math.IsInf(next, 0) {
-		next = math.Copysign(math.MaxFloat64, next)
-	}
-	d.sum = next
-}
-
-// resetScalarsIfEmpty restores the empty sum/min/max once the count reaches 0.
-func (d *DDSketch) resetScalarsIfEmpty() {
-	if d.count == 0 {
-		d.sum = 0
-		d.min = math.Inf(1)
-		d.max = math.Inf(-1)
-	}
 }
 
 // InsertWithHash implements common.Sketch.
@@ -459,20 +420,6 @@ func (d *DDSketch) GetCount() uint64 {
 
 func (d *DDSketch) Count() uint64 {
 	return d.count
-}
-
-func (d *DDSketch) Min() (float64, bool) {
-	if d.count == 0 {
-		return 0, false
-	}
-	return d.min, true
-}
-
-func (d *DDSketch) Max() (float64, bool) {
-	if d.count == 0 {
-		return 0, false
-	}
-	return d.max, true
 }
 
 // ---------------- Safe Merge ----------------
@@ -502,9 +449,6 @@ func (d *DDSketch) Merge(other common.Sketch) error {
 	if d.count == 0 {
 		// Clone fundamental fields
 		d.count = o.count
-		d.sum = o.sum
-		d.min = o.min
-		d.max = o.max
 		d.store = o.store.Clone()
 		d.negative = o.negative.Clone()
 		d.zeroCount = o.zeroCount
@@ -514,15 +458,6 @@ func (d *DDSketch) Merge(other common.Sketch) error {
 	}
 
 	d.count += o.count
-	d.addToSum(o.sum)
-
-	if o.min < d.min {
-		d.min = o.min
-	}
-	if o.max > d.max {
-		d.max = o.max
-	}
-
 	d.mergeBuckets(&d.store, &o.store)
 	d.mergeBuckets(&d.negative, &o.negative)
 	d.zeroCount += o.zeroCount
@@ -587,24 +522,22 @@ func (d *DDSketch) mergeBuckets(a *Buckets, b *Buckets) {
 
 // ---------------- Quantile ----------------
 
-// Quantile returns the value at quantile q in [0, 1], walking negative buckets
-// in descending index order, then zeros, then positive buckets ascending. Bucket
-// values are capped to [min, max]; q == 0 returns min and q == 1 returns max.
+// Quantile returns the value at quantile q in [0, 1]: the representative of
+// the bucket holding the nearest-rank order statistic ceil(q*n), clamped to
+// 1..n, walking negative buckets in descending index order, then zeros, then
+// positive buckets ascending. q == 0 and q == 1 read the lowest and highest
+// occupied buckets, within alpha of the true extremes.
 func (d *DDSketch) Quantile(q float64) (float64, bool) {
-	if d.count == 0 || q < 0 || q > 1 {
+	if d.count == 0 || !(q >= 0 && q <= 1) {
 		return 0, false
 	}
-	if q == 0 {
-		return d.min, true
-	}
-	if q == 1 {
-		return d.max, true
-	}
+	rank := max(uint64(math.Ceil(q*float64(d.count))), 1)
+	rank = min(rank, d.count)
 
-	rank := uint64(math.Ceil(q * float64(d.count)))
-	clamp := func(v float64) float64 { return math.Min(math.Max(v, d.min), d.max) }
-
+	// last is the last occupied bucket walked, returned if the buckets ever
+	// held fewer samples than count says (no code path allows it).
 	var seen uint64
+	var last float64
 	if !d.negative.IsEmpty() {
 		neg := d.negative.counts.AsSlice()
 		for i := len(neg) - 1; i >= 0; i-- {
@@ -612,14 +545,18 @@ func (d *DDSketch) Quantile(q float64) (float64, bool) {
 				continue
 			}
 			seen += neg[i]
+			last = -d.mapping.Value(d.negative.offset + int32(i))
 			if seen >= rank {
-				return clamp(-d.mapping.Value(d.negative.offset + int32(i))), true
+				return last, true
 			}
 		}
 	}
-	seen += d.zeroCount
-	if seen >= rank {
-		return 0, true
+	if d.zeroCount > 0 {
+		seen += d.zeroCount
+		last = 0
+		if seen >= rank {
+			return last, true
+		}
 	}
 
 	if !d.store.IsEmpty() {
@@ -628,12 +565,13 @@ func (d *DDSketch) Quantile(q float64) (float64, bool) {
 				continue
 			}
 			seen += c
+			last = d.mapping.Value(d.store.offset + int32(i))
 			if seen >= rank {
-				return clamp(d.mapping.Value(d.store.offset + int32(i))), true
+				return last, true
 			}
 		}
 	}
-	return d.max, true
+	return last, true
 }
 
 // QueryWithHash implements common.Sketch.
@@ -665,9 +603,6 @@ func (d *DDSketch) Clone() *DDSketch {
 		negative:     d.negative.Clone(),
 		zeroCount:    d.zeroCount,
 		count:        d.count,
-		sum:          d.sum,
-		min:          d.min,
-		max:          d.max,
 		gosPopulated: d.gosPopulated,
 	}
 }
@@ -699,11 +634,7 @@ func (d *DDSketch) PopulatedBuckets() uint32 { return d.gosPopulated }
 // back to the general ensure()+increment for a new/out-of-range bucket)
 // that also reports whether this was the bucket's first-ever touch
 // (prev==0 -> nonzero) in the SAME lookup, so the caller can maintain
-// d.gosPopulated in O(1) without a second bucket read. Unlike addOneFast,
-// this does NOT touch d.min/d.max — UpdateGOS already updates those from the
-// raw inserted value (mirroring Update's semantics) before calling this, so
-// doing it again here from the bucket's representative value would just be
-// redundant work on every first-touch bucket.
+// d.gosPopulated in O(1) without a second bucket read.
 func (d *DDSketch) addOneGOS(k int32) (newCount uint64, firstTouch bool) {
 	if !d.store.IsEmpty() {
 		idx := int(k - d.store.offset)
@@ -729,8 +660,7 @@ func (d *DDSketch) addOneGOS(k int32) (newCount uint64, firstTouch bool) {
 // adjusted to match — the local edge-side copy now reflects "accumulated
 // since this bucket was last sent", exactly like Update's running d.count
 // already does across resets) and the crossing is reported via
-// DDSketchGOSUpdate; sum/min/max return to their empty values when the count
-// reaches 0. threshold==0 disables the check entirely and behaves
+// DDSketchGOSUpdate. threshold==0 disables the check entirely and behaves
 // exactly like Update (no gosPopulated bookkeeping either — mirrors
 // CountSketch.UpdateStringGOS's threshold<=0 escape hatch), so callers can
 // toggle GOS mode without a second insert path.
@@ -747,14 +677,6 @@ func (d *DDSketch) UpdateGOS(v float64, threshold uint64) (crossed bool, update 
 	}
 	if !d.admit() {
 		return false, DDSketchGOSUpdate{}
-	}
-
-	d.addToSum(v)
-	if v < d.min {
-		d.min = v
-	}
-	if v > d.max {
-		d.max = v
 	}
 
 	if threshold == 0 {
@@ -782,7 +704,6 @@ func (d *DDSketch) UpdateGOS(v float64, threshold uint64) (crossed bool, update 
 	} else {
 		d.count = 0
 	}
-	d.resetScalarsIfEmpty()
 	d.gosPopulated--
 	return true, DDSketchGOSUpdate{Index: k, Count: newCount}
 }
@@ -819,8 +740,7 @@ func (d *DDSketch) BucketCount(k int32) uint64 {
 	return counts[idx]
 }
 
-// AddToBucket increments bucket k's count by delta, adjusts d.count, advances
-// d.sum by the bucket representative times delta, updates d.min/d.max, and
+// AddToBucket increments bucket k's count by delta, adjusts d.count, and
 // returns the new bucket count. Grows the bucket store if k
 // is outside the current range (or, when the store is maxBins-capped,
 // collapses the lowest bins — in which case k's delta lands in the
@@ -833,45 +753,7 @@ func (d *DDSketch) AddToBucket(k int32, delta uint64) uint64 {
 	counts := d.store.counts.AsMutSlice()
 	counts[idx] += delta
 	d.count += delta
-	// Use the representative of the bucket ACTUALLY written to (which may be
-	// the collapsed floor bucket, not k's own), so min/max stay consistent
-	// with what Quantile() can resolve post-collapse.
-	rep := d.mapping.Value(d.store.offset + int32(idx))
-	d.addToSum(rep * float64(delta))
-	if rep < d.min {
-		d.min = rep
-	}
-	if rep > d.max {
-		d.max = rep
-	}
 	return counts[idx]
-}
-
-const repCacheSize = 256
-
-// repEntry is one representative cache slot; v == 0 means empty.
-type repEntry struct {
-	k int32
-	v float64
-}
-
-// cachedValue returns d.mapping.Value(k) through the reps cache.
-func (d *DDSketch) cachedValue(k int32) float64 {
-	if d.reps != nil {
-		if e := &d.reps[uint32(k)%repCacheSize]; e.k == k && e.v != 0 {
-			return e.v
-		}
-	}
-	return d.fillValue(k)
-}
-
-func (d *DDSketch) fillValue(k int32) float64 {
-	if d.reps == nil {
-		d.reps = new([repCacheSize]repEntry)
-	}
-	v := d.mapping.Value(k)
-	d.reps[uint32(k)%repCacheSize] = repEntry{k: k, v: v}
-	return v
 }
 
 // addOneFast is the hot-path variant of AddToBucket(k, 1).
@@ -883,28 +765,16 @@ func (d *DDSketch) addOneFast(k int32) uint64 {
 		idx := int(k - d.store.offset)
 		counts := d.store.counts.AsMutSlice()
 		if uint(idx) < uint(len(counts)) {
-			prev := counts[idx]
 			counts[idx]++
 			d.count++
-			rep := d.cachedValue(k)
-			d.addToSum(rep)
-			if prev == 0 {
-				// First write to this bucket: initialise min/max from representative.
-				if rep < d.min {
-					d.min = rep
-				}
-				if rep > d.max {
-					d.max = rep
-				}
-			}
 			return counts[idx]
 		}
 	}
 	return d.AddToBucket(k, 1)
 }
 
-// ResetBucket zeroes bucket k and decrements d.count by the bucket's current count;
-// sum/min/max return to their empty values when the count reaches 0. Used by
+// ResetBucket zeroes bucket k and decrements d.count by the bucket's current
+// count. Used by
 // DDSketchOcto.ResetCell to drain a worker-local bucket after emitting a delta.
 func (d *DDSketch) ResetBucket(k int32) {
 	if d.store.IsEmpty() {
@@ -925,11 +795,10 @@ func (d *DDSketch) ResetBucket(k int32) {
 	} else {
 		d.count = 0
 	}
-	d.resetScalarsIfEmpty()
 }
 
 // DrainBuckets calls f(k, count) for every non-zero positive bucket, zeroes it and
-// subtracts it from d.count, resetting sum/min/max once the count reaches 0.
+// subtracts it from d.count.
 // Used by DDSketchOcto.Flush to ship worker-local sub-τ residuals at end-of-window.
 func (d *DDSketch) DrainBuckets(f func(k int32, count uint64)) {
 	if d.store.IsEmpty() {
@@ -949,7 +818,6 @@ func (d *DDSketch) DrainBuckets(f func(k int32, count uint64)) {
 	} else {
 		d.count = 0
 	}
-	d.resetScalarsIfEmpty()
 }
 
 // EachBucket calls f(k, count) for every non-zero bucket without modifying

@@ -15,8 +15,7 @@ const testAlpha = 0.01
 
 // literal builds a sketch from raw wire state, with count summed here rather
 // than by the codec.
-func literal(alpha float64, pos []uint64, posOffset int32, neg []uint64, negOffset int32,
-	zero uint64, sum, minV, maxV float64) *DDSketch {
+func literal(alpha float64, pos []uint64, posOffset int32, neg []uint64, negOffset int32, zero uint64) *DDSketch {
 	d := NewDDSketch(alpha)
 	if len(pos) > 0 {
 		d.store = Buckets{counts: storage.Vector1DFromVec(pos), offset: posOffset}
@@ -29,7 +28,6 @@ func literal(alpha float64, pos []uint64, posOffset int32, neg []uint64, negOffs
 	for _, c := range append(append([]uint64(nil), pos...), neg...) {
 		d.count += c
 	}
-	d.sum, d.min, d.max = sum, minV, maxV
 	d.gosPopulated = populatedBucketCount(&d.store)
 	return d
 }
@@ -59,39 +57,51 @@ func sameState(got, want *DDSketch) bool {
 		sameBuckets(&got.store, &want.store) &&
 		sameBuckets(&got.negative, &want.negative) &&
 		got.zeroCount == want.zeroCount &&
-		got.count == want.count &&
-		sameFloat(got.sum, want.sum) &&
-		sameFloat(got.min, want.min) &&
-		sameFloat(got.max, want.max)
+		got.count == want.count
 }
 
 func signedFixture() *DDSketch {
-	return literal(testAlpha, []uint64{3, 0, 2}, 310, []uint64{5, 1}, -208, 7, 2523.90625, -0.016, 515.0)
+	return literal(testAlpha, []uint64{3, 0, 2}, 310, []uint64{5, 1}, -208, 7)
+}
+
+func positiveFixture() *DDSketch {
+	return literal(testAlpha, []uint64{1, 0, 127, 128, 300, 65536, 4294967296}, -40, nil, 0, 0)
 }
 
 func TestASAPv1Golden(t *testing.T) {
 	cases := map[string]*DDSketch{
-		"ddsketch_empty_a001": NewDDSketch(testAlpha),
-		"ddsketch_positive_a001": literal(testAlpha, []uint64{1, 0, 127, 128, 300, 65536, 4294967296}, -40,
-			nil, 0, 0, 2181071000.0, 0.453125, 0.5078125),
-		"ddsketch_signed_a001": signedFixture(),
+		"ddsketch_buckets_empty_a001":    NewDDSketch(testAlpha),
+		"ddsketch_buckets_positive_a001": positiveFixture(),
+		"ddsketch_buckets_signed_a001":   signedFixture(),
 	}
 	for name, known := range cases {
 		t.Run(name, func(t *testing.T) { asapv1test.CheckGolden(t, name, known, sameState) })
 	}
 }
 
-func metadataVersion(t *testing.T, b []byte) uint8 {
-	t.Helper()
-	_, metadata, _, err := asapv1.Split(b)
-	if err != nil {
-		t.Fatal(err)
+// The retired 05 00 fixtures decode, with sum / min / max dropped, into the
+// state of their 05 01 twins and re-encode as those twins' bytes.
+func TestASAPv1RetiredFixturesDecodeToBucketTwins(t *testing.T) {
+	for retired, want := range map[string]*DDSketch{
+		"ddsketch_empty_a001":    NewDDSketch(testAlpha),
+		"ddsketch_positive_a001": positiveFixture(),
+		"ddsketch_signed_a001":   signedFixture(),
+	} {
+		t.Run(retired, func(t *testing.T) {
+			var got DDSketch
+			if err := got.UnmarshalASAPv1(asapv1test.Golden(t, retired)); err != nil {
+				t.Fatal(err)
+			}
+			if !sameState(&got, want) {
+				t.Fatalf("decoded state differs\n got: %+v\nwant: %+v", got, *want)
+			}
+			b, err := got.MarshalASAPv1()
+			if err != nil {
+				t.Fatal(err)
+			}
+			asapv1test.Equal(t, b, asapv1test.Golden(t, strings.Replace(retired, "ddsketch_", "ddsketch_buckets_", 1)))
+		})
 	}
-	md, err := asapv1.ReadMetadata(metadata)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return md.Version()
 }
 
 func roundTrip(t *testing.T, d *DDSketch) *DDSketch {
@@ -120,13 +130,6 @@ func TestASAPv1RoundTripAfterUpdates(t *testing.T) {
 	for i := 1; i <= 2000; i++ {
 		d.Update(float64(i) * 0.37)
 	}
-	b, err := d.MarshalASAPv1()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v := metadataVersion(t, b); v != 1 {
-		t.Fatalf("metadata_version %d, want 1", v)
-	}
 	got := roundTrip(t, d)
 	for _, q := range []float64{0, 0.01, 0.25, 0.5, 0.9, 0.99, 1} {
 		gv, _ := got.Quantile(q)
@@ -143,15 +146,15 @@ func TestASAPv1RoundTripAfterUpdates(t *testing.T) {
 
 func TestASAPv1EmptyRoundTrip(t *testing.T) {
 	got := roundTrip(t, NewDDSketch(testAlpha))
-	if _, ok := got.Min(); ok || got.Count() != 0 {
-		t.Fatalf("decoded empty sketch: count %d, min ok %v", got.Count(), ok)
+	if _, ok := got.Quantile(0); ok || got.Count() != 0 {
+		t.Fatalf("decoded empty sketch: count %d, quantile ok %v", got.Count(), ok)
 	}
 	got.Update(42)
 	if got.Count() != 1 {
 		t.Fatalf("Update after decode: count %d, want 1", got.Count())
 	}
-	if q, _ := got.Quantile(0); q != 42 {
-		t.Fatalf("min after decode and Update: %v, want 42", q)
+	if q, _ := got.Quantile(0); math.Abs(q-42) > testAlpha*42 {
+		t.Fatalf("Quantile(0) after decode and Update: %v, want 42 within alpha", q)
 	}
 }
 
@@ -166,20 +169,8 @@ func TestASAPv1ClearedSketchEncodesAsEmpty(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		asapv1test.Equal(t, got, asapv1test.Golden(t, "ddsketch_empty_a001"))
+		asapv1test.Equal(t, got, asapv1test.Golden(t, "ddsketch_buckets_empty_a001"))
 	}
-}
-
-func TestASAPv1ZeroCountAloneSelectsVersion2(t *testing.T) {
-	d := literal(testAlpha, []uint64{2}, 40, nil, 0, 3, 3, 0, 1.5)
-	b, err := d.MarshalASAPv1()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v := metadataVersion(t, b); v != 2 {
-		t.Fatalf("metadata_version %d, want 2", v)
-	}
-	roundTrip(t, d)
 }
 
 func TestASAPv1MergedRoundTrip(t *testing.T) {
@@ -193,23 +184,15 @@ func TestASAPv1MergedRoundTrip(t *testing.T) {
 	}
 	roundTrip(t, left)
 
-	signed := signedFixture()
-	if err := left.Merge(signed); err != nil {
+	if err := left.Merge(signedFixture()); err != nil {
 		t.Fatal(err)
-	}
-	b, err := left.MarshalASAPv1()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v := metadataVersion(t, b); v != 2 {
-		t.Fatalf("metadata_version %d after merging a signed sketch, want 2", v)
 	}
 	got := roundTrip(t, left)
 	if got.Count() != 400+18 || got.zeroCount != 7 {
 		t.Fatalf("merged count %d zero %d, want 418 and 7", got.Count(), got.zeroCount)
 	}
-	if lo, _ := got.Min(); lo != -0.016 {
-		t.Fatalf("merged min %v, want -0.016", lo)
+	if lo, _ := got.Quantile(0); lo != -got.mapping.Value(-207) {
+		t.Fatalf("merged Quantile(0) %v, want -Value(-207) %v", lo, -got.mapping.Value(-207))
 	}
 }
 
@@ -233,24 +216,25 @@ func TestASAPv1CollapsedStoreRoundTrip(t *testing.T) {
 
 func TestASAPv1SignedQuantileWalk(t *testing.T) {
 	var d DDSketch
-	if err := d.UnmarshalASAPv1(asapv1test.Golden(t, "ddsketch_signed_a001")); err != nil {
+	if err := d.UnmarshalASAPv1(asapv1test.Golden(t, "ddsketch_buckets_signed_a001")); err != nil {
 		t.Fatal(err)
 	}
 	if d.Count() != 18 {
 		t.Fatalf("count %d, want 18", d.Count())
 	}
 	m := d.mapping
-	// Ranks 1, 2-6, 7-13, 14-16, 17-18 fall in buckets -207, -208, zero, 310, 312;
-	// values are capped to [min, max] = [-0.016, 515].
+	// Ranks 1, 2-6, 7-13, 14-16, 17-18 fall in buckets -207, -208, zero, 310,
+	// 312; every rank reads its bucket's representative.
 	want := map[int]float64{
-		1:  -0.016,
+		1:  -m.Value(-207),
 		2:  -m.Value(-208),
 		6:  -m.Value(-208),
 		7:  0,
 		13: 0,
 		14: m.Value(310),
 		16: m.Value(310),
-		17: 515.0,
+		17: m.Value(312),
+		18: m.Value(312),
 	}
 	for rank, w := range want {
 		q := (float64(rank) - 0.5) / 18
@@ -260,42 +244,32 @@ func TestASAPv1SignedQuantileWalk(t *testing.T) {
 	}
 }
 
-func TestUpdateSumSaturates(t *testing.T) {
-	d := NewDDSketch(testAlpha)
-	v := d.mapping.MaxIndexableValue()
-	d.Update(v)
-	d.Update(v)
-	d.Update(v)
-	if d.sum != math.MaxFloat64 {
-		t.Fatalf("sum %v, want MaxFloat64", d.sum)
-	}
-	roundTrip(t, d)
-}
-
-func craft(version uint8, alpha float64, payload func(p *asapv1.Encoder)) []byte {
+func craft(kind asapv1.KindID, version uint8, alpha float64, payload func(p *asapv1.Encoder)) []byte {
 	md := asapv1.NewMetadataWriter(version)
 	md.Float64("alpha", alpha)
 	p := asapv1.NewEncoder()
 	payload(p)
-	b, err := asapv1.Marshal(asapv1.KindDDSketch, md, p)
+	b, err := asapv1.Marshal(kind, md, p)
 	if err != nil {
 		panic(err)
 	}
 	return b
 }
 
-func v1Payload(counts []uint64, offset int64, sum, minV, maxV float64) func(p *asapv1.Encoder) {
+// bucketsPayload is the 05 01 payload.
+func bucketsPayload(counts []uint64, offset int64, neg []uint64, negOffset int64, zero uint64) func(p *asapv1.Encoder) {
 	return func(p *asapv1.Encoder) {
 		p.Array(5)
 		asapv1.EncodeUints(p, counts)
 		p.Int(offset)
-		p.Float64(sum)
-		p.Float64(minV)
-		p.Float64(maxV)
+		asapv1.EncodeUints(p, neg)
+		p.Int(negOffset)
+		p.Uint(zero)
 	}
 }
 
-func v2Payload(counts []uint64, offset int64, sum, minV, maxV float64, neg []uint64, negOffset int64, zero uint64) func(p *asapv1.Encoder) {
+// scalarsPayload is the retired 05 00 payload.
+func scalarsPayload(counts []uint64, offset int64, sum, minV, maxV float64, neg []uint64, negOffset int64, zero uint64) func(p *asapv1.Encoder) {
 	return func(p *asapv1.Encoder) {
 		p.Array(8)
 		asapv1.EncodeUints(p, counts)
@@ -311,21 +285,14 @@ func v2Payload(counts []uint64, offset int64, sum, minV, maxV float64, neg []uin
 
 func TestASAPv1RejectsCraftedBytes(t *testing.T) {
 	inf := math.Inf(1)
-	valid := v1Payload([]uint64{3}, 7, 6, 1.5, 2.5)
-	foreign := func() []byte {
-		md := asapv1.NewMetadataWriter(1)
-		md.Float64("alpha", testAlpha)
-		p := asapv1.NewEncoder()
-		valid(p)
-		b, _ := asapv1.Marshal(asapv1.KindKLL, md, p)
-		return b
-	}()
+	const dd, retired = asapv1.KindDDSketch, asapv1.KindDDSketchWithScalars
+	valid := bucketsPayload([]uint64{3}, 7, nil, 0, 0)
 	withMetadata := func(write func(md *asapv1.MetadataWriter)) []byte {
 		md := asapv1.NewMetadataWriter(1)
 		write(md)
 		p := asapv1.NewEncoder()
 		valid(p)
-		b, _ := asapv1.Marshal(asapv1.KindDDSketch, md, p)
+		b, _ := asapv1.Marshal(dd, md, p)
 		return b
 	}
 
@@ -334,40 +301,33 @@ func TestASAPv1RejectsCraftedBytes(t *testing.T) {
 		b    []byte
 		want string
 	}{
-		{"foreign kind_id", foreign, ""},
-		{"metadata version 3", craft(3, testAlpha, valid), ""},
+		{"foreign kind_id", craft(asapv1.KindKLL, 1, testAlpha, valid), "kind_id"},
+		{"metadata version 2", craft(dd, 2, testAlpha, valid), ""},
 		{"unknown metadata key", withMetadata(func(md *asapv1.MetadataWriter) {
 			md.Float64("alpha", testAlpha)
 			md.Uint("bogus", 7)
 		}), ""},
 		{"missing alpha", withMetadata(func(md *asapv1.MetadataWriter) {}), ""},
-		{"alpha 0", craft(1, 0, valid), "alpha"},
-		{"alpha 1", craft(1, 1, valid), "alpha"},
-		{"alpha negative", craft(1, -0.5, valid), "alpha"},
-		{"alpha 2", craft(1, 2, valid), "alpha"},
-		{"alpha NaN", craft(1, math.NaN(), valid), "alpha"},
-		{"alpha +Inf", craft(1, inf, valid), "alpha"},
-		{"v1 with eight fields", craft(1, testAlpha, v2Payload([]uint64{3}, 7, 6, 1.5, 2.5, nil, 0, 1)), ""},
-		{"v2 with five fields", craft(2, testAlpha, valid), ""},
-		{"offset past int32", craft(1, testAlpha, v1Payload([]uint64{3}, 1<<40, 6, 1.5, 2.5)), ""},
-		{"span past int32", craft(1, testAlpha, v1Payload([]uint64{1, 1, 1, 1}, math.MaxInt32-2, 5, 1, 2)), "span past int32"},
-		{"negative span past int32", craft(2, testAlpha,
-			v2Payload([]uint64{1}, 0, 5, -2, 2, []uint64{1, 1, 1, 1}, math.MaxInt32-2, 0)), "span past int32"},
-		{"empty store at nonzero offset", craft(1, testAlpha, v1Payload(nil, 42, 0, inf, -inf)), "offset 0"},
-		{"empty negative store at nonzero offset", craft(2, testAlpha,
-			v2Payload([]uint64{1}, 0, 1, 0, 1, nil, 42, 1)), "offset 0"},
-		{"total overflow", craft(1, testAlpha, v1Payload([]uint64{math.MaxUint64, 1}, 0, 5, 1, 2)), "overflow"},
-		{"signed total overflow", craft(2, testAlpha,
-			v2Payload([]uint64{1}, 0, 5, -1, 2, []uint64{1}, 0, math.MaxUint64-1)), "overflow"},
-		{"populated with empty sentinels", craft(1, testAlpha, v1Payload([]uint64{3}, 7, 6, inf, -inf)), "finite"},
-		{"min above max", craft(1, testAlpha, v1Payload([]uint64{3}, 7, 6, 9, 2)), "out of order"},
-		{"nonpositive min", craft(1, testAlpha, v1Payload([]uint64{3}, 7, 6, 0, 2)), "out of order"},
-		{"sum below min", craft(1, testAlpha, v1Payload([]uint64{3}, 7, 0.5, 1.5, 2.5)), "out of order"},
-		{"empty with nonzero sum", craft(1, testAlpha, v1Payload(nil, 0, 5, inf, -inf)), "empty sketch"},
-		{"zero buckets with populated scalars", craft(1, testAlpha, v1Payload([]uint64{0, 0}, 7, 6, 1.5, 2.5)), "empty sketch"},
-		{"signed min above max", craft(2, testAlpha, v2Payload([]uint64{1}, 0, 5, 3, -1, []uint64{1}, 0, 0)), "above max"},
-		{"signed infinite sum", craft(2, testAlpha, v2Payload(nil, 0, inf, 0, 0, nil, 0, 1)), "finite"},
-		{"v2 positive-only sum below min", craft(2, testAlpha, v2Payload([]uint64{3}, 7, 0.5, 1.5, 2.5, nil, 0, 0)), "out of order"},
+		{"alpha 0", craft(dd, 1, 0, valid), "alpha"},
+		{"alpha 1", craft(dd, 1, 1, valid), "alpha"},
+		{"alpha negative", craft(dd, 1, -0.5, valid), "alpha"},
+		{"alpha 2", craft(dd, 1, 2, valid), "alpha"},
+		{"alpha NaN", craft(dd, 1, math.NaN(), valid), "alpha"},
+		{"alpha +Inf", craft(dd, 1, inf, valid), "alpha"},
+		{"05 01 with eight fields", craft(dd, 1, testAlpha, scalarsPayload([]uint64{3}, 7, 6, 1.5, 2.5, nil, 0, 0)), ""},
+		{"05 00 with five fields", craft(retired, 1, testAlpha, valid), ""},
+		{"offset past int32", craft(dd, 1, testAlpha, bucketsPayload([]uint64{3}, 1<<40, nil, 0, 0)), ""},
+		{"span past int32", craft(dd, 1, testAlpha, bucketsPayload([]uint64{1, 1, 1, 1}, math.MaxInt32-2, nil, 0, 0)), "span past int32"},
+		{"negative span past int32", craft(dd, 1, testAlpha,
+			bucketsPayload([]uint64{1}, 0, []uint64{1, 1, 1, 1}, math.MaxInt32-2, 0)), "span past int32"},
+		{"retired span past int32", craft(retired, 1, testAlpha,
+			scalarsPayload([]uint64{1, 1, 1, 1}, math.MaxInt32-2, 4, 1, 2, nil, 0, 0)), "span past int32"},
+		{"empty store at nonzero offset", craft(dd, 1, testAlpha, bucketsPayload(nil, 42, nil, 0, 0)), "offset 0"},
+		{"empty negative store at nonzero offset", craft(dd, 1, testAlpha,
+			bucketsPayload([]uint64{1}, 0, nil, 42, 1)), "offset 0"},
+		{"total overflow", craft(dd, 1, testAlpha, bucketsPayload([]uint64{math.MaxUint64, 1}, 0, nil, 0, 0)), "overflow"},
+		{"signed total overflow", craft(dd, 1, testAlpha,
+			bucketsPayload([]uint64{1}, 0, []uint64{1}, 0, math.MaxUint64-1)), "overflow"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -387,37 +347,50 @@ func TestASAPv1RejectsCraftedBytes(t *testing.T) {
 		})
 	}
 
-	if err := new(DDSketch).UnmarshalASAPv1(craft(1, testAlpha, valid)); err != nil {
+	if err := new(DDSketch).UnmarshalASAPv1(craft(dd, 1, testAlpha, valid)); err != nil {
 		t.Fatalf("control payload rejected: %v", err)
 	}
-	boundary := craft(1, testAlpha, v1Payload([]uint64{1, 1, 1}, math.MaxInt32-2, 5, 1, 2))
+	boundary := craft(dd, 1, testAlpha, bucketsPayload([]uint64{1, 1, 1}, math.MaxInt32-2, nil, 0, 0))
 	if err := new(DDSketch).UnmarshalASAPv1(boundary); err != nil {
 		t.Fatalf("store ending at MaxInt32 rejected: %v", err)
 	}
 }
 
-func TestASAPv1PositiveOnlyVersion2DecodesAndEncodesAsVersion1(t *testing.T) {
-	var d DDSketch
-	if err := d.UnmarshalASAPv1(craft(2, testAlpha, v2Payload([]uint64{3}, 7, 6, 1.5, 2.5, nil, 0, 0))); err != nil {
-		t.Fatal(err)
+// The retired kind's scalars are read and dropped without any check, so
+// values the old decoder refused still decode, into the buckets alone.
+func TestASAPv1RetiredScalarsAreDropped(t *testing.T) {
+	want := literal(testAlpha, []uint64{3}, 7, []uint64{1}, -2, 4)
+	for name, scalars := range map[string][3]float64{
+		"consistent":  {6, -1.5, 2.5},
+		"NaN":         {math.NaN(), math.NaN(), math.NaN()},
+		"min > max":   {0, 9, -9},
+		"empty-style": {0, math.Inf(1), math.Inf(-1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := craft(asapv1.KindDDSketchWithScalars, 1, testAlpha,
+				scalarsPayload([]uint64{3}, 7, scalars[0], scalars[1], scalars[2], []uint64{1}, -2, 4))
+			var got DDSketch
+			if err := got.UnmarshalASAPv1(b); err != nil {
+				t.Fatal(err)
+			}
+			if !sameState(&got, want) {
+				t.Fatalf("decoded state differs\n got: %+v\nwant: %+v", got, *want)
+			}
+			again, err := got.MarshalASAPv1()
+			if err != nil {
+				t.Fatal(err)
+			}
+			asapv1test.Equal(t, again, craft(asapv1.KindDDSketch, 1, testAlpha,
+				bucketsPayload([]uint64{3}, 7, []uint64{1}, -2, 4)))
+		})
 	}
-	got, err := d.MarshalASAPv1()
-	if err != nil {
-		t.Fatal(err)
-	}
-	asapv1test.Equal(t, got, craft(1, testAlpha, v1Payload([]uint64{3}, 7, 6, 1.5, 2.5)))
 }
 
 func TestASAPv1MarshalRejectsUndecodableState(t *testing.T) {
 	cases := map[string]*DDSketch{
-		"span past int32":     literal(testAlpha, []uint64{1, 1, 1, 1}, math.MaxInt32-2, nil, 0, 0, 5, 1, 2),
-		"total overflow":      literal(testAlpha, []uint64{math.MaxUint64, 1}, 0, nil, 0, 0, 5, 1, 2),
-		"infinite sum":        literal(testAlpha, []uint64{1}, 0, nil, 0, 0, math.Inf(1), 1, 2),
-		"sum below min":       literal(testAlpha, []uint64{3}, 7, nil, 0, 0, 0.5, 1.5, 2.5),
-		"drained to empty":    literal(testAlpha, []uint64{0, 0}, 7, nil, 0, 0, 6, 1.5, 2.5),
-		"signed min > max":    literal(testAlpha, []uint64{1}, 0, []uint64{1}, 0, 0, 5, 3, -1),
-		"signed span":         literal(testAlpha, []uint64{1}, 0, []uint64{1, 1, 1, 1}, math.MaxInt32-2, 0, 5, -2, 2),
-		"zero count with NaN": literal(testAlpha, nil, 0, nil, 0, 1, math.NaN(), 0, 0),
+		"span past int32": literal(testAlpha, []uint64{1, 1, 1, 1}, math.MaxInt32-2, nil, 0, 0),
+		"total overflow":  literal(testAlpha, []uint64{math.MaxUint64, 1}, 0, nil, 0, 0),
+		"signed span":     literal(testAlpha, []uint64{1}, 0, []uint64{1, 1, 1, 1}, math.MaxInt32-2, 0),
 	}
 	for name, d := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -428,21 +401,54 @@ func TestASAPv1MarshalRejectsUndecodableState(t *testing.T) {
 	}
 }
 
-func TestQuantileCapsAtCarriedMax(t *testing.T) {
+// q = 0 and q = 1 read the lowest and highest occupied buckets, within alpha
+// of the true extremes; there is no exact min / max to clamp to.
+func TestQuantileEndpointsAreWithinAlpha(t *testing.T) {
 	d := NewDDSketch(testAlpha)
-	d.Update(1.0)
-	for _, q := range []float64{0.5, 1} {
-		if got, _ := d.Quantile(q); got != 1.0 {
-			t.Fatalf("Quantile(%v) = %v, want 1.0", q, got)
+	values := []float64{0.37, 12, 15.5, 230, 1200}
+	for _, v := range values {
+		d.Update(v)
+	}
+	lo, _ := d.Quantile(0)
+	hi, _ := d.Quantile(1)
+	if lo != d.mapping.Value(d.mapping.Index(0.37)) || math.Abs(lo-0.37) > testAlpha*0.37 {
+		t.Fatalf("Quantile(0) = %v, want the bucket of 0.37 within alpha", lo)
+	}
+	if hi != d.mapping.Value(d.mapping.Index(1200)) || math.Abs(hi-1200) > testAlpha*1200 {
+		t.Fatalf("Quantile(1) = %v, want the bucket of 1200 within alpha", hi)
+	}
+	for _, q := range []float64{-0.1, 1.1, math.NaN()} {
+		if _, ok := d.Quantile(q); ok {
+			t.Fatalf("Quantile(%v) ok, want false", q)
 		}
 	}
+}
 
-	top := NewDDSketch(testAlpha)
-	v := top.mapping.LowerBound(11) * 0.9999999
-	top.Update(top.mapping.LowerBound(10))
-	top.Update(v)
-	if got, _ := top.Quantile(1); got != v {
-		t.Fatalf("Quantile(1) = %v, want max %v", got, v)
+// A sketch rebuilt from its buckets alone (the Octo aggregator path) answers
+// every quantile exactly as the sketch the values were added to.
+func TestBucketFedSketchMatchesTheProducer(t *testing.T) {
+	src := NewDDSketch(testAlpha)
+	for _, v := range []float64{12, 15.5, 9.8, 230, 14.1, 18.9, 1200} {
+		src.Update(v)
+	}
+	agg := NewDDSketch(testAlpha)
+	src.EachBucket(func(k int32, c uint64) { agg.AddToBucket(k, c) })
+	for _, q := range []float64{0, 0.25, 0.5, 0.99, 1} {
+		a, _ := agg.Quantile(q)
+		s, _ := src.Quantile(q)
+		if a != s {
+			t.Fatalf("Quantile(%v): aggregator %v, producer %v", q, a, s)
+		}
+	}
+}
+
+// If count ever exceeded the buckets, Quantile reads the last occupied
+// bucket, a negative one included.
+func TestQuantilePastTheBucketsReadsTheLastOccupiedBucket(t *testing.T) {
+	d := literal(testAlpha, nil, 0, []uint64{2}, 30, 0)
+	d.count += 5
+	if got, _ := d.Quantile(1); got != -d.mapping.Value(30) {
+		t.Fatalf("Quantile(1) = %v, want %v", got, -d.mapping.Value(30))
 	}
 }
 
@@ -451,11 +457,12 @@ func TestQuantileCapsAtCarriedMax(t *testing.T) {
 // Rust's powf can differ in the last bits, so bucket values get a tolerance.
 func TestSignedFixtureQuantilesMatchRust(t *testing.T) {
 	var d DDSketch
-	if err := d.UnmarshalASAPv1(asapv1test.Golden(t, "ddsketch_signed_a001")); err != nil {
+	if err := d.UnmarshalASAPv1(asapv1test.Golden(t, "ddsketch_buckets_signed_a001")); err != nil {
 		t.Fatal(err)
 	}
 	for q, want := range map[float64]float64{
-		0.05: -0.016, 0.1: -0.01576144762907453, 0.4: 0, 0.75: 497.77940145581556, 0.9: 515.0, 1: 515.0,
+		0: -0.016079860712490172, 0.05: -0.016079860712490172, 0.1: -0.01576144762907453, 0.4: 0,
+		0.75: 497.77940145581556, 0.9: 518.0948550403809, 1: 518.0948550403809,
 	} {
 		got, _ := d.Quantile(q)
 		if math.Abs(got-want) > 1e-13*math.Abs(want) {
@@ -471,109 +478,6 @@ func TestMappingUsesConstructorAlpha(t *testing.T) {
 			t.Errorf("alpha %v: RelativeAccuracy %v, Value(0) %v", alpha, m.RelativeAccuracy(), m.Value(0))
 		}
 	}
-}
-
-func TestASAPv1EmptiedWorkerEncodesAsEmpty(t *testing.T) {
-	fill := func() *DDSketch {
-		d := NewDDSketch(testAlpha)
-		d.Update(5)
-		d.Update(5)
-		return d
-	}
-	drained := fill()
-	drained.DrainBuckets(func(int32, uint64) {})
-	reset := fill()
-	reset.ResetBucket(reset.BucketIndex(5))
-	crossed := NewDDSketch(testAlpha)
-	crossed.UpdateGOS(5, 1)
-
-	empty := NewDDSketch(testAlpha)
-	for name, d := range map[string]*DDSketch{"DrainBuckets": drained, "ResetBucket": reset, "UpdateGOS": crossed} {
-		t.Run(name, func(t *testing.T) {
-			b, err := d.MarshalASAPv1()
-			if err != nil {
-				t.Fatalf("MarshalASAPv1: %v", err)
-			}
-			var got DDSketch
-			if err := got.UnmarshalASAPv1(b); err != nil {
-				t.Fatalf("UnmarshalASAPv1: %v", err)
-			}
-			if got.count != 0 || !sameFloat(got.sum, empty.sum) ||
-				!sameFloat(got.min, empty.min) || !sameFloat(got.max, empty.max) {
-				t.Fatalf("decoded count %d sum %v min %v max %v, want the empty state",
-					got.count, got.sum, got.min, got.max)
-			}
-		})
-	}
-}
-
-func TestASAPv1SumAfterBucketInserts(t *testing.T) {
-	d := NewDDSketch(testAlpha)
-	d.AddToBucket(10, 3)
-	d.addOneFast(10)
-	d.addOneFast(20)
-	m := d.mapping
-	want := 0.0
-	want += m.Value(10) * 3
-	want += m.Value(10)
-	want += m.Value(20)
-	got := roundTrip(t, d)
-	if !sameFloat(got.sum, want) {
-		t.Fatalf("encoded sum %v, want %v", got.sum, want)
-	}
-}
-
-func TestAddOneFastSumAcrossGrowthCollapseAndDecode(t *testing.T) {
-	check := func(t *testing.T, d *DDSketch, ks []int32) {
-		t.Helper()
-		want := d.sum
-		for _, k := range ks {
-			d.addOneFast(k)
-			want += d.mapping.Value(k)
-		}
-		if !sameFloat(d.sum, want) {
-			t.Fatalf("sum %v, want %v", d.sum, want)
-		}
-	}
-	grown := NewDDSketch(testAlpha)
-	grown.AddToBucket(0, 1)
-	check(t, grown, []int32{0, 0, 5, 5, 0})
-	grown.AddToBucket(-500, 1)
-	check(t, grown, []int32{0, -500, 0, 5, 5})
-	grown.AddToBucket(repCacheSize, 1)
-	check(t, grown, []int32{0, repCacheSize, 0, repCacheSize, -500})
-
-	collapsed := NewDDSketchWithMaxBins(testAlpha, 8)
-	collapsed.AddToBucket(0, 1)
-	check(t, collapsed, []int32{0, 3, 3})
-	collapsed.AddToBucket(100, 1)
-	check(t, collapsed, []int32{100, 95, 95, 100})
-
-	b, err := NewDDSketch(0.05).MarshalASAPv1()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := grown.UnmarshalASAPv1(b); err != nil {
-		t.Fatal(err)
-	}
-	grown.AddToBucket(5, 1)
-	check(t, grown, []int32{5, 5})
-}
-
-func TestMergeSumSaturates(t *testing.T) {
-	a, b := NewDDSketch(testAlpha), NewDDSketch(testAlpha)
-	v := a.mapping.MaxIndexableValue()
-	for _, d := range []*DDSketch{a, b} {
-		d.Update(v)
-		d.Update(v)
-	}
-	if err := a.Merge(b); err != nil {
-		t.Fatal(err)
-	}
-	if a.sum != math.MaxFloat64 {
-		t.Fatalf("merged sum %v, want MaxFloat64", a.sum)
-	}
-	roundTrip(t, a)
 }
 
 func TestASAPv1EncodesAggregatorFedByAddToBucket(t *testing.T) {
