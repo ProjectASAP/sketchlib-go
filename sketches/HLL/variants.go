@@ -151,6 +151,22 @@ func NewHIP() *HyperLogLogHIP {
 	}
 }
 
+// hipKxq returns kxq0 and kxq1 for regs: the sums of 2^-r over the registers r
+// below 32 and over those of 32 or more, the split InsertWithHash keeps them
+// in. Every term is a power of two and each sum stays within 53 bits of its
+// smallest term, so this equals the incrementally kept values bit for bit.
+func hipKxq(regs []uint8) (kxq0, kxq1 float64) {
+	for _, r := range regs {
+		term := math.Ldexp(1, -int(r))
+		if r < 32 {
+			kxq0 += term
+		} else {
+			kxq1 += term
+		}
+	}
+	return kxq0, kxq1
+}
+
 func (h *HyperLogLogHIP) TypeName() string { return "hll_hip" }
 
 func (h *HyperLogLogHIP) Update(input *common.SketchInput) {

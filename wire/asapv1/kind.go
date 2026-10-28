@@ -15,7 +15,8 @@ const (
 	KindHLLUnspecified       KindID = "\x01\x00" // reserved
 	KindHLLClassic           KindID = "\x01\x01"
 	KindHLLErtlMLE           KindID = "\x01\x02"
-	KindHLLHIP               KindID = "\x01\x03"
+	KindHLLHIPWithKxq        KindID = "\x01\x03" // retired: decoded, never encoded
+	KindHLLHIP               KindID = "\x01\x04"
 	KindCountMin             KindID = "\x02\x00"
 	KindCMSHeap              KindID = "\x03\x00"
 	KindCountSketch          KindID = "\x04\x00"
@@ -55,6 +56,7 @@ var kindNames = map[KindID]string{
 	KindHLLUnspecified:       "HLL Unspecified",
 	KindHLLClassic:           "HLL Classic",
 	KindHLLErtlMLE:           "HLL Ertl-MLE",
+	KindHLLHIPWithKxq:        "HLL HIP with kxq (retired)",
 	KindHLLHIP:               "HLL HIP",
 	KindCountMin:             "Count-Min",
 	KindCMSHeap:              "CMSHeap",

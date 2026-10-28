@@ -3,8 +3,8 @@ package asapv1
 import "testing"
 
 func TestRegistry(t *testing.T) {
-	if len(kindNames) != 37 {
-		t.Fatalf("registry has %d ids, want 37", len(kindNames))
+	if len(kindNames) != 38 {
+		t.Fatalf("registry has %d ids, want 38", len(kindNames))
 	}
 	for kind, name := range kindNames {
 		if len(kind) != 2 || name == "" {
@@ -13,6 +13,7 @@ func TestRegistry(t *testing.T) {
 	}
 	cases := map[KindID]string{
 		KindHLLClassic:   "01 01 (HLL Classic)",
+		KindHLLHIP:       "01 04 (HLL HIP)",
 		KindCountMin:     "02 00 (Count-Min)",
 		KindCSHeap:       "0a 00 (CSHeap)",
 		KindUnivMonQ:     "1a 00 (UnivMon-Q)",
