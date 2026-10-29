@@ -59,14 +59,23 @@ const (
 	KindEHUnivOptimized          KindID = "\x15\x00"
 	KindOctoSketch               KindID = "\x16\x00"
 	KindBloom                    KindID = "\x17\x00"
-	KindSpaceSaving              KindID = "\x18\x00"
-	KindCountL2HH                KindID = "\x19\x00"
-	KindUnivMonQ                 KindID = "\x1a\x00"
-	KindFoldCMS                  KindID = "\x1b\x00"
-	KindFoldCS                   KindID = "\x1c\x00"
-	KindRetired1D                KindID = "\x1d\x00"
-	KindCMSSpaceSaving           KindID = "\x1e\x00"
-	KindCSSpaceSaving            KindID = "\x1f\x00"
+	KindSpaceSaving              KindID = "\x18\x01"
+	// KindSpaceSavingWithTotal is the retired Space-Saving kind whose payload
+	// also carried total: decoded with total dropped, never encoded.
+	KindSpaceSavingWithTotal KindID = "\x18\x00"
+	KindCountL2HH            KindID = "\x19\x00"
+	KindUnivMonQ             KindID = "\x1a\x00"
+	KindFoldCMS              KindID = "\x1b\x00"
+	KindFoldCS               KindID = "\x1c\x00"
+	KindRetired1D            KindID = "\x1d\x00"
+	KindCMSSpaceSaving       KindID = "\x1e\x01"
+	// KindCMSSpaceSavingWithTotal is the retired CMSSpaceSaving kind whose
+	// summary also carried total: decoded with total dropped, never encoded.
+	KindCMSSpaceSavingWithTotal KindID = "\x1e\x00"
+	KindCSSpaceSaving           KindID = "\x1f\x01"
+	// KindCSSpaceSavingWithTotal is the retired CSSpaceSaving kind whose
+	// summary also carried total: decoded with total dropped, never encoded.
+	KindCSSpaceSavingWithTotal KindID = "\x1f\x00"
 )
 
 type kindEntry struct {
@@ -117,13 +126,16 @@ var registry = map[KindID]kindEntry{
 	KindOctoSketch:               {"OctoSketch", false},
 	KindBloom:                    {"Bloom", true},
 	KindSpaceSaving:              {"Space-Saving", true},
+	KindSpaceSavingWithTotal:     {"Space-Saving with total", true},
 	KindCountL2HH:                {"CountL2HH", true},
 	KindUnivMonQ:                 {"UnivMon-Q", true},
 	KindFoldCMS:                  {"FoldCMS", false},
 	KindFoldCS:                   {"FoldCS", false},
 	KindRetired1D:                {"retired", false},
 	KindCMSSpaceSaving:           {"CMSSpaceSaving", true},
+	KindCMSSpaceSavingWithTotal:  {"CMSSpaceSaving with total", true},
 	KindCSSpaceSaving:            {"CSSpaceSaving", true},
+	KindCSSpaceSavingWithTotal:   {"CSSpaceSaving with total", true},
 }
 
 // Name returns the registry name of k, or "" if k is not in the registry.
