@@ -6,8 +6,8 @@ import (
 )
 
 func TestRegistry(t *testing.T) {
-	if len(registry) != 52 {
-		t.Fatalf("registry has %d ids, want 52", len(registry))
+	if len(registry) != 53 {
+		t.Fatalf("registry has %d ids, want 53", len(registry))
 	}
 	payloads := 0
 	for kind, e := range registry {
@@ -22,8 +22,8 @@ func TestRegistry(t *testing.T) {
 			t.Errorf("%v is not the delta of a registered state kind", kind)
 		}
 	}
-	if payloads != 43 {
-		t.Errorf("registry has %d ids with a payload, want 43", payloads)
+	if payloads != 44 {
+		t.Errorf("registry has %d ids with a payload, want 44", payloads)
 	}
 	cases := map[KindID]string{
 		KindHLLClassic:               "01 01 (HLL Classic)",
@@ -42,6 +42,8 @@ func TestRegistry(t *testing.T) {
 		"\x20\x00":                   "20 00 (unregistered)",
 		"":                           " (unregistered)",
 		KindHydraUnivMon:             "07 04 (Hydra UnivMon)",
+		KindBloom:                    "17 01 (Bloom)",
+		KindBloomWithInserted:        "17 00 (Bloom, retired)",
 	}
 	for kind, want := range cases {
 		if got := kind.String(); got != want {
