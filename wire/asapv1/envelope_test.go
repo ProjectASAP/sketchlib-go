@@ -11,7 +11,7 @@ func TestEncodeLayout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := mustHex(t, "415341507631 01 02 0103 00000004 00000002 6d657461 706c")
+	want := mustHex(t, "415341507631 01 02 0104 00000004 00000002 6d657461 706c")
 	if !bytes.Equal(got, want) {
 		t.Fatalf("Encode = %x, want %x", got, want)
 	}
